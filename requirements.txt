@@ -14,3 +14,4 @@ celery
 redis
 python-dotenv
 alembic
+gunicorn
