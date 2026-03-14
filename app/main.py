@@ -13,7 +13,10 @@ app = FastAPI(title="BGVMS API")
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, specify the exact origins
+    allow_origins=[
+        "http://localhost:5173", # Local development
+        "https://background-verification-system.vercel.app" # Production frontend
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
