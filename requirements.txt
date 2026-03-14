@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+mysqlclient
+pymysql
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+cloudinary
+weasyprint
+pandas
+openpyxl
+celery
+redis
+python-dotenv
+alembic
