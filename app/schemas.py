@@ -213,6 +213,23 @@ class CaseAnalysisPoint(BaseModel):
     completed: int = 0
     pending: int = 0
 
+class GeoPoint(BaseModel):
+    name: str
+    value: int
+    color: str
+
+class ExecutionPoint(BaseModel):
+    subject: str
+    A: int
+    B: int = 0
+
+class ActivityLogItem(BaseModel):
+    id: int
+    icon: str
+    action: str
+    time: str
+    user: str
+
 class DashboardStats(BaseModel):
     total_applicants: int
     current_month: int = 0
@@ -230,3 +247,6 @@ class DashboardStats(BaseModel):
     today_data_entry: List[DataEntryItem] = []
     today_execution: List[CheckTypeCount] = []
     today_qc: List[CheckTypeCount] = []
+    geo_data: List[GeoPoint] = []
+    execution_stats: List[ExecutionPoint] = []
+    activity_log: List[ActivityLogItem] = []

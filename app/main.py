@@ -15,7 +15,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173", # Local development
-        "https://background-verification-system.vercel.app" # Production frontend
+        "https://background-verification-topaz.vercel.app" # Production frontend
     ],
     allow_credentials=True,
     allow_methods=["*"],
