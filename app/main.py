@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from .database import engine, Base
+from .database import engine, Base, get_db
+from sqlalchemy import text
 from . import auth_routes, customer_routes, user_routes, candidate_routes, batch_routes, case_routes, verification_routes, stats_routes, role_routes
 import os
 
@@ -36,3 +37,13 @@ app.include_router(role_routes.router)
 @app.get("/")
 async def root():
     return {"message": "Welcome to Background Verification Management System API"}
+
+@app.get("/health")
+async def health_check(db = Depends(get_db)):
+    try:
+        # Try to execute a simple query
+        db.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}
+    except Exception as e:
+        return {"status": "error", "database": str(e)}
+
