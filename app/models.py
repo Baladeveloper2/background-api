@@ -30,6 +30,7 @@ class UserRole(str, enum.Enum):
     QC = "QC"
     CUSTOMER = "CUSTOMER"
     CANDIDATE = "CANDIDATE"
+    USER = "USER"  # Generic base role for RBAC-only users
 
 class Status(str, enum.Enum):
     ACTIVE = "ACTIVE"
@@ -55,7 +56,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255))
-    role = Column(Enum(UserRole), default=UserRole.VERIFIER)
+    role = Column(Enum(UserRole), default=UserRole.USER)
     role_id = Column(String(36), ForeignKey("roles.id"), nullable=True) # New RBAC Role
     status = Column(Enum(Status), default=Status.ACTIVE)
     territory = Column(String(255), nullable=True)

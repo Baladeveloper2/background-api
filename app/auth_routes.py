@@ -39,7 +39,7 @@ def check_permissions(role: models.UserRole):
         return current_user
     return role_checker
 
-def check_module_permission(module: str, sub_module: str = None):
+def check_module_permission(module: str, sub_module: str = None, action: str = "read"):
     def permission_checker(current_user: models.User = Depends(get_current_user)):
         if current_user.role == models.UserRole.SUPER_ADMIN:
             return current_user
@@ -47,7 +47,8 @@ def check_module_permission(module: str, sub_module: str = None):
         # Combine legacy permissions and new RBAC role permissions
         perms = current_user.bvs_permissions or {}
         
-        # New Role Based Permissions (e.g. "bvs.verification": true)
+        # New Role Based Permissions
+        # Format: {"bvs.verification": {"read": true, "write": false, "delete": false}}
         role_perms = {}
         if current_user.role_rel and current_user.role_rel.permissions:
             role_perms = current_user.role_rel.permissions
@@ -56,34 +57,61 @@ def check_module_permission(module: str, sub_module: str = None):
         has_access = False
         
         if sub_module:
-            # Check legacy
-            if current_user.bvs_permissions and current_user.bvs_permissions.get(module, {}).get(sub_module):
-                has_access = True
-            
-            # Check structured RBAC
             role_key = f"{module}.{sub_module}"
-            if role_perms.get(role_key, False):
-                has_access = True
+            
+            # Check structured RBAC (Nested JSON)
+            role_module_perms = role_perms.get(role_key)
+            if isinstance(role_module_perms, dict):
+                if role_module_perms.get(action, False):
+                    has_access = True
+            elif role_module_perms is True:
+                 # Support fallback for legacy flat boolean structure during migration
+                 if action == "read":
+                     has_access = True
+
+            # Check legacy nested
+            if not has_access and current_user.bvs_permissions and current_user.bvs_permissions.get(module, {}).get(sub_module):
+                # Legacy only implies full access, or at least read access.
+                if action == "read" or action == "write": 
+                    has_access = True
                 
             if not has_access:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Access denied to {module}/{sub_module}"
+                    detail=f"Access denied: Requires '{action}' permission on {module}/{sub_module}"
                 )
         else:
-            # Check legacy module access
-            module_perms = perms.get(module, {})
-            if any(module_perms.values()):
-                has_access = True
-                
+            # Module-level check (e.g. "bms.applicants")
+            role_module_perms = role_perms.get(module)
+            
             # Check structured RBAC
-            if any(k.startswith(f"{module}.") for k, v in role_perms.items() if v):
-                has_access = True
+            if isinstance(role_module_perms, dict):
+                 if role_module_perms.get(action, False):
+                     has_access = True
+            elif role_module_perms is True:
+                 # Legacy flat fallback
+                 if action == "read":
+                     has_access = True
+            
+            # Or if it's a category and they have access to any explicit submodule action
+            if not has_access:
+                if any(k.startswith(f"{module}.") and isinstance(v, dict) and v.get(action, False) for k, v in role_perms.items()):
+                    has_access = True
+                # Legacy flat fallback for submodules
+                elif action == "read" and any(k.startswith(f"{module}.") and v is True for k, v in role_perms.items()):
+                    has_access = True
+            
+            # Check legacy module access
+            if not has_access:
+                module_perms = perms.get(module, {})
+                if any(module_perms.values()):
+                    if action == "read" or action == "write":
+                        has_access = True
                 
             if not has_access:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Access denied to {module} module"
+                    detail=f"Access denied: Requires '{action}' permission on {module} module"
                 )
                 
         return current_user
@@ -99,9 +127,21 @@ def login_for_access_token(db: Session = Depends(database.get_db), form_data: OA
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # Merged permissions: legacy bvs_permissions + assigned role permissions
+    permissions = user.bvs_permissions or {}
+    if user.role_rel and user.role_rel.permissions:
+        # Merge permissions (structured permissions like "bvs.verification": true)
+        permissions.update(user.role_rel.permissions)
+
     access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(
-        data={"sub": user.email, "role": user.role, "permissions": user.bvs_permissions}, expires_delta=access_token_expires
+        data={
+            "sub": user.email, 
+            "role": user.role, 
+            "full_name": user.full_name,
+            "permissions": permissions
+        }, 
+        expires_delta=access_token_expires
     )
 
     return {"access_token": access_token, "token_type": "bearer"}

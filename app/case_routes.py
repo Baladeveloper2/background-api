@@ -11,7 +11,7 @@ router = APIRouter(
     tags=["cases"]
 )
 
-@router.post("/", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.post("/", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 
 def create_case(case: schemas.CaseCreate, db: Session = Depends(get_db)):
     db_case = models.Case(**case.dict())
@@ -20,7 +20,7 @@ def create_case(case: schemas.CaseCreate, db: Session = Depends(get_db)):
     db.refresh(db_case)
     return db_case
 
-@router.get("/", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.get("/", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 def read_cases(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     results = db.query(
         models.Case,
@@ -38,14 +38,14 @@ def read_cases(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
         cases.append(case_dict)
     return cases
 
-@router.get("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.get("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 def read_case(case_id: str, db: Session = Depends(get_db)):
     db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
     return db_case
 
-@router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 def update_case(case_id: str, case_update: schemas.CaseBase, db: Session = Depends(get_db)):
     db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if db_case is None:

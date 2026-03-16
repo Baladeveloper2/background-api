@@ -9,8 +9,7 @@ router = APIRouter(
     tags=["candidates"]
 )
 
-@router.post("/", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("candidate", "management"))])
-
+@router.post("/", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="write"))])
 def create_candidate(candidate: schemas.CandidateCreate, db: Session = Depends(get_db)):
     db_candidate = models.Candidate(**candidate.dict())
     db.add(db_candidate)
@@ -18,18 +17,18 @@ def create_candidate(candidate: schemas.CandidateCreate, db: Session = Depends(g
     db.refresh(db_candidate)
     return db_candidate
 
-@router.get("/", response_model=List[schemas.Candidate], dependencies=[Depends(auth_routes.check_module_permission("candidate", "management"))])
+@router.get("/", response_model=List[schemas.Candidate], dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="read"))])
 def read_candidates(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.Candidate).offset(skip).limit(limit).all()
 
-@router.get("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("candidate", "management"))])
+@router.get("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="read"))])
 def read_candidate(candidate_id: str, db: Session = Depends(get_db)):
     db_candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     if db_candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return db_candidate
 
-@router.patch("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("candidate", "management"))])
+@router.patch("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="write"))])
 def update_candidate(candidate_id: str, candidate_update: schemas.CandidateBase, db: Session = Depends(get_db)):
     db_candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     if db_candidate is None:
@@ -43,8 +42,7 @@ def update_candidate(candidate_id: str, candidate_update: schemas.CandidateBase,
     db.refresh(db_candidate)
     return db_candidate
 
-@router.delete("/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(auth_routes.check_module_permission("candidate", "management"))])
-
+@router.delete("/{candidate_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="delete"))])
 def delete_candidate(candidate_id: str, db: Session = Depends(get_db)):
     db_candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     if db_candidate is None:

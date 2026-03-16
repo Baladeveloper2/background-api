@@ -11,7 +11,7 @@ router = APIRouter(
     tags=["batches"]
 )
 
-@router.post("/", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bms", "batch"))])
+@router.post("/", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
 def create_batch(batch: schemas.BatchCreate, db: Session = Depends(get_db)):
     # Auto-generate batch_no if not provided
     if not batch.batch_no:
@@ -27,7 +27,7 @@ def create_batch(batch: schemas.BatchCreate, db: Session = Depends(get_db)):
 @router.get("/summary", response_model=List[schemas.BatchSummary])
 def read_batches_summary(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(check_module_permission("bvs", "verification"))
+    current_user: models.User = Depends(check_module_permission("bvs", "verification", action="read"))
 ):
     from sqlalchemy import func
     from datetime import datetime
@@ -66,11 +66,11 @@ def read_batches_summary(
         })
     return summaries
 
-@router.get("/", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bms", "batch"))])
+@router.get("/", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
 def read_batches(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.Batch).offset(skip).limit(limit).all()
 
-@router.get("/{batch_id}", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bms", "batch"))])
+@router.get("/{batch_id}", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
 def read_batch(batch_id: str, db: Session = Depends(get_db)):
     db_batch = db.query(models.Batch).filter(models.Batch.id == batch_id).first()
     if db_batch is None:

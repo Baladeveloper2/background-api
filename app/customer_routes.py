@@ -9,7 +9,7 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 def create_customer(
     customer: schemas.CustomerCreate, 
     db: Session = Depends(database.get_db),
-    current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer"))
+    current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer", action="write"))
 ):
 
     db_customer = models.Customer(**customer.dict())
@@ -21,7 +21,7 @@ def create_customer(
 @router.get("/", response_model=List[schemas.Customer])
 def list_customers(
     db: Session = Depends(database.get_db),
-    current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer"))
+    current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer", action="read"))
 ):
 
     return db.query(models.Customer).all()

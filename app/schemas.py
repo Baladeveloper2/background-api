@@ -6,17 +6,17 @@ from .models import UserRole, Status, CaseStatus, CheckStatus
 class UserBase(BaseModel):
     email: EmailStr
     full_name: Optional[str] = None
-    role: UserRole
-    role_id: Optional[str] = None # Added for structured RBAC
+    role: Optional[UserRole] = UserRole.USER  # Now optional; role_id is the primary RBAC mechanism
+    role_id: Optional[str] = None
     status: Status = Status.ACTIVE
     territory: Optional[str] = None
     business_unit: Optional[str] = None
-    bvs_permissions: Optional[Dict[str, Dict[str, bool]]] = None
+    bvs_permissions: Optional[Dict[str, Any]] = None
 
 class RoleBase(BaseModel):
     name: str
     description: Optional[str] = None
-    permissions: Optional[Dict[str, bool]] = None
+    permissions: Optional[Dict[str, Any]] = None
 
 class RoleCreate(RoleBase):
     pass

@@ -11,7 +11,7 @@ router = APIRouter(
     tags=["verifications"]
 )
 
-@router.post("/checks", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.post("/checks", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 
 def create_verification_check(check: schemas.VerificationCheckCreate, db: Session = Depends(get_db)):
     db_check = models.VerificationCheck(**check.dict())
@@ -20,14 +20,14 @@ def create_verification_check(check: schemas.VerificationCheckCreate, db: Sessio
     db.refresh(db_check)
     return db_check
 
-@router.get("/checks", response_model=List[schemas.VerificationCheck], dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.get("/checks", response_model=List[schemas.VerificationCheck], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 def read_verification_checks(case_id: str = None, db: Session = Depends(get_db)):
     query = db.query(models.VerificationCheck)
     if case_id:
         query = query.filter(models.VerificationCheck.case_id == case_id)
     return query.all()
 
-@router.patch("/checks/{check_id}", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification"))])
+@router.patch("/checks/{check_id}", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 
 def update_verification_check(check_id: str, check_update: schemas.VerificationCheckBase, db: Session = Depends(get_db)):
     db_check = db.query(models.VerificationCheck).filter(models.VerificationCheck.id == check_id).first()
