@@ -8,8 +8,8 @@ def seed():
     # 1. Seed Modules (Capabilities)
     modules_data = [
         # Customer / Administrative Interfaces
-        {"name": "Add Customer", "code": "customer.add", "category": "Administrative Interfaces", "description": "Form to onboard new clients (Route: /customers/add)"},
-        {"name": "Customer Directory", "code": "customer.list", "category": "Administrative Interfaces", "description": "List existing customers and view profiles (Route: /customers)"},
+        {"name": "Customer Management", "code": "bms.customer", "category": "Administrative Interfaces", "description": "List and manage client profiles (Routes: /customers, /customers/add)"},
+        {"name": "Partner Management", "code": "bms.partner", "category": "Administrative Interfaces", "description": "Manage external partner institutions (Route: /partners)"},
         {"name": "MIS Reports", "code": "mis.report", "category": "Insights & Reports", "description": "Access MIS & Daily system reports (Routes: /reports, /reports/daily)"},
         {"name": "Governance Settings", "code": "admin.panel", "category": "System Core", "description": "Manage RBAC roles, modules, and user accounts (Route: /admin)"},
         
@@ -83,6 +83,7 @@ def seed():
         user = db.query(models.User).filter(models.User.email == "admin@bgvms.com").first()
         if user:
             user.role_id = admin_role.id
+            user.role = models.UserRole.SUPER_ADMIN
             db.commit()
             print(f"Assigned {user.email} to {admin_role.name} role.")
 

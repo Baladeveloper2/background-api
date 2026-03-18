@@ -156,14 +156,13 @@ class VerificationCheck(VerificationCheckBase):
 
 class CustomerBase(BaseModel):
     name: str
-    short_code: Optional[str] = None
+    city: Optional[str] = None
     contact_person: Optional[str] = None
-    email: Optional[EmailStr] = None
     phone: Optional[str] = None
+    email: Optional[EmailStr] = None
     address: Optional[str] = None
     report_format: Optional[str] = "Report Format-1 (Normal)"
-    customer_agreement: Optional[str] = None
-    package_enabled: Optional[bool] = False
+    active_status: Optional[int] = 1 # 0 for Off, 1 for On
     status: Status = Status.ACTIVE
     pricing_config: Optional[Dict[str, float]] = None
 
@@ -172,6 +171,24 @@ class CustomerCreate(CustomerBase):
 
 class Customer(CustomerBase):
     id: str
+
+    class Config:
+        from_attributes = True
+
+class PartnerBase(BaseModel):
+    name: str
+    executive_lead: Optional[str] = None
+    contact_points: Optional[str] = None
+    regional_cluster: Optional[str] = None
+    status: Status = Status.ACTIVE
+    cloud_status: Optional[str] = "ACTIVE"
+
+class PartnerCreate(PartnerBase):
+    pass
+
+class Partner(PartnerBase):
+    id: str
+    created_at: datetime
 
     class Config:
         from_attributes = True

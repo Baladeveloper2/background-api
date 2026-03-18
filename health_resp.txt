@@ -1,0 +1,40 @@
+{
+  "status": "ok",
+  "database": "connected",
+  "current_db": "defaultdb",
+  "url": "mysql+pymysql://avnadmin:AVNS_ce7C0cV_01nkFa1rYPq@dataentry-dataentry.j.aivencloud.com:14419/defaultdb",
+  "tables": [
+    "admin_role_permissions",
+    "admin_roles",
+    "admins",
+    "audit_logs",
+    "batches",
+    "candidates",
+    "cases",
+    "countries",
+    "customers",
+    "modules",
+    "partners",
+    "roles",
+    "states",
+    "users",
+    "verification_checks"
+  ],
+  "customer_columns": [
+    "('id', 'varchar(36)', 'NO', 'PRI', None, '')",
+    "('name', 'varchar(255)', 'NO', '', None, '')",
+    "('short_code', 'varchar(50)', 'YES', '', None, '')",
+    "('contact_person', 'varchar(255)', 'YES', '', None, '')",
+    "('email', 'varchar(255)', 'YES', 'UNI', None, '')",
+    "('phone', 'varchar(20)', 'YES', '', None, '')",
+    "('address', 'text', 'YES', '', None, '')",
+    "('city', 'varchar(100)', 'YES', '', None, '')",
+    "('report_format', 'varchar(100)', 'YES', '', None, '')",
+    "('customer_agreement', 'varchar(255)', 'YES', '', None, '')",
+    "('active_status', 'int', 'YES', '', '1', '')",
+    "('status', \"enum('ACTIVE','INACTIVE')\", 'YES', '', None, '')",
+    "('pricing_config', 'text', 'YES', '', None, '')"
+  ],
+  "user_query": "verifier@bgvms.com",
+  "passlib_test": true
+}

@@ -1,0 +1,294 @@
+[
+  {
+    "path": "/openapi.json",
+    "methods": [
+      "HEAD",
+      "GET"
+    ]
+  },
+  {
+    "path": "/docs",
+    "methods": [
+      "HEAD",
+      "GET"
+    ]
+  },
+  {
+    "path": "/docs/oauth2-redirect",
+    "methods": [
+      "HEAD",
+      "GET"
+    ]
+  },
+  {
+    "path": "/redoc",
+    "methods": [
+      "HEAD",
+      "GET"
+    ]
+  },
+  {
+    "path": "/auth/login",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/auth/register",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/customers/",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/customers/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/customers/{customer_id}",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/customers/{customer_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/customers/{customer_id}",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "path": "/partners/",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/partners/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/partners/{partner_id}",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/partners/{partner_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/partners/{partner_id}",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "path": "/users/",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/users/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/users/{user_id}",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/users/{user_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/users/{user_id}",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "path": "/candidates/",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/candidates/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/candidates/{candidate_id}",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/candidates/{candidate_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/candidates/{candidate_id}",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "path": "/batches/",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/batches/summary",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/batches/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/batches/{batch_id}",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/cases/",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/cases/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/cases/{case_id}",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/cases/{case_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/verifications/checks",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/verifications/checks",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/verifications/checks/{check_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/stats",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/roles",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/roles",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/roles/{role_id}",
+    "methods": [
+      "PATCH"
+    ]
+  },
+  {
+    "path": "/roles/{role_id}",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "path": "/modules",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/modules",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/modules/{module_id}",
+    "methods": [
+      "DELETE"
+    ]
+  },
+  {
+    "path": "/media/upload",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/",
+    "methods": [
+      "GET"
+    ]
+  },
+  {
+    "path": "/health",
+    "methods": [
+      "GET"
+    ]
+  }
+]

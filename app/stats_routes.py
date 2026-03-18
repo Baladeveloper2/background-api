@@ -150,14 +150,14 @@ def get_dashboard_stats(
 
         activity_log = []
         icons = {"LOGIN": "🔑", "CREATE": "📝", "DELETE": "🗑️", "UPDATE": "🔄", "BATCH": "📦"}
-        for log, email in recent_logs:
+        for idx, (log, email) in enumerate(recent_logs):
             icon = "⚡"
             for k, v in icons.items():
                 if k in log.action.upper():
                     icon = v
                     break
             activity_log.append({
-                "id": i, # use row index if id is uuid
+                "id": idx, # use loop index for stable IDs
                 "icon": icon,
                 "action": log.action,
                 "time": log.timestamp.strftime("%H:%M"),

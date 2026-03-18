@@ -1,0 +1,18 @@
+Columns in customers:
+('id', 'varchar(36)', 'NO', 'PRI', None, '')
+('name', 'varchar(255)', 'NO', '', None, '')
+('short_code', 'varchar(50)', 'YES', '', None, '')
+('contact_person', 'varchar(255)', 'YES', '', None, '')
+('email', 'varchar(255)', 'YES', 'UNI', None, '')
+('phone', 'varchar(20)', 'YES', '', None, '')
+('address', 'text', 'YES', '', None, '')
+('city', 'varchar(100)', 'YES', '', None, '')
+('report_format', 'varchar(100)', 'YES', '', None, '')
+('customer_agreement', 'varchar(255)', 'YES', '', None, '')
+('active_status', 'int', 'YES', '', '1', '')
+('status', "enum('ACTIVE','INACTIVE')", 'YES', '', None, '')
+('pricing_config', 'text', 'YES', '', None, '')
+
+Data in customers (limit 5):
+('8cf02281-5b9c-4e2f-8368-75a4261351c4', 'tet', 0)
+('da75bf8a-94e1-4de2-b39e-89436b7e5d43', 'BALAMURUGAN S', 1)

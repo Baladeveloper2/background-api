@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from .database import Base
 import enum
+from datetime import datetime
 
 class JSONEncodedDict(TypeDecorator):
     impl = Text
@@ -94,18 +95,31 @@ class Module(Base):
 
 class Customer(Base):
     __tablename__ = "customers"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String(255), nullable=False)
-    short_code = Column(String(50), nullable=True)
-    contact_person = Column(String(255))
-    email = Column(String(255), unique=True, index=True)
-    phone = Column(String(20))
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String, index=True)
+    city = Column(String, nullable=True)  # Replaces short_code
+    contact_person = Column(String)
+    phone = Column(String)
+    email = Column(String)
     address = Column(Text)
-    report_format = Column(String(100), default="Report Format-1 (Normal)")
-    customer_agreement = Column(String(255), nullable=True)
-    package_enabled = Column(Integer, default=0) # SQLite/MySQL boolean compatible
-    status = Column(Enum(Status), default=Status.ACTIVE)
+    report_format = Column(String)
+    customer_agreement = Column(String, nullable=True)
+    active_status = Column(Integer, default=1)  # 0 for Off, 1 for On (Replaces package_enabled)
+    status = Column(String, default="ACTIVE")
+    created_at = Column(DateTime, default=datetime.utcnow)
     pricing_config = Column(JSONEncodedDict) # e.g. {"employment": 100, "education": 50}
+
+class Partner(Base):
+    __tablename__ = "partners"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False) # Organization
+    executive_lead = Column(String(255))
+    contact_points = Column(String(255)) # Email/Phone or JSON
+    regional_cluster = Column(String(255))
+    status = Column(Enum(Status), default=Status.ACTIVE)
+    cloud_status = Column(String(50), default="ACTIVE")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Candidate(Base):
     __tablename__ = "candidates"

@@ -1,0 +1,13 @@
+Column: id, Type: varchar(36), Null: NO, Key: PRI, Default: None, Extra: 
+Column: name, Type: varchar(255), Null: NO, Key: , Default: None, Extra: 
+Column: short_code, Type: varchar(50), Null: YES, Key: , Default: None, Extra: 
+Column: contact_person, Type: varchar(255), Null: YES, Key: , Default: None, Extra: 
+Column: email, Type: varchar(255), Null: YES, Key: UNI, Default: None, Extra: 
+Column: phone, Type: varchar(20), Null: YES, Key: , Default: None, Extra: 
+Column: address, Type: text, Null: YES, Key: , Default: None, Extra: 
+Column: city, Type: varchar(100), Null: YES, Key: , Default: None, Extra: 
+Column: report_format, Type: varchar(100), Null: YES, Key: , Default: None, Extra: 
+Column: customer_agreement, Type: varchar(255), Null: YES, Key: , Default: None, Extra: 
+Column: active_status, Type: int, Null: YES, Key: , Default: 1, Extra: 
+Column: status, Type: enum('ACTIVE','INACTIVE'), Null: YES, Key: , Default: None, Extra: 
+Column: pricing_config, Type: text, Null: YES, Key: , Default: None, Extra: 
