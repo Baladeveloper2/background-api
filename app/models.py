@@ -1,11 +1,11 @@
 import uuid
 import json
-from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator
+from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator, Float
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from .database import Base
-import enum
+from .enums import UserRole, Status, CaseStatus, CheckStatus
+import json
 from datetime import datetime
 
 class JSONEncodedDict(TypeDecorator):
@@ -22,34 +22,23 @@ class JSONEncodedDict(TypeDecorator):
             return {}
         return json.loads(value)
 
+class JSONEncodedList(TypeDecorator):
+    impl = Text
+    cache_ok = True
 
-class UserRole(str, enum.Enum):
-    SUPER_ADMIN = "SUPER_ADMIN"
-    ADMIN = "ADMIN"
-    MANAGER = "MANAGER"
-    VERIFIER = "VERIFIER"
-    QC = "QC"
-    CUSTOMER = "CUSTOMER"
-    CANDIDATE = "CANDIDATE"
-    USER = "USER"  # Generic base role for RBAC-only users
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return '[]'
+        return json.dumps(value)
 
-class Status(str, enum.Enum):
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"
-
-class CaseStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    VERIFICATION = "VERIFICATION"
-    QC = "QC"
-    COMPLETED = "COMPLETED"
-    INSUFFICIENT = "INSUFFICIENT"
-
-class CheckStatus(str, enum.Enum):
-    GREEN = "GREEN"
-    RED = "RED"
-    AMBER = "AMBER"
-    INTERIM = "INTERIM"
-    STOP = "STOP"
+    def process_result_value(self, value, dialect):
+        if not value:
+            return []
+        try:
+            data = json.loads(value)
+            return data if isinstance(data, list) else []
+        except:
+            return []
 
 class User(Base):
     __tablename__ = "users"
@@ -128,8 +117,14 @@ class Candidate(Base):
     email = Column(String(255), index=True)
     phone = Column(String(20))
     dob = Column(Date)
+    client_emp_code = Column(String(50), nullable=True)
     address_details = Column(JSONEncodedDict)
-    documents = Column(JSONEncodedDict) # List of Cloudinary URLs/Metadata
+    gender = Column(String(20), nullable=True)
+    address = Column(Text, nullable=True)
+    documents = Column(JSONEncodedList) # List of Cloudinary URLs/Metadata
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 
 class Batch(Base):
     __tablename__ = "batches"
@@ -138,18 +133,27 @@ class Batch(Base):
     batch_no = Column(String(50), unique=True, index=True)
     upload_date = Column(DateTime(timezone=True), server_default=func.now())
     file_url = Column(String(255))
+    cases_count = Column(Integer, default=0)
+    tat_days = Column(Integer, default=10)
+    case_rate = Column(Float, default=0.0)
 
 class Case(Base):
     __tablename__ = "cases"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_ref_no = Column(String(50), unique=True, index=True)
-    customer_id = Column(String(36), ForeignKey("customers.id"))
-    candidate_id = Column(String(36), ForeignKey("candidates.id"))
+    customer_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"))
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"))
     batch_id = Column(String(36), ForeignKey("batches.id"), nullable=True)
     status = Column(Enum(CaseStatus), default=CaseStatus.PENDING)
     received_date = Column(DateTime(timezone=True), server_default=func.now())
     completed_date = Column(DateTime(timezone=True), nullable=True)
     tat_days = Column(Integer, default=0)
+
+    # Relationships
+    candidate = relationship("Candidate", backref="cases")
+    customer = relationship("Customer", backref="cases")
+    batch = relationship("Batch", backref="cases")
+    checks = relationship("VerificationCheck", backref="case")
 
 class VerificationCheck(Base):
     __tablename__ = "verification_checks"

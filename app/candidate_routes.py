@@ -29,7 +29,7 @@ def read_candidate(candidate_id: str, db: Session = Depends(get_db)):
     return db_candidate
 
 @router.patch("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="write"))])
-def update_candidate(candidate_id: str, candidate_update: schemas.CandidateBase, db: Session = Depends(get_db)):
+def update_candidate(candidate_id: str, candidate_update: schemas.CandidateUpdate, db: Session = Depends(get_db)):
     db_candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     if db_candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")

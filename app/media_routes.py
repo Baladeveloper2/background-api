@@ -27,11 +27,13 @@ async def upload_file(
         if ext not in ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png']:
             raise HTTPException(status_code=400, detail="Unsupported file format. Please upload PDF, DOC, or images.")
 
+        # Determine optimal resource type to avoid 401 Unauthorized for PDFs
+        resource_type = "raw" if ext in ['.pdf', '.doc', '.docx'] else "auto"
+
         # Upload to Cloudinary
-        # resource_type="auto" handles images and raw files (PDF/Doc)
         upload_result = cloudinary.uploader.upload(
             file.file,
-            resource_type="auto",
+            resource_type=resource_type,
             folder="bgv_documents",
             public_id=f"{os.path.splitext(file.filename)[0]}_{os.urandom(4).hex()}"
         )

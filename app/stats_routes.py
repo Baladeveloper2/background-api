@@ -29,7 +29,8 @@ def get_dashboard_stats(
         ).count()
 
         # Current month candidates
-        current_month = db.query(models.Candidate).count() # Simplified
+        first_of_month = today.replace(day=1)
+        current_month = db.query(models.Candidate).filter(models.Candidate.created_at >= first_of_month).count()
 
         # Top customer
         top_cust = db.query(
@@ -71,6 +72,16 @@ def get_dashboard_stats(
         ).group_by(models.VerificationCheck.check_type).all()
 
         today_execution = [{"type": str(row[0]), "count": int(row[1])} for row in exec_query]
+
+        # ── Today QC ──
+        qc_query = db.query(
+            models.VerificationCheck.check_type,
+            func.count(models.VerificationCheck.id)
+        ).filter(
+            models.VerificationCheck.verified_date >= today,
+            models.VerificationCheck.status == models.CheckStatus.QC_PENDING
+        ).group_by(models.VerificationCheck.check_type).all()
+        today_qc = [{"type": str(row[0]), "count": int(row[1])} for row in qc_query]
 
         # ── Today Data Entry ──
         today_data_entry = []
@@ -164,65 +175,23 @@ def get_dashboard_stats(
                 "user": email
             })
 
-        # ── Fallbacks for visual richness ──
-        if not verification_pending:
-            verification_pending = [
-                {"type": "Employment", "case": 7771, "status": "Pending", "date": today.strftime("%d-%m-%Y")},
-                {"type": "Education", "case": 7313, "status": "Pending", "date": today.strftime("%d-%m-%Y")},
-                {"type": "Residence Address", "case": 4687, "status": "Pending", "date": today.strftime("%d-%m-%Y")},
-                {"type": "Reference", "case": 2400, "status": "Pending", "date": today.strftime("%d-%m-%Y")},
-            ]
-        if not today_execution:
-            today_execution = [
-                {"type": "Employment", "count": 18}, {"type": "Education", "count": 10},
-                {"type": "Residence Address", "count": 1}, {"type": "Reference", "count": 4}
-            ]
-        if not today_data_entry:
-            today_data_entry = [{"user": "Mehala B", "count": 28, "percent": 78.0}]
-        
-        if not geo_data:
-            geo_data = [
-                {"name": "Chennai", "value": 40, "color": "#3b82f6"},
-                {"name": "Bangalore", "value": 30, "color": "#10b981"},
-                {"name": "Mumbai", "value": 20, "color": "#f59e0b"},
-                {"name": "Delhi", "value": 10, "color": "#ef4444"},
-            ]
-        
-        if not execution_stats:
-            execution_stats = [
-                {"subject": "Education", "A": 120, "B": 110},
-                {"subject": "Employment", "A": 98, "B": 130},
-                {"subject": "Identity", "A": 86, "B": 130},
-                {"subject": "Address", "A": 99, "B": 100},
-                {"subject": "Criminal", "A": 85, "B": 90},
-                {"subject": "Reference", "A": 65, "B": 85},
-            ]
-
-        if not activity_log:
-            activity_log = [
-                {"id": 1, "icon": "📝", "action": "New Applicant Registered", "time": "10:45", "user": "admin@bgvms.com"},
-                {"id": 2, "icon": "📦", "action": "Batch B-9932 uploaded", "time": "09:30", "user": "manager@bgvms.com"},
-                {"id": 3, "icon": "🔄", "action": "Case QC-112 Status Updated", "time": "08:15", "user": "qc@bgvms.com"},
-                {"id": 4, "icon": "🔑", "action": "New Session Started", "time": "07:00", "user": "verifier@bgvms.com"},
-            ]
-
         return {
-            "total_applicants": total_applicants or 141326,
-            "current_month": current_month or 1911,
-            "today_entry": today_entry or 36,
-            "today_entry_percent": 243.0,
-            "insufficient_cases": insufficient_cases or 12,
-            "interim_cases": interim_cases or 1474,
-            "total_customers": total_customers or 253,
-            "top_customer": top_customer or "SBI(236)",
-            "pending_verification": pending_verification or 142,
-            "pending_qc": pending_qc or 28,
-            "completed_today": completed_today or 15,
+            "total_applicants": total_applicants,
+            "current_month": current_month,
+            "today_entry": today_entry,
+            "today_entry_percent": 0.0,
+            "insufficient_cases": insufficient_cases,
+            "interim_cases": interim_cases,
+            "total_customers": total_customers,
+            "top_customer": top_customer,
+            "pending_verification": pending_verification,
+            "pending_qc": pending_qc,
+            "completed_today": completed_today,
             "case_analysis": case_analysis,
             "verification_pending": verification_pending,
             "today_data_entry": today_data_entry,
             "today_execution": today_execution,
-            "today_qc": today_execution, # Simplified
+            "today_qc": today_qc,
             "geo_data": geo_data,
             "execution_stats": execution_stats,
             "activity_log": activity_log

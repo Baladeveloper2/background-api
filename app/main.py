@@ -1,8 +1,15 @@
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from . import (
+    models, auth_routes, customer_routes, partner_routes, 
+    user_routes, candidate_routes, batch_routes, case_routes, 
+    verification_routes, stats_routes, role_routes, media_routes
+)
 from .database import engine, Base, get_db
 from sqlalchemy import text
-from . import models, auth_routes, customer_routes, partner_routes, user_routes, candidate_routes, batch_routes, case_routes, verification_routes, stats_routes, role_routes, media_routes, database
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from .auth_routes import limiter
 import os
 
 # Create tables
@@ -11,12 +18,16 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="BGVMS API")
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:8000",
         "https://background-verification-topaz.vercel.app",
         "https://background-verification-91d11.web.app"
     ],

@@ -14,7 +14,13 @@ connect_args = {}
 #     # For pymysql, passing an empty dict to ssl is often enough to trigger SSL
 #     connect_args["ssl"] = {} 
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+    connect_args=connect_args
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

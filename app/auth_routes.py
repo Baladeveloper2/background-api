@@ -4,7 +4,13 @@ from sqlalchemy.orm import Session
 from datetime import timedelta
 from jose import JWTError, jwt
 from . import models, schemas, auth, database
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from fastapi import Request
+import re
 import os
+
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -71,8 +77,8 @@ def check_module_permission(module: str, sub_module: str = None, action: str = "
 
             # Check legacy nested
             if not has_access and current_user.bvs_permissions and current_user.bvs_permissions.get(module, {}).get(sub_module):
-                # Legacy only implies full access, or at least read access.
-                if action == "read" or action == "write": 
+                # Legacy implies full access.
+                if action in ["read", "write", "delete"]: 
                     has_access = True
                 
             if not has_access:
@@ -105,7 +111,7 @@ def check_module_permission(module: str, sub_module: str = None, action: str = "
             if not has_access:
                 module_perms = perms.get(module, {})
                 if any(module_perms.values()):
-                    if action == "read" or action == "write":
+                    if action in ["read", "write", "delete"]:
                         has_access = True
                 
             if not has_access:
@@ -119,7 +125,8 @@ def check_module_permission(module: str, sub_module: str = None, action: str = "
 
 
 @router.post("/login", response_model=schemas.Token)
-def login_for_access_token(db: Session = Depends(database.get_db), form_data: OAuth2PasswordRequestForm = Depends()):
+@limiter.limit("5/minute")
+def login_for_access_token(request: Request, db: Session = Depends(database.get_db), form_data: OAuth2PasswordRequestForm = Depends()):
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
@@ -148,6 +155,9 @@ def login_for_access_token(db: Session = Depends(database.get_db), form_data: OA
 
 @router.post("/register", response_model=schemas.User)
 def register_user(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
+    if len(user.password) < 8 or not re.search(r"[a-zA-Z]", user.password) or not re.search(r"\d", user.password):
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long and contain both letters and numbers")
+        
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")

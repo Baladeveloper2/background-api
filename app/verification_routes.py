@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from . import models, schemas
 from .database import get_db
 
@@ -21,7 +21,7 @@ def create_verification_check(check: schemas.VerificationCheckCreate, db: Sessio
     return db_check
 
 @router.get("/checks", response_model=List[schemas.VerificationCheck], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-def read_verification_checks(case_id: str = None, db: Session = Depends(get_db)):
+def read_verification_checks(case_id: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(models.VerificationCheck)
     if case_id:
         query = query.filter(models.VerificationCheck.case_id == case_id)
@@ -29,7 +29,7 @@ def read_verification_checks(case_id: str = None, db: Session = Depends(get_db))
 
 @router.patch("/checks/{check_id}", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 
-def update_verification_check(check_id: str, check_update: schemas.VerificationCheckBase, db: Session = Depends(get_db)):
+def update_verification_check(check_id: str, check_update: schemas.VerificationCheckUpdate, db: Session = Depends(get_db)):
     db_check = db.query(models.VerificationCheck).filter(models.VerificationCheck.id == check_id).first()
     if db_check is None:
         raise HTTPException(status_code=404, detail="Check not found")

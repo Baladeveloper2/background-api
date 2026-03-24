@@ -1,7 +1,7 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from .models import UserRole, Status, CaseStatus, CheckStatus
+from app.enums import UserRole, Status, CaseStatus, CheckStatus
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -25,8 +25,7 @@ class Role(RoleBase):
     id: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ModuleBase(BaseModel):
     name: str
@@ -41,8 +40,7 @@ class Module(ModuleBase):
     id: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserCreate(UserBase):
@@ -52,8 +50,7 @@ class User(UserBase):
     id: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
     access_token: str
@@ -68,32 +65,67 @@ class CandidateBase(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     dob: Optional[date] = None
+    client_emp_code: Optional[str] = None
     address_details: Optional[Dict[str, Any]] = None
+    gender: Optional[str] = None
+    address: Optional[str] = None
     documents: Optional[List[Dict[str, Any]]] = None
+
+    @field_validator('documents', mode='before')
+    @classmethod
+    def ensure_list(cls, v: Any) -> Any:
+        if v is None:
+            return []
+        if isinstance(v, dict) and not v:
+            return []
+        if isinstance(v, dict):
+            # This should not happen for a 'documents' field but just in case
+            return []
+        return v
 
 class CandidateCreate(CandidateBase):
     pass
 
+class CandidateUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    dob: Optional[date] = None
+    client_emp_code: Optional[str] = None
+    address_details: Optional[Dict[str, Any]] = None
+    gender: Optional[str] = None
+    address: Optional[str] = None
+    documents: Optional[List[Dict[str, Any]]] = None
+
 class Candidate(CandidateBase):
     id: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class BatchBase(BaseModel):
     customer_id: str
     batch_no: Optional[str] = None
     file_url: Optional[str] = None
+    cases_count: Optional[int] = 0
+    tat_days: Optional[int] = 10
+    case_rate: Optional[float] = 0.0
 
 class BatchCreate(BatchBase):
     pass
+
+class BatchUpdate(BaseModel):
+    customer_id: Optional[str] = None
+    batch_no: Optional[str] = None
+    file_url: Optional[str] = None
+    cases_count: Optional[int] = None
+    tat_days: Optional[int] = None
+    case_rate: Optional[float] = None
 
 class Batch(BatchBase):
     id: str
     upload_date: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class BatchSummary(BaseModel):
     id: str
@@ -101,6 +133,8 @@ class BatchSummary(BaseModel):
     customer_name: str
     upload_date: datetime
     case_count: int
+    intended_cases: int
+    case_rate: float
     age_days: int
     pending_count: int
     tat: int
@@ -108,34 +142,7 @@ class BatchSummary(BaseModel):
     completed_date: Optional[datetime] = None
     status: str
 
-    class Config:
-        from_attributes = True
-
-class CaseBase(BaseModel):
-    case_ref_no: str
-    customer_id: str
-    candidate_id: str
-    batch_id: Optional[str] = None
-    status: CaseStatus = CaseStatus.PENDING
-    tat_days: int = 0
-
-class CaseCreate(CaseBase):
-    pass
-
-class Case(CaseBase):
-    id: str
-    received_date: datetime
-    completed_date: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-class CaseRead(Case):
-    candidate_name: Optional[str] = None
-    customer_name: Optional[str] = None
-
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class VerificationCheckBase(BaseModel):
     case_id: str
@@ -147,12 +154,18 @@ class VerificationCheckBase(BaseModel):
 class VerificationCheckCreate(VerificationCheckBase):
     pass
 
+class VerificationCheckUpdate(BaseModel):
+    check_type: Optional[str] = None
+    status: Optional[CheckStatus] = None
+    data: Optional[Dict[str, Any]] = None
+    verifier_remarks: Optional[str] = None
+    verified_date: Optional[datetime] = None
+
 class VerificationCheck(VerificationCheckBase):
     id: str
     verified_date: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class CustomerBase(BaseModel):
     name: str
@@ -165,6 +178,7 @@ class CustomerBase(BaseModel):
     active_status: Optional[int] = 1 # 0 for Off, 1 for On
     status: Status = Status.ACTIVE
     pricing_config: Optional[Dict[str, float]] = None
+    customer_agreement: Optional[str] = None
 
 class CustomerCreate(CustomerBase):
     pass
@@ -172,8 +186,51 @@ class CustomerCreate(CustomerBase):
 class Customer(CustomerBase):
     id: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+class CaseBase(BaseModel):
+    case_ref_no: str
+    customer_id: str
+    candidate_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    status: CaseStatus = CaseStatus.PENDING
+    tat_days: int = 0
+
+class CaseCreate(CaseBase):
+    pass
+
+class CaseUpdate(BaseModel):
+    case_ref_no: Optional[str] = None
+    customer_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    status: Optional[CaseStatus] = None
+    tat_days: Optional[int] = None
+
+class CaseCreateExtended(BaseModel):
+    batch_id: str
+    customer_id: str
+    candidate: CandidateCreate
+    services: List[str]
+    case_ref_no: Optional[str] = None
+
+class Case(CaseBase):
+    id: str
+    received_date: datetime
+    completed_date: Optional[datetime] = None
+    
+    candidate: Optional[Candidate] = None
+    customer: Optional[Customer] = None
+    checks: List[VerificationCheck] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CaseRead(Case):
+    candidate_name: Optional[str] = None
+    customer_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 class PartnerBase(BaseModel):
     name: str
@@ -190,8 +247,7 @@ class Partner(PartnerBase):
     id: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ServiceDistribution(BaseModel):
     label: str

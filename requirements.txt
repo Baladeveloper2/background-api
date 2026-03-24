@@ -16,3 +16,4 @@ python-dotenv
 alembic
 gunicorn
 email-validator
+slowapi
