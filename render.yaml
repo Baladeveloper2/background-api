@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: background-verification-api
+    runtime: python
+    rootDirectory: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
