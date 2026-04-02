@@ -6,7 +6,6 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
 from .enums import UserRole, Status, CaseStatus, CheckStatus
-import json
 from datetime import datetime
 
 class JSONEncodedDict(TypeDecorator):

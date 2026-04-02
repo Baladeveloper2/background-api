@@ -53,7 +53,7 @@ async def upload_file(
         #             "original_filename": file.filename
         #         }
         #     except Exception as fe:
-        #         print(f"Firebase upload error: {str(fe)}")
+        #         logging.error(f"Firebase upload error: {str(fe)}")
         #         pass
 
         # Default to Cloudinary
@@ -78,7 +78,7 @@ async def upload_file(
         }
     except Exception as e:
         # Log the error details here for debugging if needed
-        print(f"Cloudinary upload error: {str(e)}")
+        logging.error(f"Cloudinary upload error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to upload file to storage: {str(e)}"

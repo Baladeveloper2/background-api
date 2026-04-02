@@ -5,6 +5,10 @@ from . import models, schemas
 from .database import get_db
 import uuid
 from datetime import datetime
+from fastapi.responses import StreamingResponse
+import requests
+from pypdf import PdfWriter, PdfReader
+from io import BytesIO
 
 from .auth_routes import check_module_permission
 
@@ -165,3 +169,55 @@ def delete_case(case_id: str, db: Session = Depends(get_db)):
     db.delete(db_case)
     db.commit()
     return None
+
+@router.post("/{case_id}/merge-pdfs", dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
+def merge_pdfs(case_id: str, db: Session = Depends(get_db)):
+    db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not db_case or not db_case.candidate:
+        raise HTTPException(status_code=404, detail="Case or Candidate not found")
+    
+    docs = db_case.candidate.documents or []
+    if not docs:
+        raise HTTPException(status_code=400, detail="No documents available to merge")
+    
+    merger = PdfWriter()
+    try:
+        from PIL import Image
+    except ImportError:
+        pass
+        
+    for doc in docs:
+        url = doc.get('url')
+        if not url: continue
+        
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                if url.lower().endswith('.pdf') or 'application/pdf' in response.headers.get('content-type', ''):
+                    pdf_reader = PdfReader(BytesIO(response.content))
+                    merger.append(pdf_reader)
+                else:
+                    try:
+                        image = Image.open(BytesIO(response.content))
+                        if image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        img_pdf = BytesIO()
+                        image.save(img_pdf, format='PDF')
+                        img_pdf.seek(0)
+                        merger.append(PdfReader(img_pdf))
+                    except Exception as e:
+                        import logging
+                        logging.warning(f"Skipping non-pdf file {url}: {e}")
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to fetch {url}: {e}")
+            
+    output = BytesIO()
+    merger.write(output)
+    output.seek(0)
+    
+    return StreamingResponse(
+        output, 
+        media_type="application/pdf", 
+        headers={"Content-Disposition": f"attachment; filename=merged_case_{case_id}.pdf"}
+    )

@@ -202,6 +202,65 @@ def get_dashboard_stats(
             "activity_log": activity_log
         }
     except Exception as e:
-        print(f"ERROR IN GET_DASHBOARD_STATS: {e}")
+        import logging
+        logging.error(f"ERROR IN GET_DASHBOARD_STATS: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/daily", response_model=schemas.DailyReportResponse)
+def get_daily_report(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(check_module_permission("bms", "applicants"))
+):
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Query for cases received today, grouped by customer
+        query = db.query(
+            models.Customer.name,
+            func.count(models.Case.id).label("received"),
+            func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
+            func.sum(case((models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC]), 1), else_=0)).label("pending"),
+            func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient")
+        ).join(models.Customer, models.Case.customer_id == models.Customer.id
+        ).filter(models.Case.received_date >= today
+        ).group_by(models.Customer.name).all()
+
+        stats = []
+        total_received = 0
+        total_completed = 0
+        total_pending = 0
+        total_insufficient = 0
+
+        for row in query:
+            stat = schemas.DailyStat(
+                customer=row[0],
+                received=int(row[1] or 0),
+                completed=int(row[2] or 0),
+                pending=int(row[3] or 0),
+                insufficient=int(row[4] or 0)
+            )
+            stats.append(stat)
+            total_received += stat.received
+            total_completed += stat.completed
+            total_pending += stat.pending
+            total_insufficient += stat.insufficient
+
+        totals = schemas.DailyStat(
+            customer="TOTAL",
+            received=total_received,
+            completed=total_completed,
+            pending=total_pending,
+            insufficient=total_insufficient
+        )
+
+        return {
+            "date": today.strftime("%A, %d %B %Y"),
+            "stats": stats,
+            "totals": totals
+        }
+    except Exception as e:
+        import logging
+        logging.error(f"ERROR IN GET_DAILY_REPORT: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

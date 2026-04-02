@@ -333,3 +333,14 @@ class DashboardStats(BaseModel):
     geo_data: List[GeoPoint] = []
     execution_stats: List[ExecutionPoint] = []
     activity_log: List[ActivityLogItem] = []
+class DailyStat(BaseModel):
+    customer: str
+    received: int
+    completed: int
+    pending: int
+    insufficient: int
+
+class DailyReportResponse(BaseModel):
+    date: str
+    stats: List[DailyStat]
+    totals: DailyStat

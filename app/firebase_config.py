@@ -17,16 +17,16 @@ def initialize_firebase():
             firebase_admin.initialize_app(cred, {
                 'storageBucket': bucket_url
             })
-            print("Firebase initialized with Service Account Key.")
+            logging.info("Firebase initialized with Service Account Key.")
         else:
             # Fallback for development/testing if allowed
-            print("Warning: FIREBASE_SERVICE_ACCOUNT_KEY not found. PDF uploads may fail.")
+            logging.warning("Warning: FIREBASE_SERVICE_ACCOUNT_KEY not found. PDF uploads may fail.")
             # Initialize with default credentials if available
             try:
                 firebase_admin.initialize_app(options={
                     'storageBucket': bucket_url
                 })
-                print("Firebase initialized with default credentials.")
+                logging.info("Firebase initialized with default credentials.")
             except:
                 pass
 
