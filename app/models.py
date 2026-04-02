@@ -1,6 +1,7 @@
 import uuid
 import json
 from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator, Float
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
@@ -9,7 +10,7 @@ import json
 from datetime import datetime
 
 class JSONEncodedDict(TypeDecorator):
-    impl = Text
+    impl = MEDIUMTEXT
     cache_ok = True
 
     def process_bind_param(self, value, dialect):
@@ -23,7 +24,7 @@ class JSONEncodedDict(TypeDecorator):
         return json.loads(value)
 
 class JSONEncodedList(TypeDecorator):
-    impl = Text
+    impl = MEDIUMTEXT
     cache_ok = True
 
     def process_bind_param(self, value, dialect):
@@ -48,7 +49,7 @@ class User(Base):
     full_name = Column(String(255))
     role = Column(Enum(UserRole), default=UserRole.USER)
     role_id = Column(String(36), ForeignKey("roles.id"), nullable=True) # New RBAC Role
-    status = Column(Enum(Status), default=Status.ACTIVE)
+    status = Column(String(50), default=Status.ACTIVE)
     territory = Column(String(255), nullable=True)
     business_unit = Column(String(255), nullable=True)
     bvs_permissions = Column(JSONEncodedDict, default=lambda: {
@@ -85,17 +86,17 @@ class Module(Base):
 class Customer(Base):
     __tablename__ = "customers"
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String, index=True)
-    city = Column(String, nullable=True)  # Replaces short_code
-    contact_person = Column(String)
-    phone = Column(String)
-    email = Column(String)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), index=True)
+    city = Column(String(100), nullable=True)  # Replaces short_code
+    contact_person = Column(String(255))
+    phone = Column(String(50))
+    email = Column(String(255))
     address = Column(Text)
-    report_format = Column(String)
-    customer_agreement = Column(String, nullable=True)
+    report_format = Column(String(50))
+    customer_agreement = Column(String(255), nullable=True)
     active_status = Column(Integer, default=1)  # 0 for Off, 1 for On (Replaces package_enabled)
-    status = Column(String, default="ACTIVE")
+    status = Column(String(50), default="ACTIVE")
     created_at = Column(DateTime, default=datetime.utcnow)
     pricing_config = Column(JSONEncodedDict) # e.g. {"employment": 100, "education": 50}
 
@@ -106,7 +107,7 @@ class Partner(Base):
     executive_lead = Column(String(255))
     contact_points = Column(String(255)) # Email/Phone or JSON
     regional_cluster = Column(String(255))
-    status = Column(Enum(Status), default=Status.ACTIVE)
+    status = Column(String(50), default=Status.ACTIVE)
     cloud_status = Column(String(50), default="ACTIVE")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -144,7 +145,7 @@ class Case(Base):
     customer_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"))
     candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"))
     batch_id = Column(String(36), ForeignKey("batches.id"), nullable=True)
-    status = Column(Enum(CaseStatus), default=CaseStatus.PENDING)
+    status = Column(String(50), default=CaseStatus.PENDING)
     received_date = Column(DateTime(timezone=True), server_default=func.now())
     completed_date = Column(DateTime(timezone=True), nullable=True)
     tat_days = Column(Integer, default=0)
@@ -160,8 +161,9 @@ class VerificationCheck(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id"))
     check_type = Column(String(100)) # Education, Employment, etc.
-    status = Column(Enum(CheckStatus), default=CheckStatus.INTERIM)
+    status = Column(String(50), default=CheckStatus.INTERIM)
     data = Column(JSONEncodedDict) # Verification details
+    digital_token = Column(String(100), unique=True, nullable=True) # For candidate link
     verifier_remarks = Column(Text)
     verified_date = Column(DateTime(timezone=True), nullable=True)
 

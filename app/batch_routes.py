@@ -35,17 +35,19 @@ def read_batches_summary(
     results = db.query(
         models.Batch.id,
         models.Batch.batch_no,
+        models.Batch.customer_id,
         models.Customer.name.label("customer_name"),
         models.Batch.upload_date,
         models.Batch.cases_count,
         models.Batch.tat_days,
         models.Batch.case_rate,
+        models.Batch.file_url,
         func.count(models.Case.id).label("actual_case_count"),
         func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
         func.max(models.Case.completed_date).label("completed_date")
     ).join(models.Customer, models.Batch.customer_id == models.Customer.id)\
      .outerjoin(models.Case, models.Batch.id == models.Case.batch_id)\
-     .group_by(models.Batch.id, models.Batch.batch_no, models.Customer.name, models.Batch.upload_date, models.Batch.cases_count, models.Batch.tat_days, models.Batch.case_rate)\
+     .group_by(models.Batch.id, models.Batch.batch_no, models.Batch.customer_id, models.Customer.name, models.Batch.upload_date, models.Batch.cases_count, models.Batch.tat_days, models.Batch.case_rate, models.Batch.file_url)\
      .all()
 
     summaries = []
@@ -61,6 +63,7 @@ def read_batches_summary(
         summaries.append({
             "id": r.id,
             "batch_no": r.batch_no or f"Batch_{r.id[:8]}",
+            "customer_id": r.customer_id,
             "customer_name": r.customer_name,
             "upload_date": r.upload_date,
             "case_count": intended_cases, # Match the field the user edits
@@ -72,6 +75,7 @@ def read_batches_summary(
             "tat": r.tat_days or 10,
             "total_value": (r.case_rate or 0) * intended_cases,
             "completed_date": r.completed_date,
+            "file_url": r.file_url,
             "status": "Entry Pending" if actual_cases == 0 else "Completed" if pending == 0 else "Verification In-Progress"
         })
     return summaries

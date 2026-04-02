@@ -18,10 +18,13 @@ def get_dashboard_stats(
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         # ── KPIs ──
-        total_applicants = db.query(models.Candidate).count() or 0
+        total_candidates = db.query(models.Candidate).count() or 0
         total_customers = db.query(models.Customer).count() or 0
         insufficient_cases = db.query(models.Case).filter(models.Case.status == models.CaseStatus.INSUFFICIENT).count()
-        today_entry = db.query(models.Batch).filter(models.Batch.upload_date >= today).count()
+        # Today Entry = Count of Batches + Count of Candidates uploaded/created today
+        today_batches = db.query(models.Batch).filter(models.Batch.upload_date >= today).count()
+        today_candidates = db.query(models.Candidate).filter(models.Candidate.created_at >= today).count()
+        today_entry = today_batches + today_candidates
         
         # Interim = cases neither completed nor insufficient (PENDING + VERIFICATION + QC)
         interim_cases = db.query(models.Case).filter(
@@ -42,7 +45,9 @@ def get_dashboard_stats(
         top_customer = f"{top_cust[0]}({top_cust[1]})" if top_cust else ""
 
         # Pending verification & QC
-        pending_verification = db.query(models.Case).filter(models.Case.status == models.CaseStatus.VERIFICATION).count()
+        pending_verification = db.query(models.Case).filter(
+            models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION])
+        ).count()
         pending_qc = db.query(models.Case).filter(models.Case.status == models.CaseStatus.QC).count()
         completed_today = db.query(models.Case).filter(
             models.Case.status == models.CaseStatus.COMPLETED,
@@ -176,14 +181,14 @@ def get_dashboard_stats(
             })
 
         return {
-            "total_applicants": total_applicants,
+            "total_candidates": total_candidates,
             "current_month": current_month,
             "today_entry": today_entry,
-            "today_entry_percent": 0.0,
+            "today_entry_percent": round((today_entry / total_candidates * 100), 1) if total_candidates > 0 else 0.0,
             "insufficient_cases": insufficient_cases,
             "interim_cases": interim_cases,
-            "total_customers": total_customers,
-            "top_customer": top_customer,
+            "total_clients": total_customers,
+            "top_client": top_customer,
             "pending_verification": pending_verification,
             "pending_qc": pending_qc,
             "completed_today": completed_today,

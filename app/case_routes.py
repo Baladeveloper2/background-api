@@ -63,7 +63,8 @@ def read_cases(status: Optional[models.CaseStatus] = None, skip: int = 0, limit:
     query = db.query(models.Case).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
-        joinedload(models.Case.checks)
+        joinedload(models.Case.checks),
+        joinedload(models.Case.batch)
     )
     
     if status:
@@ -80,6 +81,13 @@ def read_cases(status: Optional[models.CaseStatus] = None, skip: int = 0, limit:
             case_data.candidate_name = case.candidate.name
         if case.customer:
             case_data.customer_name = case.customer.name
+        
+        # Populate TAT and Batch Date from batch if linked
+        if case.batch:
+            if not case_data.tat_days:
+                case_data.tat_days = case.batch.tat_days
+            case_data.batch_date = case.batch.upload_date
+            
         cases_read.append(case_data)
         
     return cases_read

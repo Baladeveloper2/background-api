@@ -130,6 +130,7 @@ class Batch(BatchBase):
 class BatchSummary(BaseModel):
     id: str
     batch_no: str
+    customer_id: str
     customer_name: str
     upload_date: datetime
     case_count: int
@@ -140,7 +141,8 @@ class BatchSummary(BaseModel):
     tat: int
     total_value: float
     completed_date: Optional[datetime] = None
-    status: str
+    file_url: Optional[str] = None
+    status: str = "Entry Pending"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -149,6 +151,7 @@ class VerificationCheckBase(BaseModel):
     check_type: str
     status: CheckStatus = CheckStatus.INTERIM
     data: Optional[Dict[str, Any]] = None
+    digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
 
 class VerificationCheckCreate(VerificationCheckBase):
@@ -158,12 +161,17 @@ class VerificationCheckUpdate(BaseModel):
     check_type: Optional[str] = None
     status: Optional[CheckStatus] = None
     data: Optional[Dict[str, Any]] = None
+    digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
     verified_date: Optional[datetime] = None
 
 class VerificationCheck(VerificationCheckBase):
     id: str
     verified_date: Optional[datetime] = None
+    case_ref: Optional[str] = None
+    candidate_name: Optional[str] = None
+    customer_name: Optional[str] = None
+    given_address: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -185,6 +193,7 @@ class CustomerCreate(CustomerBase):
 
 class Customer(CustomerBase):
     id: str
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -228,6 +237,7 @@ class Case(CaseBase):
 class CaseRead(Case):
     candidate_name: Optional[str] = None
     customer_name: Optional[str] = None
+    batch_date: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -304,14 +314,14 @@ class ActivityLogItem(BaseModel):
     user: str
 
 class DashboardStats(BaseModel):
-    total_applicants: int
+    total_candidates: int
     current_month: int = 0
     today_entry: int
     today_entry_percent: float = 0
     insufficient_cases: int
     interim_cases: int = 0
-    total_customers: int
-    top_customer: str = ""
+    total_clients: int
+    top_client: str = ""
     pending_verification: int = 0
     pending_qc: int = 0
     completed_today: int = 0

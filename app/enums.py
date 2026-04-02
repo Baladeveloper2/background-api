@@ -26,5 +26,6 @@ class CheckStatus(str, enum.Enum):
     RED = "RED"
     AMBER = "AMBER"
     INTERIM = "INTERIM"
+    VERIFICATION = "VERIFICATION"
     STOP = "STOP"
     QC_PENDING = "QC_PENDING"
