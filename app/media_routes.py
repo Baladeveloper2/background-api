@@ -1,14 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+import fastapi
+import logging
 import cloudinary
 import cloudinary.uploader
+import cloudinary.utils
 from .auth_routes import get_current_user
 from .models import User
 import os
+import logging
 
 router = APIRouter(prefix="/media", tags=["media"])
 
 # Initializing Cloudinary
-import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -35,31 +38,8 @@ async def upload_file(
         if ext not in ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png']:
             raise HTTPException(status_code=400, detail="Unsupported file format. Please upload PDF, DOC, or images.")
 
-        # Cloudinary initialization is handled globally or via CLOUDINARY_URL in .env
-        # The cloud name dfrfq0ch8 is confirmed working.
-        
-        # NOTE: Firebase migration is paused, prioritizing Cloudinary as requested.
-        # if ext in ['.pdf', '.doc', '.docx']:
-        #     try:
-        #         from .firebase_config import get_firebase_bucket
-        #         bucket = get_firebase_bucket()
-        #         blob_path = f"bgv_documents/{os.path.splitext(file.filename)[0]}_{os.urandom(4).hex()}{ext}"
-        #         blob = bucket.blob(blob_path)
-        #         blob.upload_from_file(file.file, content_type=file.content_type)
-        #         blob.make_public()
-        #         return {
-        #             "url": blob.public_url,
-        #             "storage_provider": "firebase",
-        #             "original_filename": file.filename
-        #         }
-        #     except Exception as fe:
-        #         logging.error(f"Firebase upload error: {str(fe)}")
-        #         pass
-
-        # Default to Cloudinary
+        # Default to Cloudinary auto resource type (picks 'image' for PDF to allow transformations)
         resource_type = "auto"
-        if ext in ['.pdf', '.doc', '.docx']:
-            resource_type = "raw"
         
         # Ensure we are at the start of the file
         await file.seek(0)
@@ -68,18 +48,44 @@ async def upload_file(
             file.file,
             resource_type=resource_type,
             folder="bgv_documents",
-            public_id=f"{os.path.splitext(file.filename)[0]}_{os.urandom(4).hex()}"
+            public_id=f"{os.path.splitext(file.filename)[0]}_{os.urandom(4).hex()}",
+            type="upload" # Explicitly set to public upload
         )
 
         return {
             "url": upload_result.get("secure_url"),
+            "public_id": upload_result.get("public_id"),
+            "resource_type": upload_result.get("resource_type"),
             "storage_provider": "cloudinary",
             "original_filename": file.filename
         }
     except Exception as e:
-        # Log the error details here for debugging if needed
         logging.error(f"Cloudinary upload error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to upload file to storage: {str(e)}"
         )
+
+@router.get("/get-url")
+def get_signed_url(
+    public_id: str,
+    resource_type: str = "image",
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generates a signed URL for a private or restricted Cloudinary asset.
+    """
+    try:
+        # Generate a signed URL that expires in 1 hour
+        # Note: cloudinary_url returns a tuple (url, options)
+        logging.info(f"Signing URL for: {public_id}, resource_type: {resource_type}")
+        url, options = cloudinary.utils.cloudinary_url(
+            public_id,
+            resource_type=resource_type,
+            secure=True,
+            sign_url=True
+        )
+        return {"url": url}
+    except Exception as e:
+        logging.error(f"Error generating signed URL: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate signed URL")

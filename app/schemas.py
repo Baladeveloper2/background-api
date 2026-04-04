@@ -138,6 +138,7 @@ class BatchSummary(BaseModel):
     case_rate: float
     age_days: int
     pending_count: int
+    completed_count: int
     tat: int
     total_value: float
     completed_date: Optional[datetime] = None

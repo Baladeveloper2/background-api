@@ -44,6 +44,7 @@ def read_batches_summary(
         models.Batch.file_url,
         func.count(models.Case.id).label("actual_case_count"),
         func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
         func.max(models.Case.completed_date).label("completed_date")
     ).join(models.Customer, models.Batch.customer_id == models.Customer.id)\
      .outerjoin(models.Case, models.Batch.id == models.Case.batch_id)\
@@ -72,11 +73,12 @@ def read_batches_summary(
             "case_rate": r.case_rate or 0,
             "age_days": age,
             "pending_count": pending,
+            "completed_count": int(r.completed_count or 0),
             "tat": r.tat_days or 10,
             "total_value": (r.case_rate or 0) * intended_cases,
             "completed_date": r.completed_date,
             "file_url": r.file_url,
-            "status": "Entry Pending" if actual_cases == 0 else "Completed" if pending == 0 else "Verification In-Progress"
+            "status": "Entry Pending" if (actual_cases == 0 or actual_cases < intended_cases) else "Completed" if pending == 0 else "Verification In-Progress"
         })
     return summaries
 
