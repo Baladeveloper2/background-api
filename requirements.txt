@@ -18,3 +18,5 @@ gunicorn
 email-validator
 slowapi
 firebase-admin
+pypdf
+Pillow
