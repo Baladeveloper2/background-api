@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDirectory: .
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app
+    startCommand: gunicorn -w 2 -k uvicorn.workers.UvicornWorker app.main:app --preload
     envVars:
       - key: DATABASE_URL
         sync: false

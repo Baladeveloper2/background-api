@@ -30,6 +30,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         token_data = schemas.TokenData(email=email)
     except JWTError:
         raise credentials_exception
+    except Exception:
+        raise credentials_exception
+
     user = db.query(models.User).filter(models.User.email == token_data.email).first()
     if user is None:
         raise credentials_exception
@@ -37,12 +40,26 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def check_permissions(role: models.UserRole):
     def role_checker(current_user: models.User = Depends(get_current_user)):
-        if current_user.role != role and current_user.role != models.UserRole.SUPER_ADMIN:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="The user doesn't have enough privileges"
-            )
-        return current_user
+        # Normalize roles for robust comparison
+        user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        target_role_str = str(role.value if hasattr(role, 'value') else role).upper()
+        super_admin_str = models.UserRole.SUPER_ADMIN.value
+
+        # Allow if legacy role matches or user is super admin
+        if user_role_str == target_role_str or user_role_str == super_admin_str:
+            return current_user
+        
+        # Cross-check granular RBAC for ADMIN routes
+        if role == models.UserRole.ADMIN:
+            role_perms = current_user.role_rel.permissions if current_user.role_rel else {}
+            # admin.panel or admin.* implies admin role capability
+            if role_perms.get("admin.panel") or role_perms.get("admin"):
+                return current_user
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The user doesn't have enough privileges"
+        )
     return role_checker
 
 def check_module_permission(module: str, sub_module: str = None, action: str = "read"):
@@ -134,11 +151,12 @@ def login_for_access_token(request: Request, db: Session = Depends(database.get_
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # Merged permissions: legacy bvs_permissions + assigned role permissions
-    permissions = user.bvs_permissions or {}
-    if user.role_rel and user.role_rel.permissions:
-        # Merge permissions (structured permissions like "bvs.verification": true)
-        permissions.update(user.role_rel.permissions)
+    # Modern RBAC: If a role is assigned, use its permissions. 
+    # Legacy fallback: Only use bvs_permissions if no role_id is present.
+    if user.role_id and user.role_rel:
+        permissions = (user.role_rel.permissions or {}).copy()
+    else:
+        permissions = (user.bvs_permissions or {}).copy()
 
     access_token_expires = timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = auth.create_access_token(

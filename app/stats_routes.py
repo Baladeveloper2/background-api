@@ -18,18 +18,25 @@ def get_dashboard_stats(
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         # ── KPIs ──
-        total_candidates = db.query(models.Candidate).count() or 0
-        total_customers = db.query(models.Customer).count() or 0
-        insufficient_cases = db.query(models.Case).filter(models.Case.status == models.CaseStatus.INSUFFICIENT).count()
-        # Today Entry = Count of Batches + Count of Candidates uploaded/created today
+        # ── KPIs ──
+        total_candidates = db.query(models.Candidate).count()
+        total_customers = db.query(models.Customer).count()
+        
+        # Combine Case status counts into one query
+        status_counts = dict(db.query(
+            models.Case.status, 
+            func.count(models.Case.id)
+        ).group_by(models.Case.status).all())
+        
+        insufficient_cases = status_counts.get(models.CaseStatus.INSUFFICIENT, 0)
+        
+        # Today Entry
         today_batches = db.query(models.Batch).filter(models.Batch.upload_date >= today).count()
         today_candidates = db.query(models.Candidate).filter(models.Candidate.created_at >= today).count()
         today_entry = today_batches + today_candidates
         
         # Interim = cases neither completed nor insufficient (PENDING + VERIFICATION + QC)
-        interim_cases = db.query(models.Case).filter(
-            models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC])
-        ).count()
+        interim_cases = sum(status_counts.get(s, 0) for s in [models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC])
 
         # Current month candidates
         first_of_month = today.replace(day=1)
@@ -45,10 +52,8 @@ def get_dashboard_stats(
         top_customer = f"{top_cust[0]}({top_cust[1]})" if top_cust else ""
 
         # Pending verification & QC
-        pending_verification = db.query(models.Case).filter(
-            models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION])
-        ).count()
-        pending_qc = db.query(models.Case).filter(models.Case.status == models.CaseStatus.QC).count()
+        pending_verification = status_counts.get(models.CaseStatus.PENDING, 0) + status_counts.get(models.CaseStatus.VERIFICATION, 0)
+        pending_qc = status_counts.get(models.CaseStatus.QC, 0)
         completed_today = db.query(models.Case).filter(
             models.Case.status == models.CaseStatus.COMPLETED,
             models.Case.completed_date >= today
@@ -93,27 +98,41 @@ def get_dashboard_stats(
         if today_entry > 0:
             today_data_entry = [{"user": current_user.full_name or current_user.email, "count": today_entry, "percent": 100.0}]
 
-        # ── Case Analysis (monthly trend) ──
+        # ── Case Analysis (monthly trend) - OPTIMIZED: Use Database Grouping ──
         twelve_months_ago = today - timedelta(days=365)
-        raw_stats = db.query(
-            models.Case.received_date,
+        # We group by month and status in the DB
+        # Note: MySQL/SQLite date formatting differs, but func.strftime works for both in a limited way
+        # Since this is for Render (PostgreSQL or MySQL usually), we'll try a generic approach or formatting
+        
+        # Simple approach: Fetch all counts grouped by month and status
+        # For simplicity and compatibility, we'll fetch aggregated data
+        monthly_stats = db.query(
+            func.count(models.Case.id),
+            models.Case.status,
+            func.year(models.Case.received_date),
+            func.month(models.Case.received_date)
+        ).filter(models.Case.received_date >= twelve_months_ago
+        ).group_by(
+            func.year(models.Case.received_date),
+            func.month(models.Case.received_date),
             models.Case.status
-        ).filter(models.Case.received_date >= twelve_months_ago).all()
+        ).all()
 
         grouped = {}
-        # Ensure we have at least the last 6 months represented (even with 0s)
+        # Ensure we have at least the last 6 months represented
         for i in range(5, -1, -1):
             d = today - timedelta(days=30 * i)
             m_key = d.strftime("%b %Y")
             grouped[m_key] = {"total": 0, "completed": 0, "sort_key": d.replace(day=1)}
 
-        for r_date, status in raw_stats:
-            m_key = r_date.strftime("%b %Y")
+        for count, status, year, month in monthly_stats:
+            d = datetime(year, month, 1)
+            m_key = d.strftime("%b %Y")
             if m_key not in grouped:
-                grouped[m_key] = {"total": 0, "completed": 0, "sort_key": r_date.replace(day=1)}
-            grouped[m_key]["total"] += 1
+                grouped[m_key] = {"total": 0, "completed": 0, "sort_key": d}
+            grouped[m_key]["total"] += count
             if status == models.CaseStatus.COMPLETED:
-                grouped[m_key]["completed"] += 1
+                grouped[m_key]["completed"] += count
 
         case_analysis = []
         sorted_keys = sorted(grouped.keys(), key=lambda k: grouped[k]["sort_key"])

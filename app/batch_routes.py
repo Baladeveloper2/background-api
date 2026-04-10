@@ -11,7 +11,7 @@ router = APIRouter(
     tags=["batches"]
 )
 
-@router.post("/", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
+@router.post("", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
 def create_batch(batch: schemas.BatchCreate, db: Session = Depends(get_db)):
     # Auto-generate batch_no if not provided
     if not batch.batch_no:
@@ -82,7 +82,7 @@ def read_batches_summary(
         })
     return summaries
 
-@router.get("/", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
+@router.get("", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
 def read_batches(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.Batch).offset(skip).limit(limit).all()
 
@@ -113,8 +113,11 @@ def delete_batch(batch_id: str, db: Session = Depends(get_db)):
     if db_batch is None:
         raise HTTPException(status_code=404, detail="Batch not found")
     
-    # Delete associated cases to allow cascade deletion of the batch
-    db.query(models.Case).filter(models.Case.batch_id == batch_id).delete(synchronize_session=False)
+    # Manual cleanup to avoid IntegrityErrors with existing DB constraints
+    case_ids = [c.id for c in db.query(models.Case.id).filter(models.Case.batch_id == batch_id).all()]
+    if case_ids:
+        db.query(models.VerificationCheck).filter(models.VerificationCheck.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(models.Case).filter(models.Case.id.in_(case_ids)).delete(synchronize_session=False)
         
     db.delete(db_batch)
     db.commit()

@@ -6,6 +6,7 @@ class UserRole(str, enum.Enum):
     MANAGER = "MANAGER"
     VERIFIER = "VERIFIER"
     QC = "QC"
+    QA = "QA"
     CUSTOMER = "CUSTOMER"
     CANDIDATE = "CANDIDATE"
     USER = "USER"  # Generic base role for RBAC-only users

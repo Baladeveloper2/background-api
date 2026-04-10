@@ -51,13 +51,7 @@ class User(Base):
     status = Column(String(50), default=Status.ACTIVE)
     territory = Column(String(255), nullable=True)
     business_unit = Column(String(255), nullable=True)
-    bvs_permissions = Column(JSONEncodedDict, default=lambda: {
-        "bms": {"applicants": True, "customer": True, "batch": True},
-        "bvs": {"verification": True, "qc": True, "data_entry": True},
-        "candidate": {"management": True},
-        "mis": {"report": True},
-        "admin": {"panel": True}
-    })
+    bvs_permissions = Column(JSONEncodedDict, default=lambda: {})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
@@ -122,7 +116,7 @@ class Candidate(Base):
     gender = Column(String(20), nullable=True)
     address = Column(Text, nullable=True)
     documents = Column(JSONEncodedList) # List of Cloudinary URLs/Metadata
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 
@@ -143,33 +137,36 @@ class Case(Base):
     case_ref_no = Column(String(50), unique=True, index=True)
     customer_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"))
     candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"))
-    batch_id = Column(String(36), ForeignKey("batches.id"), nullable=True)
-    status = Column(String(50), default=CaseStatus.PENDING)
-    received_date = Column(DateTime(timezone=True), server_default=func.now())
-    completed_date = Column(DateTime(timezone=True), nullable=True)
+    batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True)
+    status = Column(String(50), default=CaseStatus.PENDING, index=True)
+    assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    received_date = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
 
     # Relationships
     candidate = relationship("Candidate", backref="cases")
     customer = relationship("Customer", backref="cases")
     batch = relationship("Batch", backref="cases")
-    checks = relationship("VerificationCheck", backref="case")
+    assigned_user = relationship("User", foreign_keys=[assigned_to])
+    checks = relationship("VerificationCheck", back_populates="case", cascade="all, delete-orphan")
 
 class VerificationCheck(Base):
     __tablename__ = "verification_checks"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    case_id = Column(String(36), ForeignKey("cases.id"))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"))
+    case = relationship("Case", back_populates="checks")
     check_type = Column(String(100)) # Education, Employment, etc.
-    status = Column(String(50), default=CheckStatus.INTERIM)
+    status = Column(String(50), default=CheckStatus.INTERIM, index=True)
     data = Column(JSONEncodedDict) # Verification details
     digital_token = Column(String(100), unique=True, nullable=True) # For candidate link
     verifier_remarks = Column(Text)
-    verified_date = Column(DateTime(timezone=True), nullable=True)
+    verified_date = Column(DateTime(timezone=True), nullable=True, index=True)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"))
-    action = Column(String(255))
+    action = Column(String(255), index=True)
     details = Column(Text)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)

@@ -12,6 +12,13 @@ class UserBase(BaseModel):
     territory: Optional[str] = None
     business_unit: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
+    
+    @field_validator('status', 'role', mode='before')
+    @classmethod
+    def uppercase_enums(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.upper()
+        return v
 
 class RoleBase(BaseModel):
     name: str
@@ -45,6 +52,17 @@ class Module(ModuleBase):
 
 class UserCreate(UserBase):
     password: str
+
+class UserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    full_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    role_id: Optional[str] = None
+    status: Optional[Status] = None
+    territory: Optional[str] = None
+    business_unit: Optional[str] = None
+    bvs_permissions: Optional[Dict[str, Any]] = None
+    password: Optional[str] = None
 
 class User(UserBase):
     id: str
@@ -155,6 +173,13 @@ class VerificationCheckBase(BaseModel):
     digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
 
+    @field_validator('status', mode='before')
+    @classmethod
+    def uppercase_check_status(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
 class VerificationCheckCreate(VerificationCheckBase):
     pass
 
@@ -188,6 +213,13 @@ class CustomerBase(BaseModel):
     status: Status = Status.ACTIVE
     pricing_config: Optional[Dict[str, float]] = None
     customer_agreement: Optional[str] = None
+    
+    @field_validator('status', mode='before')
+    @classmethod
+    def uppercase_status(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.upper()
+        return v
 
 class CustomerCreate(CustomerBase):
     pass
@@ -199,12 +231,20 @@ class Customer(CustomerBase):
     model_config = ConfigDict(from_attributes=True)
 
 class CaseBase(BaseModel):
-    case_ref_no: str
+    case_ref_no: Optional[str] = None
     customer_id: str
     candidate_id: Optional[str] = None
     batch_id: Optional[str] = None
     status: CaseStatus = CaseStatus.PENDING
     tat_days: int = 0
+    assigned_to: Optional[str] = None
+    
+    @field_validator('status', mode='before')
+    @classmethod
+    def uppercase_case_status(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.upper()
+        return v
 
 class CaseCreate(CaseBase):
     pass
@@ -239,6 +279,8 @@ class CaseRead(Case):
     candidate_name: Optional[str] = None
     customer_name: Optional[str] = None
     batch_date: Optional[datetime] = None
+    batch_no: Optional[str] = None
+    assigned_user_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -250,6 +292,13 @@ class PartnerBase(BaseModel):
     regional_cluster: Optional[str] = None
     status: Status = Status.ACTIVE
     cloud_status: Optional[str] = "ACTIVE"
+    
+    @field_validator('status', mode='before')
+    @classmethod
+    def uppercase_partner_status(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.upper()
+        return v
 
 class PartnerCreate(PartnerBase):
     pass

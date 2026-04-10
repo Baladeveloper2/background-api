@@ -5,7 +5,7 @@ from . import models, schemas, database, auth_routes
 
 router = APIRouter(prefix="/partners", tags=["partners"])
 
-@router.post("/", response_model=schemas.Partner)
+@router.post("", response_model=schemas.Partner)
 def create_partner(
     partner: schemas.PartnerCreate, 
     db: Session = Depends(database.get_db),
@@ -17,7 +17,7 @@ def create_partner(
     db.refresh(db_partner)
     return db_partner
 
-@router.get("/", response_model=List[schemas.Partner])
+@router.get("", response_model=List[schemas.Partner])
 def list_partners(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth_routes.check_module_permission("bms", "partner", action="read"))

@@ -10,6 +10,7 @@ from sqlalchemy import text
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .auth_routes import limiter
+from fastapi.middleware.gzip import GZipMiddleware
 import os
 
 # Create tables
@@ -21,13 +22,18 @@ app = FastAPI(title="BGVMS API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Add Gzip compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "http://localhost:8000",
+        "http://[::1]:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
         "https://background-verification-topaz.vercel.app",
         "https://background-verification-91d11.web.app"
     ],
@@ -48,7 +54,7 @@ app.include_router(stats_routes.router)
 app.include_router(role_routes.router)
 app.include_router(media_routes.router)
 
-@app.get("/")
+@app.get("")
 async def root():
     return {"message": "Welcome to Background Verification Management System API"}
 
