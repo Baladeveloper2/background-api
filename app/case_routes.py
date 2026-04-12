@@ -63,10 +63,12 @@ def create_case_full(case_data: schemas.CaseCreateExtended, db: Session = Depend
 
     # 3. Create Verification Checks
     for service in case_data.services:
+        rate = case_data.check_rates.get(service, 0.0) if case_data.check_rates else 0.0
         db_check = models.VerificationCheck(
             case_id=db_case.id,
             check_type=service,
-            status=models.CheckStatus.INTERIM
+            status=models.CheckStatus.INTERIM,
+            rate=rate
         )
         db.add(db_check)
     
@@ -74,24 +76,56 @@ def create_case_full(case_data: schemas.CaseCreateExtended, db: Session = Depend
     db.refresh(db_case)
     return db_case
 
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import joinedload, selectinload, contains_eager
 
 @router.get("", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-def read_cases(status: Optional[models.CaseStatus] = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+def read_cases(
+    status: Optional[models.CaseStatus] = None, 
+    batch_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    search: Optional[str] = None,
+    search_name: Optional[str] = None,
+    search_ref: Optional[str] = None,
+    skip: int = 0, 
+    limit: int = 200, 
+    db: Session = Depends(get_db)
+):
+    from sqlalchemy import or_
     # 1. Base query for cases with their relationships
-    query = db.query(models.Case).options(
-        joinedload(models.Case.candidate),
+    # Use outer join to avoid hiding cases during name searches
+    query = db.query(models.Case).outerjoin(models.Case.candidate).options(
+        contains_eager(models.Case.candidate),
         joinedload(models.Case.customer),
-        selectinload(models.Case.checks),
         joinedload(models.Case.batch),
-        joinedload(models.Case.assigned_user)
+        joinedload(models.Case.assigned_user),
+        selectinload(models.Case.checks)
     )
     
     if status:
         query = query.filter(models.Case.status == status)
     
+    if batch_id:
+        query = query.filter(models.Case.batch_id == batch_id)
+        
+    if customer_id:
+        query = query.filter(models.Case.customer_id == customer_id)
+        
+    if search:
+        query = query.filter(
+            or_(
+                models.Case.case_ref_no.ilike(f"%{search}%"),
+                models.Candidate.name.ilike(f"%{search}%")
+            )
+        )
+    
+    if search_name:
+        query = query.filter(models.Candidate.name.ilike(f"%{search_name}%"))
+    
+    if search_ref:
+        query = query.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
+    
     # 2. Results
-    cases_models = query.offset(skip).limit(limit).all()
+    cases_models = query.order_by(models.Case.received_date.desc()).offset(skip).limit(limit).all()
     
     # 3. Transform to CaseRead format
     cases_read = []
@@ -185,19 +219,26 @@ def update_case_full(case_id: str, case_data: schemas.CaseCreateExtended, db: Se
     # 3. Update Verification Checks
     current_checks = {c.check_type: c for c in db_case.checks}
     new_services = set(case_data.services)
+    rates = case_data.check_rates or {}
     
     # Remove checks that are no longer selected (only if they are still interim/pending)
     for check_type, check in current_checks.items():
         if check_type not in new_services:
             db.delete(check)
+        else:
+            # Update rate for existing checks if provided
+            if check_type in rates:
+                check.rate = rates[check_type]
             
     # Add newly selected checks
     for service in new_services:
         if service not in current_checks:
+            rate = rates.get(service, 0.0)
             db_check = models.VerificationCheck(
                 case_id=db_case.id,
                 check_type=service,
-                status=models.CheckStatus.INTERIM
+                status=models.CheckStatus.INTERIM,
+                rate=rate
             )
             db.add(db_check)
     
@@ -217,6 +258,8 @@ def delete_case(case_id: str, db: Session = Depends(get_db)):
     db.commit()
     return None
 
+from .aws_utils import s3_client, aws_bucket
+
 @router.post("/{case_id}/merge-pdfs", dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 def merge_pdfs(case_id: str, db: Session = Depends(get_db)):
     db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
@@ -231,42 +274,75 @@ def merge_pdfs(case_id: str, db: Session = Depends(get_db)):
     try:
         from PIL import Image
     except ImportError:
-        pass
+        Image = None
         
     for doc in docs:
         url = doc.get('url')
         if not url: continue
         
         try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                if url.lower().endswith('.pdf') or 'application/pdf' in response.headers.get('content-type', ''):
-                    pdf_reader = PdfReader(BytesIO(response.content))
-                    merger.append(pdf_reader)
-                else:
-                    try:
-                        image = Image.open(BytesIO(response.content))
-                        if image.mode != 'RGB':
-                            image = image.convert('RGB')
-                        img_pdf = BytesIO()
-                        image.save(img_pdf, format='PDF')
-                        img_pdf.seek(0)
-                        merger.append(PdfReader(img_pdf))
-                    except Exception as e:
-                        import logging
-                        logging.warning(f"Skipping non-pdf file {url}: {e}")
+            content = None
+            content_type = ""
+            
+            # 1. Performance: Prefer direct S3 access for internal assets
+            if doc.get('storage_provider') == 's3' and s3_client and aws_bucket:
+                try:
+                    s3_key = doc.get('public_id')
+                    s3_obj = s3_client.get_object(Bucket=aws_bucket, Key=s3_key)
+                    content = s3_obj['Body'].read()
+                    content_type = s3_obj.get('ContentType', '')
+                except Exception as s3_err:
+                    import logging
+                    logging.error(f"S3 Direct Fetch failed for {doc.get('public_id')}: {s3_err}")
+
+            # 2. Fallback to HTTP (for Cloudinary or public S3)
+            if not content:
+                response = requests.get(url, timeout=15)
+                if response.status_code == 200:
+                    content = response.content
+                    content_type = response.headers.get('content-type', '')
+
+            if not content: continue
+
+            # 3. Processing
+            if url.lower().endswith('.pdf') or 'application/pdf' in content_type:
+                pdf_reader = PdfReader(BytesIO(content))
+                merger.append(pdf_reader)
+            elif Image:
+                try:
+                    image = Image.open(BytesIO(content))
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    img_pdf = BytesIO()
+                    image.save(img_pdf, format='PDF')
+                    img_pdf.seek(0)
+                    merger.append(PdfReader(img_pdf))
+                except Exception as e:
+                    import logging
+                    logging.warning(f"Image to PDF conversion failed {url}: {e}")
         except Exception as e:
             import logging
-            logging.error(f"Failed to fetch {url}: {e}")
+            logging.error(f"Failed to process {url}: {e}")
             
     output = BytesIO()
+    if len(merger.pages) == 0:
+        raise HTTPException(status_code=400, detail="No valid PDF pages could be extracted from candidate documents")
+        
     merger.write(output)
     output.seek(0)
     
+    filename = f"candidate_{case_id}_merged.pdf"
+    if db_case.candidate and db_case.candidate.name:
+        sanitized_name = "".join([c for c in db_case.candidate.name if c.isalnum() or c==' ']).rstrip()
+        filename = f"{sanitized_name}_{db_case.case_ref_no}_result.pdf"
+
     return StreamingResponse(
         output, 
         media_type="application/pdf", 
-        headers={"Content-Disposition": f"attachment; filename=merged_case_{case_id}.pdf"}
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
     )
 
 @router.post("/bulk-allocate")

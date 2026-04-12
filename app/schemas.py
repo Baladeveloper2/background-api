@@ -172,6 +172,7 @@ class VerificationCheckBase(BaseModel):
     data: Optional[Dict[str, Any]] = None
     digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
+    rate: Optional[float] = 0.0
 
     @field_validator('status', mode='before')
     @classmethod
@@ -263,6 +264,7 @@ class CaseCreateExtended(BaseModel):
     candidate: CandidateCreate
     services: List[str]
     case_ref_no: Optional[str] = None
+    check_rates: Optional[Dict[str, float]] = None
 
 class Case(CaseBase):
     id: str

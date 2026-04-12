@@ -32,6 +32,23 @@ def read_batches_summary(
     from sqlalchemy import func, case
     from datetime import datetime
     
+    # 1. Subquery for Case counts per batch to avoid Cartesian product
+    case_counts = db.query(
+        models.Case.batch_id,
+        func.count(models.Case.id).label("actual_case_count"),
+        func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
+        func.max(models.Case.completed_date).label("completed_date")
+    ).group_by(models.Case.batch_id).subquery()
+
+    # 2. Subquery for Check values per batch (via Case)
+    check_values = db.query(
+        models.Case.batch_id,
+        func.sum(models.VerificationCheck.rate).label("total_check_value")
+    ).join(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)\
+     .group_by(models.Case.batch_id).subquery()
+
+    # 3. Main query joining Batch with subqueries
     results = db.query(
         models.Batch.id,
         models.Batch.batch_no,
@@ -42,13 +59,14 @@ def read_batches_summary(
         models.Batch.tat_days,
         models.Batch.case_rate,
         models.Batch.file_url,
-        func.count(models.Case.id).label("actual_case_count"),
-        func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
-        func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
-        func.max(models.Case.completed_date).label("completed_date")
+        case_counts.c.actual_case_count,
+        case_counts.c.pending_count,
+        case_counts.c.completed_count,
+        case_counts.c.completed_date,
+        check_values.c.total_check_value
     ).join(models.Customer, models.Batch.customer_id == models.Customer.id)\
-     .outerjoin(models.Case, models.Batch.id == models.Case.batch_id)\
-     .group_by(models.Batch.id, models.Batch.batch_no, models.Batch.customer_id, models.Customer.name, models.Batch.upload_date, models.Batch.cases_count, models.Batch.tat_days, models.Batch.case_rate, models.Batch.file_url)\
+     .outerjoin(case_counts, models.Batch.id == case_counts.c.batch_id)\
+     .outerjoin(check_values, models.Batch.id == check_values.c.batch_id)\
      .all()
 
     summaries = []
@@ -56,18 +74,23 @@ def read_batches_summary(
     for r in results:
         upload_date = r.upload_date or now
         age = (now.date() - upload_date.date()).days
-        if age < 0: age = 0 # Safety for server clock drift
+        if age < 0: age = 0 
         pending = r.pending_count or 0
         actual_cases = r.actual_case_count or 0
         intended_cases = r.cases_count or 0
         
+        # Total value is now driven by check rates primarily, fallback to case_rate for old data
+        total_value = float(r.total_check_value or 0)
+        if total_value == 0 and r.case_rate and intended_cases:
+            total_value = r.case_rate * intended_cases
+
         summaries.append({
             "id": r.id,
             "batch_no": r.batch_no or f"Batch_{r.id[:8]}",
             "customer_id": r.customer_id,
             "customer_name": r.customer_name,
             "upload_date": r.upload_date,
-            "case_count": intended_cases, # Match the field the user edits
+            "case_count": intended_cases,
             "actual_cases": actual_cases,
             "intended_cases": intended_cases,
             "case_rate": r.case_rate or 0,
@@ -75,7 +98,7 @@ def read_batches_summary(
             "pending_count": pending,
             "completed_count": int(r.completed_count or 0),
             "tat": r.tat_days or 10,
-            "total_value": (r.case_rate or 0) * intended_cases,
+            "total_value": total_value,
             "completed_date": r.completed_date,
             "file_url": r.file_url,
             "status": "Entry Pending" if (actual_cases == 0 or actual_cases < intended_cases) else "Completed" if pending == 0 else "Verification In-Progress"

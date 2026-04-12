@@ -3,23 +3,28 @@ import logging
 import cloudinary
 import cloudinary.uploader
 import cloudinary.utils
+import boto3
+from botocore.exceptions import ClientError
 from .auth_routes import get_current_user
 from .models import User
 import os
+import uuid
+from dotenv import load_dotenv
 
 router = APIRouter(prefix="/media", tags=["media"])
+print("--- MEDIA ROUTES RELOADED (CLEAN VERSION) ---")
 
-# Initializing Cloudinary
-from dotenv import load_dotenv
+# Load environment variables
 load_dotenv(override=True)
 
-# Prefer CLOUDINARY_URL for simplicity and robustness
-# Cloudinary Python library handles the parsing of the URL automatically
+from .aws_utils import s3_client, aws_bucket, aws_region
+
+
+# Initializing Cloudinary as fallback
 cloudinary_url = os.getenv('CLOUDINARY_URL')
 if cloudinary_url:
     cloudinary.config(cloudinary_url=cloudinary_url, secure=True)
 else:
-    # Explicit fallbacks if URL is missing
     cloudinary.config(
         cloud_name="dfrfq0ch8",
         api_key="257176576991427",
@@ -32,36 +37,45 @@ def upload_file(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Uploads a file to Cloudinary and returns the secure URL.
-    Supports PDF, DOC, and images.
-    """
     try:
         # Validate file extension
         ext = os.path.splitext(file.filename)[1].lower()
         allowed_exts = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp', '.gif']
         if ext not in allowed_exts:
-            raise HTTPException(status_code=400, detail=f"Unsupported file format ({ext}). Please upload PDF, DOC, or images.")
+            raise HTTPException(status_code=400, detail=f"Unsupported file format ({ext})")
 
-        # Determine resource type based on extension
-        # Cloudinary treats PDFs as 'image' to allow thumbnails/previews
+        # Determine resource type
         if ext in ['.pdf', '.jpg', '.jpeg', '.png']:
             resource_type = "image"
         else:
             resource_type = "raw"
         
-        # Ensure we are at the start of the file
         file.file.seek(0)
-        
-        # Use filename as public_id base but sanitize it to avoid signature issues with special chars
         base_filename = "".join([c if c.isalnum() or c in ['-', '_'] else '_' for c in os.path.splitext(file.filename)[0]])
         
+        # S3 Upload logic
+        if s3_client and aws_bucket:
+            unique_filename = f"bgv_documents/{uuid.uuid4()}_{file.filename}"
+            s3_client.upload_fileobj(
+                file.file,
+                aws_bucket,
+                unique_filename,
+                ExtraArgs={'ContentType': file.content_type}
+            )
+            return {
+                "url": f"https://{aws_bucket}.s3.{aws_region}.amazonaws.com/{unique_filename}",
+                "public_id": unique_filename,
+                "resource_type": resource_type,
+                "storage_provider": "s3",
+                "original_filename": file.filename
+            }
+
+        # Cloudinary Fallback
         upload_result = cloudinary.uploader.upload(
             file.file,
             resource_type=resource_type,
             folder="bgv_documents",
-            public_id=f"{base_filename}_{os.urandom(2).hex()}",
-            type="upload" # Explicitly set to public upload
+            public_id=f"{base_filename}_{os.urandom(2).hex()}"
         )
 
         return {
@@ -71,14 +85,12 @@ def upload_file(
             "storage_provider": "cloudinary",
             "original_filename": file.filename
         }
-    except HTTPException as he:
-        # Re-raise HTTPExceptions as-is so client gets correct status (e.g. 400)
-        raise he
     except Exception as e:
-        logging.error(f"Cloudinary upload error: {str(e)}")
+        provider = "S3" if (s3_client and aws_bucket) else "Cloudinary"
+        logging.error(f"{provider} upload error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to upload file to storage: {str(e)}"
+            detail=f"Failed to upload file to {provider}: {str(e)}"
         )
 
 @router.get("/get-url")
@@ -87,22 +99,25 @@ def get_signed_url(
     resource_type: str = "image",
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Generates a signed URL for a private or restricted Cloudinary asset.
-    """
     try:
-        # Normalize resource_type based on common use cases in this system
-        effective_resource_type = resource_type
-        if public_id.lower().endswith(('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.gif')):
-             effective_resource_type = "image"
-        elif public_id.lower().endswith(('.doc', '.docx')):
-             effective_resource_type = "raw"
+        # S3 Presigned URL
+        if s3_client and aws_bucket and public_id.startswith('bgv_documents/'):
+            url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': aws_bucket, 'Key': public_id},
+                ExpiresIn=3600
+            )
+            print(f"DEBUG: Generated Signed URL: {url}")
+            return {"url": url}
 
-        logging.info(f"Generating URL for: {public_id}, resource_type: {effective_resource_type}")
-        
-        # We use signed URLs for delivery. If 401 occurs, it's usually 
-        # a configuration mismatch or type mismatch.
-        url, options = cloudinary.utils.cloudinary_url(
+        # Cloudinary Signed URL
+        effective_resource_type = resource_type
+        if public_id.lower().endswith(('.doc', '.docx')):
+             effective_resource_type = "raw"
+        elif public_id.lower().endswith(('.pdf', '.jpg', '.png')):
+             effective_resource_type = "image"
+             
+        url, _ = cloudinary.utils.cloudinary_url(
             public_id,
             resource_type=effective_resource_type,
             secure=True,
@@ -110,13 +125,6 @@ def get_signed_url(
         )
         return {"url": url}
     except Exception as e:
-        logging.error(f"Error generating signed URL: {str(e)}")
-        # Fallback to a non-signed secure URL for public assets in bgv_documents
-        url, _ = cloudinary.utils.cloudinary_url(
-            public_id, 
-            resource_type="image", 
-            secure=True
-        )
-        return {"url": url}
-
-# End of Media Routes
+        logging.error(f"Error generating URL: {str(e)}")
+        # Simple fallback
+        return {"url": f"https://res.cloudinary.com/dfrfq0ch8/{resource_type}/upload/{public_id}"}

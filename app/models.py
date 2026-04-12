@@ -162,6 +162,7 @@ class VerificationCheck(Base):
     digital_token = Column(String(100), unique=True, nullable=True) # For candidate link
     verifier_remarks = Column(Text)
     verified_date = Column(DateTime(timezone=True), nullable=True, index=True)
+    rate = Column(Float, default=0.0)
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
