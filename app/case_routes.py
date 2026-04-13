@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, status, Response, BackgroundTasks, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, or_, update, delete
+from sqlalchemy.orm import contains_eager, joinedload, selectinload
 from typing import List, Optional, Dict, Any
 from . import models, schemas
-from .database import get_db
+from .database import get_async_db, SessionLocal
 import uuid
 from datetime import datetime
 from fastapi.responses import StreamingResponse
@@ -10,7 +12,7 @@ import requests
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
 
-from .auth_routes import check_module_permission
+from .auth_routes import check_module_permission, limiter, get_current_user
 
 router = APIRouter(
     prefix="/cases",
@@ -18,34 +20,47 @@ router = APIRouter(
 )
 
 @router.post("", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-def create_case(case: schemas.CaseCreate, db: Session = Depends(get_db)):
+async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_async_db)):
     if not case.case_ref_no:
-        customer = db.query(models.Customer).filter(models.Customer.id == case.customer_id).first()
+        customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case.customer_id))
+        customer = customer_res.scalar_one_or_none()
         customer_name = customer.name if customer and customer.name else "BGV"
         prefix = customer_name[:3].upper()
-        count = db.query(models.Case).filter(models.Case.customer_id == case.customer_id).count()
+        
+        count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.customer_id == case.customer_id))
+        count = count_res.scalar() or 0
         case.case_ref_no = f"{prefix}{str(count + 1).zfill(3)}"
         
     db_case = models.Case(**case.dict())
     db.add(db_case)
-    db.commit()
-    db.refresh(db_case)
+    await db.commit()
+    res = await db.execute(
+        select(models.Case).options(
+            joinedload(models.Case.candidate),
+            joinedload(models.Case.customer),
+            selectinload(models.Case.checks)
+        ).filter(models.Case.id == db_case.id)
+    )
+    db_case = res.unique().scalar_one()
+
     return db_case
 
 @router.post("/create-full", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-def create_case_full(case_data: schemas.CaseCreateExtended, db: Session = Depends(get_db)):
+async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSession = Depends(get_async_db)):
     # 1. Create/Get Candidate
     candidate_dict = case_data.candidate.dict()
     db_candidate = models.Candidate(**candidate_dict)
     db.add(db_candidate)
-    db.flush() # Get candidate ID
+    await db.flush() # Get candidate ID
 
     # 2. Create Case
     if not case_data.case_ref_no:
-        customer = db.query(models.Customer).filter(models.Customer.id == case_data.customer_id).first()
+        customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case_data.customer_id))
+        customer = customer_res.scalar_one_or_none()
         customer_name = customer.name if customer and customer.name else "BGV"
         prefix = customer_name[:3].upper()
-        count = db.query(models.Case).filter(models.Case.customer_id == case_data.customer_id).count()
+        count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.customer_id == case_data.customer_id))
+        count = count_res.scalar() or 0
         case_ref = f"{prefix}{str(count + 1).zfill(3)}"
     else:
         case_ref = case_data.case_ref_no
@@ -59,7 +74,7 @@ def create_case_full(case_data: schemas.CaseCreateExtended, db: Session = Depend
         received_date=datetime.utcnow()
     )
     db.add(db_case)
-    db.flush()
+    await db.flush()
 
     # 3. Create Verification Checks
     for service in case_data.services:
@@ -72,290 +87,246 @@ def create_case_full(case_data: schemas.CaseCreateExtended, db: Session = Depend
         )
         db.add(db_check)
     
-    db.commit()
-    db.refresh(db_case)
-    return db_case
-
-from sqlalchemy.orm import joinedload, selectinload, contains_eager
+    await db.commit()
+    
+    # Reload with relationships for response validation
+    stmt = select(models.Case).options(
+        joinedload(models.Case.candidate),
+        joinedload(models.Case.customer),
+        selectinload(models.Case.checks)
+    ).filter(models.Case.id == db_case.id)
+    res = await db.execute(stmt)
+    return res.unique().scalar_one()
 
 @router.get("", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-def read_cases(
+async def read_cases(
+    response: Response,
     status: Optional[models.CaseStatus] = None, 
     batch_id: Optional[str] = None,
     customer_id: Optional[str] = None,
     search: Optional[str] = None,
     search_name: Optional[str] = None,
     search_ref: Optional[str] = None,
+    assigned: Optional[bool] = None,
     skip: int = 0, 
     limit: int = 200, 
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
 ):
-    from sqlalchemy import or_
     # 1. Base query for cases with their relationships
-    # Use outer join to avoid hiding cases during name searches
-    query = db.query(models.Case).outerjoin(models.Case.candidate).options(
+    stmt = select(models.Case).outerjoin(models.Case.candidate).options(
         contains_eager(models.Case.candidate),
         joinedload(models.Case.customer),
         joinedload(models.Case.batch),
         joinedload(models.Case.assigned_user),
         selectinload(models.Case.checks)
     )
+
+    # 2. Assignment-based filtering (Data Isolation)
+    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.ADMIN, models.UserRole.MANAGER]:
+        stmt = stmt.filter(models.Case.assigned_to == current_user.id)
     
     if status:
-        query = query.filter(models.Case.status == status)
-    
+        stmt = stmt.filter(models.Case.status == status)
     if batch_id:
-        query = query.filter(models.Case.batch_id == batch_id)
-        
+        stmt = stmt.filter(models.Case.batch_id == batch_id)
     if customer_id:
-        query = query.filter(models.Case.customer_id == customer_id)
-        
+        stmt = stmt.filter(models.Case.customer_id == customer_id)
     if search:
-        query = query.filter(
-            or_(
-                models.Case.case_ref_no.ilike(f"%{search}%"),
-                models.Candidate.name.ilike(f"%{search}%")
-            )
-        )
-    
+        stmt = stmt.filter(or_(models.Case.case_ref_no.ilike(f"%{search}%"), models.Candidate.name.ilike(f"{search}%")))
     if search_name:
-        query = query.filter(models.Candidate.name.ilike(f"%{search_name}%"))
-    
+        stmt = stmt.filter(models.Candidate.name.ilike(f"{search_name}%"))
     if search_ref:
-        query = query.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
+        stmt = stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
+    if assigned is not None:
+        if assigned:
+            stmt = stmt.filter(models.Case.assigned_to != None)
+        else:
+            stmt = stmt.filter(models.Case.assigned_to == None)
     
     # 2. Results
-    cases_models = query.order_by(models.Case.received_date.desc()).offset(skip).limit(limit).all()
+    count_stmt = select(func.count(func.distinct(models.Case.id))).select_from(stmt.subquery())
+    total_count_res = await db.execute(count_stmt)
+    total_count = total_count_res.scalar() or 0
+    response.headers["X-Total-Count"] = str(total_count)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
+
+    stmt = stmt.order_by(models.Case.received_date.desc()).offset(skip).limit(limit)
+    res = await db.execute(stmt)
+    cases_models = res.unique().scalars().all()
     
     # 3. Transform to CaseRead format
     cases_read = []
     for case in cases_models:
         case_data = schemas.CaseRead.model_validate(case)
-        # Ensure candidate name is always populated separately for the registry
-        if case.candidate:
-            case_data.candidate_name = case.candidate.name
-        else:
-            case_data.candidate_name = "UNNAMED"
-            
-        if case.customer:
-            case_data.customer_name = case.customer.name
-        
-        # Populate Batch Metadata
+        if case.candidate: case_data.candidate_name = case.candidate.name
+        if case.customer: case_data.customer_name = case.customer.name
         if case.batch:
-            if not case_data.tat_days:
-                case_data.tat_days = case.batch.tat_days
+            if not case_data.tat_days: case_data.tat_days = case.batch.tat_days
             case_data.batch_date = case.batch.upload_date
             case_data.batch_no = case.batch.batch_no
-        
-        if case.assigned_user:
-            case_data.assigned_user_name = case.assigned_user.full_name
-            
+        if case.assigned_user: case_data.assigned_user_name = case.assigned_user.full_name
         cases_read.append(case_data)
     
     return cases_read
 
+@router.get("/clients", response_model=List[str], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
+async def read_case_clients(db: AsyncSession = Depends(get_async_db)):
+    stmt = select(models.Customer.name).distinct().join(models.Case)
+    res = await db.execute(stmt)
+    return [r for r in res.scalars().all() if r]
+
+@router.get("/report-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
+async def get_report_stats(customer_id: Optional[str] = None, db: AsyncSession = Depends(get_async_db)):
+    # 1. Pie Data: Status distribution
+    stmt = select(models.Case.status, func.count(models.Case.id)).group_by(models.Case.status)
+    if customer_id: stmt = stmt.filter(models.Case.customer_id == customer_id)
+    res = await db.execute(stmt)
+    pie_data = [{"name": str(s), "value": count} for s, count in res.all()]
+
+    # 2. Aggregates
+    base_stmt = select(models.Case)
+    if customer_id: base_stmt = base_stmt.filter(models.Case.customer_id == customer_id)
+    
+    total_res = await db.execute(select(func.count(models.Case.id)).select_from(base_stmt.subquery()))
+    total = total_res.scalar() or 0
+    
+    comp_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED).select_from(base_stmt.subquery()))
+    completed = comp_res.scalar() or 0
+    
+    tat_res = await db.execute(select(func.avg(models.Case.tat_days)).filter(models.Case.status == models.CaseStatus.COMPLETED).select_from(base_stmt.subquery()))
+    avg_tat = tat_res.scalar() or 0
+
+    return {
+        "pie_data": pie_data,
+        "total_cases": total,
+        "completion_rate": round((completed / total * 100), 1) if total > 0 else 0,
+        "avg_tat": round(float(avg_tat), 1)
+    }
+
 @router.get("/{case_id}", response_model=schemas.CaseRead, dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-def read_case(case_id: str, db: Session = Depends(get_db)):
-    db_case = db.query(models.Case).options(
+async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    stmt = select(models.Case).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
         selectinload(models.Case.checks),
         joinedload(models.Case.batch)
-    ).filter(models.Case.id == case_id).first()
+    ).filter(models.Case.id == case_id)
+    res = await db.execute(stmt)
+    db_case = res.unique().scalar_one_or_none()
     
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
         
     case_data = schemas.CaseRead.model_validate(db_case)
-    if db_case.candidate:
-        case_data.candidate_name = db_case.candidate.name
-    if db_case.customer:
-        case_data.customer_name = db_case.customer.name
+    if db_case.candidate: case_data.candidate_name = db_case.candidate.name
+    if db_case.customer: case_data.customer_name = db_case.customer.name
     if db_case.batch:
         case_data.batch_no = db_case.batch.batch_no
         case_data.batch_date = db_case.batch.upload_date
-        
     return case_data
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-def update_case(case_id: str, case_update: schemas.CaseUpdate, db: Session = Depends(get_db)):
-    db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
+async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSession = Depends(get_async_db)):
+    res = await db.execute(select(models.Case).filter(models.Case.id == case_id))
+    db_case = res.scalar_one_or_none()
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
     
     update_data = case_update.dict(exclude_unset=True)
-    
-    # Auto-set completed_date (Out Date) when status moves to COMPLETED
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
         db_case.completed_date = datetime.utcnow()
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
-        db_case.completed_date = None # Reset if moved back from COMPLETED
+        db_case.completed_date = None
         
     for key, value in update_data.items():
         setattr(db_case, key, value)
     
-    db.commit()
-    db.refresh(db_case)
-    return db_case
+    await db.commit()
+    res = await db.execute(
+        select(models.Case).options(
+            joinedload(models.Case.candidate),
+            joinedload(models.Case.customer),
+            selectinload(models.Case.checks)
+        ).filter(models.Case.id == db_case.id)
+    )
+    db_case = res.unique().scalar_one()
 
-@router.patch("/{case_id}/full", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-def update_case_full(case_id: str, case_data: schemas.CaseCreateExtended, db: Session = Depends(get_db)):
-    db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
-    if db_case is None:
-        raise HTTPException(status_code=404, detail="Case not found")
-    
-    # 1. Update Candidate
-    db_candidate = db.query(models.Candidate).filter(models.Candidate.id == db_case.candidate_id).first()
-    if db_candidate:
-        candidate_data = case_data.candidate.dict(exclude_unset=True)
-        for key, value in candidate_data.items():
-            setattr(db_candidate, key, value)
-    
-    # 2. Update Case Metadata
-    db_case.case_ref_no = case_data.case_ref_no
-    db_case.customer_id = case_data.customer_id
-    db_case.batch_id = case_data.batch_id
-    
-    # 3. Update Verification Checks
-    current_checks = {c.check_type: c for c in db_case.checks}
-    new_services = set(case_data.services)
-    rates = case_data.check_rates or {}
-    
-    # Remove checks that are no longer selected (only if they are still interim/pending)
-    for check_type, check in current_checks.items():
-        if check_type not in new_services:
-            db.delete(check)
-        else:
-            # Update rate for existing checks if provided
-            if check_type in rates:
-                check.rate = rates[check_type]
-            
-    # Add newly selected checks
-    for service in new_services:
-        if service not in current_checks:
-            rate = rates.get(service, 0.0)
-            db_check = models.VerificationCheck(
-                case_id=db_case.id,
-                check_type=service,
-                status=models.CheckStatus.INTERIM,
-                rate=rate
-            )
-            db.add(db_check)
-    
-    db.commit()
-    db.refresh(db_case)
     return db_case
 
 @router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-def delete_case(case_id: str, db: Session = Depends(get_db)):
-    db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
+async def delete_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    res = await db.execute(select(models.Case).filter(models.Case.id == case_id))
+    db_case = res.scalar_one_or_none()
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
     
-    # Delete linked checks first
-    db.query(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_id).delete()
-    db.delete(db_case)
-    db.commit()
+    candidate_id = db_case.candidate_id
+    
+    # Delete related checks first (cascade)
+    await db.execute(delete(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_id))
+    
+    # Delete the case
+    await db.delete(db_case)
+    
+    # Check if candidate has other cases, if not, delete candidate
+    if candidate_id:
+        other_cases_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.candidate_id == candidate_id, models.Case.id != case_id))
+        count = other_cases_res.scalar() or 0
+        if count == 0:
+            await db.execute(delete(models.Candidate).filter(models.Candidate.id == candidate_id))
+            
+    await db.commit()
     return None
 
 from .aws_utils import s3_client, aws_bucket
 
-@router.post("/{case_id}/merge-pdfs", dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-def merge_pdfs(case_id: str, db: Session = Depends(get_db)):
-    db_case = db.query(models.Case).filter(models.Case.id == case_id).first()
-    if not db_case or not db_case.candidate:
-        raise HTTPException(status_code=404, detail="Case or Candidate not found")
-    
-    docs = db_case.candidate.documents or []
-    if not docs:
-        raise HTTPException(status_code=400, detail="No documents available to merge")
-    
+def _do_merge(case_id: str, docs: list, candidate_name: str, case_ref: str):
+    """Sync Background Task for PDF Merge."""
+    import logging
     merger = PdfWriter()
-    try:
-        from PIL import Image
-    except ImportError:
-        Image = None
-        
     for doc in docs:
         url = doc.get('url')
         if not url: continue
-        
         try:
-            content = None
-            content_type = ""
-            
-            # 1. Performance: Prefer direct S3 access for internal assets
-            if doc.get('storage_provider') == 's3' and s3_client and aws_bucket:
-                try:
-                    s3_key = doc.get('public_id')
-                    s3_obj = s3_client.get_object(Bucket=aws_bucket, Key=s3_key)
-                    content = s3_obj['Body'].read()
-                    content_type = s3_obj.get('ContentType', '')
-                except Exception as s3_err:
-                    import logging
-                    logging.error(f"S3 Direct Fetch failed for {doc.get('public_id')}: {s3_err}")
-
-            # 2. Fallback to HTTP (for Cloudinary or public S3)
-            if not content:
-                response = requests.get(url, timeout=15)
-                if response.status_code == 200:
-                    content = response.content
-                    content_type = response.headers.get('content-type', '')
-
-            if not content: continue
-
-            # 3. Processing
-            if url.lower().endswith('.pdf') or 'application/pdf' in content_type:
-                pdf_reader = PdfReader(BytesIO(content))
-                merger.append(pdf_reader)
-            elif Image:
-                try:
-                    image = Image.open(BytesIO(content))
-                    if image.mode != 'RGB':
-                        image = image.convert('RGB')
-                    img_pdf = BytesIO()
-                    image.save(img_pdf, format='PDF')
-                    img_pdf.seek(0)
-                    merger.append(PdfReader(img_pdf))
-                except Exception as e:
-                    import logging
-                    logging.warning(f"Image to PDF conversion failed {url}: {e}")
-        except Exception as e:
-            import logging
-            logging.error(f"Failed to process {url}: {e}")
-            
-    output = BytesIO()
-    if len(merger.pages) == 0:
-        raise HTTPException(status_code=400, detail="No valid PDF pages could be extracted from candidate documents")
-        
-    merger.write(output)
-    output.seek(0)
+            content = requests.get(url, timeout=15).content
+            if url.lower().endswith('.pdf'):
+                merger.append(PdfReader(BytesIO(content)))
+            else:
+                from PIL import Image
+                img = Image.open(BytesIO(content)).convert('RGB')
+                buf = BytesIO(); img.save(buf, format='PDF'); buf.seek(0)
+                merger.append(PdfReader(buf))
+        except Exception as e: logging.error(f"Merge error: {e}")
     
-    filename = f"candidate_{case_id}_merged.pdf"
-    if db_case.candidate and db_case.candidate.name:
-        sanitized_name = "".join([c for c in db_case.candidate.name if c.isalnum() or c==' ']).rstrip()
-        filename = f"{sanitized_name}_{db_case.case_ref_no}_result.pdf"
+    if len(merger.pages) > 0:
+        out = BytesIO(); merger.write(out); out.seek(0)
+        filename = f"{candidate_name}_{case_ref}_merged.pdf"
+        if s3_client and aws_bucket:
+            s3_key = f"merged/{case_id}/{filename}"
+            s3_client.put_object(Bucket=aws_bucket, Key=s3_key, Body=out.getvalue(), ContentType='application/pdf')
+            db = SessionLocal()
+            c = db.query(models.Case).filter(models.Case.id == case_id).first()
+            if c: c.merged_pdf_key = s3_key; db.commit()
+            db.close()
 
-    return StreamingResponse(
-        output, 
-        media_type="application/pdf", 
-        headers={
-            "Content-Disposition": f"attachment; filename={filename}",
-            "Access-Control-Expose-Headers": "Content-Disposition"
-        }
-    )
+@router.post("/{case_id}/merge-pdfs", status_code=202, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
+@limiter.limit("10/minute")
+async def merge_pdfs(case_id: str, request: Request, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
+    res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == case_id))
+    db_case = res.unique().scalar_one_or_none()
+    if not db_case or not db_case.candidate:
+        raise HTTPException(status_code=404, detail="Case/Candidate not found")
+    
+    docs = db_case.candidate.documents or []
+    background_tasks.add_task(_do_merge, case_id, docs, db_case.candidate.name, db_case.case_ref_no)
+    return {"message": "PDF merge queued"}
 
 @router.post("/bulk-allocate")
-def bulk_allocate(data: Dict[str, Any], db: Session = Depends(get_db)):
+async def bulk_allocate(data: Dict[str, Any], db: AsyncSession = Depends(get_async_db)):
     case_ids = data.get("case_ids", [])
     user_id = data.get("user_id")
-    
-    if not user_id:
-        raise HTTPException(status_code=400, detail="User ID is required")
-    
-    db.query(models.Case).filter(models.Case.id.in_(case_ids)).update({
-        "assigned_to": user_id
-    }, synchronize_session=False)
-    
-    db.commit()
-    return {"message": f"Successfully allocated {len(case_ids)} cases"}
+    if not user_id and user_id is not None: raise HTTPException(400, "User ID required")
+    await db.execute(update(models.Case).where(models.Case.id.in_(case_ids)).values(assigned_to=user_id))
+    await db.commit()
+    return {"message": "Success"}

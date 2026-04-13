@@ -107,7 +107,7 @@ class Partner(Base):
 class Candidate(Base):
     __tablename__ = "candidates"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False, index=True)
     email = Column(String(255), index=True)
     phone = Column(String(20))
     dob = Column(Date)
@@ -123,7 +123,7 @@ class Candidate(Base):
 class Batch(Base):
     __tablename__ = "batches"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    customer_id = Column(String(36), ForeignKey("customers.id"))
+    customer_id = Column(String(36), ForeignKey("customers.id"), index=True)
     batch_no = Column(String(50), unique=True, index=True)
     upload_date = Column(DateTime(timezone=True), server_default=func.now())
     file_url = Column(String(255))
@@ -135,8 +135,8 @@ class Case(Base):
     __tablename__ = "cases"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_ref_no = Column(String(50), unique=True, index=True)
-    customer_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"))
-    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"))
+    customer_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), index=True)
     batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True)
     status = Column(String(50), default=CaseStatus.PENDING, index=True)
     assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
@@ -154,9 +154,9 @@ class Case(Base):
 class VerificationCheck(Base):
     __tablename__ = "verification_checks"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
     case = relationship("Case", back_populates="checks")
-    check_type = Column(String(100)) # Education, Employment, etc.
+    check_type = Column(String(100), index=True) # Education, Employment, etc.
     status = Column(String(50), default=CheckStatus.INTERIM, index=True)
     data = Column(JSONEncodedDict) # Verification details
     digital_token = Column(String(100), unique=True, nullable=True) # For candidate link

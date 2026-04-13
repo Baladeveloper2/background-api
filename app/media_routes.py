@@ -10,17 +10,18 @@ from .models import User
 import os
 import uuid
 from dotenv import load_dotenv
+from fastapi import Request
+from .auth_routes import limiter
+from anyio import to_thread
 
 router = APIRouter(prefix="/media", tags=["media"])
-print("--- MEDIA ROUTES RELOADED (CLEAN VERSION) ---")
+print("--- MEDIA ROUTES RELOADED (ASYNC VERSION) ---")
 
-# Load environment variables
 load_dotenv(override=True)
 
 from .aws_utils import s3_client, aws_bucket, aws_region
 
-
-# Initializing Cloudinary as fallback
+# Cloudinary fallback
 cloudinary_url = os.getenv('CLOUDINARY_URL')
 if cloudinary_url:
     cloudinary.config(cloudinary_url=cloudinary_url, secure=True)
@@ -33,35 +34,36 @@ else:
     )
 
 @router.post("/upload")
-def upload_file(
+@limiter.limit("20/minute")
+async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
     try:
-        # Validate file extension
         ext = os.path.splitext(file.filename)[1].lower()
         allowed_exts = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp', '.gif']
         if ext not in allowed_exts:
             raise HTTPException(status_code=400, detail=f"Unsupported file format ({ext})")
 
-        # Determine resource type
-        if ext in ['.pdf', '.jpg', '.jpeg', '.png']:
-            resource_type = "image"
-        else:
-            resource_type = "raw"
+        resource_type = "image" if ext in ['.pdf', '.jpg', '.jpeg', '.png'] else "raw"
         
-        file.file.seek(0)
+        file_data = await file.read()
         base_filename = "".join([c if c.isalnum() or c in ['-', '_'] else '_' for c in os.path.splitext(file.filename)[0]])
         
-        # S3 Upload logic
+        # S3 Upload logic (run in thread to avoid blocking)
         if s3_client and aws_bucket:
             unique_filename = f"bgv_documents/{uuid.uuid4()}_{file.filename}"
-            s3_client.upload_fileobj(
-                file.file,
+            from io import BytesIO
+            
+            await to_thread.run_sync(
+                s3_client.upload_fileobj,
+                BytesIO(file_data),
                 aws_bucket,
                 unique_filename,
-                ExtraArgs={'ContentType': file.content_type}
+                {'ContentType': file.content_type}
             )
+            
             return {
                 "url": f"https://{aws_bucket}.s3.{aws_region}.amazonaws.com/{unique_filename}",
                 "public_id": unique_filename,
@@ -71,8 +73,9 @@ def upload_file(
             }
 
         # Cloudinary Fallback
-        upload_result = cloudinary.uploader.upload(
-            file.file,
+        upload_result = await to_thread.run_sync(
+            cloudinary.uploader.upload,
+            file_data,
             resource_type=resource_type,
             folder="bgv_documents",
             public_id=f"{base_filename}_{os.urandom(2).hex()}"
@@ -94,7 +97,7 @@ def upload_file(
         )
 
 @router.get("/get-url")
-def get_signed_url(
+async def get_signed_url(
     public_id: str,
     resource_type: str = "image",
     current_user: User = Depends(get_current_user)
@@ -102,12 +105,12 @@ def get_signed_url(
     try:
         # S3 Presigned URL
         if s3_client and aws_bucket and public_id.startswith('bgv_documents/'):
-            url = s3_client.generate_presigned_url(
+            url = await to_thread.run_sync(
+                s3_client.generate_presigned_url,
                 'get_object',
-                Params={'Bucket': aws_bucket, 'Key': public_id},
-                ExpiresIn=3600
+                {'Bucket': aws_bucket, 'Key': public_id},
+                3600
             )
-            print(f"DEBUG: Generated Signed URL: {url}")
             return {"url": url}
 
         # Cloudinary Signed URL
@@ -126,5 +129,4 @@ def get_signed_url(
         return {"url": url}
     except Exception as e:
         logging.error(f"Error generating URL: {str(e)}")
-        # Simple fallback
         return {"url": f"https://res.cloudinary.com/dfrfq0ch8/{resource_type}/upload/{public_id}"}

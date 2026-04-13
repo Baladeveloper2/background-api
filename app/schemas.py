@@ -4,11 +4,11 @@ from datetime import datetime, date
 from app.enums import UserRole, Status, CaseStatus, CheckStatus
 
 class UserBase(BaseModel):
-    email: EmailStr
+    email: str
     full_name: Optional[str] = None
-    role: Optional[UserRole] = UserRole.USER  # Now optional; role_id is the primary RBAC mechanism
+    role: Optional[str] = "USER"
     role_id: Optional[str] = None
-    status: Status = Status.ACTIVE
+    status: str = "ACTIVE"
     territory: Optional[str] = None
     business_unit: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
@@ -127,6 +127,7 @@ class BatchBase(BaseModel):
     cases_count: Optional[int] = 0
     tat_days: Optional[int] = 10
     case_rate: Optional[float] = 0.0
+    upload_date: Optional[datetime] = None
 
 class BatchCreate(BatchBase):
     pass
@@ -138,10 +139,10 @@ class BatchUpdate(BaseModel):
     cases_count: Optional[int] = None
     tat_days: Optional[int] = None
     case_rate: Optional[float] = None
+    upload_date: Optional[datetime] = None
 
 class Batch(BatchBase):
     id: str
-    upload_date: datetime
 
     model_config = ConfigDict(from_attributes=True)
 

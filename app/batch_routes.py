@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from sqlalchemy import func, case
-from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, case, update, delete
+from sqlalchemy.orm import selectinload
+from typing import List, Optional, Dict, Any
 from . import models, schemas
-from .database import get_db
-from .auth_routes import check_module_permission
+from .database import get_async_db
+from .auth_routes import check_module_permission, limiter
+from datetime import datetime
 
 router = APIRouter(
     prefix="/batches",
@@ -12,28 +14,32 @@ router = APIRouter(
 )
 
 @router.post("", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
-def create_batch(batch: schemas.BatchCreate, db: Session = Depends(get_db)):
-    # Auto-generate batch_no if not provided
+@limiter.limit("5/minute")
+async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSession = Depends(get_async_db)):
     if not batch.batch_no:
-        data_count = db.query(models.Batch).count()
+        res = await db.execute(select(func.count(models.Batch.id)))
+        data_count = res.scalar() or 0
         batch.batch_no = f"Batch_{26331 + data_count}"
         
     db_batch = models.Batch(**batch.dict())
     db.add(db_batch)
-    db.commit()
-    db.refresh(db_batch)
+    await db.commit()
+    await db.refresh(db_batch)
     return db_batch
 
 @router.get("/summary", response_model=List[schemas.BatchSummary])
-def read_batches_summary(
-    db: Session = Depends(get_db),
+async def read_batches_summary(
+    response: Response,
+    skip: int = 0,
+    limit: int = 100,
+    client: Optional[str] = None,
+    batch_no: Optional[str] = None,
+    filter_upload_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(check_module_permission("bvs", "verification", action="read"))
 ):
-    from sqlalchemy import func, case
-    from datetime import datetime
-    
-    # 1. Subquery for Case counts per batch to avoid Cartesian product
-    case_counts = db.query(
+    # 1. Subquery for Case counts per batch
+    case_counts = select(
         models.Case.batch_id,
         func.count(models.Case.id).label("actual_case_count"),
         func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
@@ -41,15 +47,15 @@ def read_batches_summary(
         func.max(models.Case.completed_date).label("completed_date")
     ).group_by(models.Case.batch_id).subquery()
 
-    # 2. Subquery for Check values per batch (via Case)
-    check_values = db.query(
+    # 2. Subquery for Check values
+    check_values = select(
         models.Case.batch_id,
         func.sum(models.VerificationCheck.rate).label("total_check_value")
     ).join(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)\
      .group_by(models.Case.batch_id).subquery()
 
-    # 3. Main query joining Batch with subqueries
-    results = db.query(
+    # 3. Main query
+    stmt = select(
         models.Batch.id,
         models.Batch.batch_no,
         models.Batch.customer_id,
@@ -66,82 +72,94 @@ def read_batches_summary(
         check_values.c.total_check_value
     ).join(models.Customer, models.Batch.customer_id == models.Customer.id)\
      .outerjoin(case_counts, models.Batch.id == case_counts.c.batch_id)\
-     .outerjoin(check_values, models.Batch.id == check_values.c.batch_id)\
-     .all()
+     .outerjoin(check_values, models.Batch.id == check_values.c.batch_id)
+
+    if client: stmt = stmt.filter(models.Customer.name.ilike(f"%{client}%"))
+    if batch_no: stmt = stmt.filter(models.Batch.batch_no.ilike(f"%{batch_no}%"))
+    if filter_upload_date: stmt = stmt.filter(func.date(models.Batch.upload_date) == filter_upload_date)
+
+    # Count total
+    count_stmt = select(func.count()).select_from(stmt.subquery())
+    total_res = await db.execute(count_stmt)
+    total = total_res.scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
+
+    stmt = stmt.order_by(models.Batch.upload_date.desc()).offset(skip).limit(limit)
+    res = await db.execute(stmt)
+    results = res.all()
 
     summaries = []
     now = datetime.now()
     for r in results:
-        upload_date = r.upload_date or now
-        age = (now.date() - upload_date.date()).days
-        if age < 0: age = 0 
-        pending = r.pending_count or 0
-        actual_cases = r.actual_case_count or 0
-        intended_cases = r.cases_count or 0
-        
-        # Total value is now driven by check rates primarily, fallback to case_rate for old data
+        age = (now.date() - (r.upload_date or now).date()).days
         total_value = float(r.total_check_value or 0)
-        if total_value == 0 and r.case_rate and intended_cases:
-            total_value = r.case_rate * intended_cases
+        if total_value == 0 and r.case_rate and r.cases_count:
+            total_value = r.case_rate * r.cases_count
 
         summaries.append({
             "id": r.id,
-            "batch_no": r.batch_no or f"Batch_{r.id[:8]}",
+            "batch_no": r.batch_no,
             "customer_id": r.customer_id,
             "customer_name": r.customer_name,
             "upload_date": r.upload_date,
-            "case_count": intended_cases,
-            "actual_cases": actual_cases,
-            "intended_cases": intended_cases,
+            "case_count": r.actual_case_count or 0,
+            "intended_cases": r.cases_count or 0,
             "case_rate": r.case_rate or 0,
-            "age_days": age,
-            "pending_count": pending,
+            "age_days": max(0, age),
+            "pending_count": r.pending_count or 0,
             "completed_count": int(r.completed_count or 0),
             "tat": r.tat_days or 10,
             "total_value": total_value,
             "completed_date": r.completed_date,
             "file_url": r.file_url,
-            "status": "Entry Pending" if (actual_cases == 0 or actual_cases < intended_cases) else "Completed" if pending == 0 else "Verification In-Progress"
+            "status": "Entry Pending" if (r.actual_case_count or 0) < (r.cases_count or 0) else "Completed" if (r.pending_count or 0) == 0 else "Verification In-Progress"
         })
     return summaries
 
+@router.get("/clients", response_model=List[str], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
+async def read_batch_clients(db: AsyncSession = Depends(get_async_db)):
+    stmt = select(models.Customer.name).distinct().join(models.Batch)
+    res = await db.execute(stmt)
+    return [r for r in res.scalars().all() if r]
+
 @router.get("", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
-def read_batches(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(models.Batch).offset(skip).limit(limit).all()
+async def read_batches(response: Response, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_db)):
+    count_res = await db.execute(select(func.count(models.Batch.id)))
+    response.headers["X-Total-Count"] = str(count_res.scalar() or 0)
+    res = await db.execute(select(models.Batch).offset(skip).limit(limit))
+    return res.scalars().all()
 
 @router.get("/{batch_id}", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
-def read_batch(batch_id: str, db: Session = Depends(get_db)):
-    db_batch = db.query(models.Batch).filter(models.Batch.id == batch_id).first()
-    if db_batch is None:
-        raise HTTPException(status_code=404, detail="Batch not found")
+async def read_batch(batch_id: str, db: AsyncSession = Depends(get_async_db)):
+    res = await db.execute(select(models.Batch).filter(models.Batch.id == batch_id))
+    db_batch = res.scalar_one_or_none()
+    if db_batch is None: raise HTTPException(404, "Batch not found")
     return db_batch
 
 @router.patch("/{batch_id}", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
-def update_batch(batch_id: str, batch_update: schemas.BatchUpdate, db: Session = Depends(get_db)):
-    db_batch = db.query(models.Batch).filter(models.Batch.id == batch_id).first()
-    if db_batch is None:
-        raise HTTPException(status_code=404, detail="Batch not found")
-    
-    update_data = batch_update.dict(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(db_batch, key, value)
-    
-    db.commit()
-    db.refresh(db_batch)
+async def update_batch(batch_id: str, batch_update: schemas.BatchUpdate, db: AsyncSession = Depends(get_async_db)):
+    res = await db.execute(select(models.Batch).filter(models.Batch.id == batch_id))
+    db_batch = res.scalar_one_or_none()
+    if db_batch is None: raise HTTPException(404, "Batch not found")
+    for k, v in batch_update.dict(exclude_unset=True).items(): setattr(db_batch, k, v)
+    await db.commit()
+    await db.refresh(db_batch)
     return db_batch
 
 @router.delete("/{batch_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
-def delete_batch(batch_id: str, db: Session = Depends(get_db)):
-    db_batch = db.query(models.Batch).filter(models.Batch.id == batch_id).first()
-    if db_batch is None:
-        raise HTTPException(status_code=404, detail="Batch not found")
+async def delete_batch(batch_id: str, db: AsyncSession = Depends(get_async_db)):
+    res = await db.execute(select(models.Batch).filter(models.Batch.id == batch_id))
+    db_batch = res.scalar_one_or_none()
+    if db_batch is None: raise HTTPException(404, "Batch not found")
     
-    # Manual cleanup to avoid IntegrityErrors with existing DB constraints
-    case_ids = [c.id for c in db.query(models.Case.id).filter(models.Case.batch_id == batch_id).all()]
+    # Cascade delete manual logic (or reliance on DB FKs)
+    ids_res = await db.execute(select(models.Case.id).filter(models.Case.batch_id == batch_id))
+    case_ids = ids_res.scalars().all()
     if case_ids:
-        db.query(models.VerificationCheck).filter(models.VerificationCheck.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(models.Case).filter(models.Case.id.in_(case_ids)).delete(synchronize_session=False)
-        
-    db.delete(db_batch)
-    db.commit()
+        await db.execute(delete(models.VerificationCheck).where(models.VerificationCheck.case_id.in_(case_ids)))
+        await db.execute(delete(models.Case).where(models.Case.id.in_(case_ids)))
+    
+    await db.delete(db_batch)
+    await db.commit()
     return None
