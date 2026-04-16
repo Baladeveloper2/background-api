@@ -19,6 +19,7 @@ class CaseStatus(str, enum.Enum):
     PENDING = "PENDING"
     VERIFICATION = "VERIFICATION"
     QC = "QC"
+    QA_PENDING = "QA_PENDING"
     COMPLETED = "COMPLETED"
     INSUFFICIENT = "INSUFFICIENT"
 

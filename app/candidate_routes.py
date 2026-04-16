@@ -28,7 +28,25 @@ def read_candidate(candidate_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Candidate not found")
     return db_candidate
 
-@router.patch("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="write"))])
+async def check_candidate_update_access(current_user: models.User = Depends(auth_routes.get_current_user)):
+    if current_user.role == models.UserRole.SUPER_ADMIN:
+        return current_user
+    
+    # Check for either recruitment management or BVS verification write access
+    perms = current_user.bvs_permissions or {}
+    role_perms = current_user.role_rel.permissions if current_user.role_rel else {}
+    
+    # Check Recruit Module
+    if perms.get("recruit", {}).get("management"): return current_user
+    if role_perms.get("recruit.management", {}).get("write"): return current_user
+    
+    # Check BVS Module (allowing verifiers to attach proofs)
+    if perms.get("bvs", {}).get("verification"): return current_user
+    if role_perms.get("bvs.verification", {}).get("write"): return current_user
+    
+    raise HTTPException(status_code=403, detail="Insufficient permissions to update candidate record")
+
+@router.patch("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(check_candidate_update_access)])
 def update_candidate(candidate_id: str, candidate_update: schemas.CandidateUpdate, db: Session = Depends(get_db)):
     db_candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     if db_candidate is None:

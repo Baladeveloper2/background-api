@@ -123,7 +123,7 @@ async def read_cases(
     )
 
     # 2. Assignment-based filtering (Data Isolation)
-    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.ADMIN, models.UserRole.MANAGER]:
+    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.ADMIN, models.UserRole.MANAGER, models.UserRole.QA, models.UserRole.QC]:
         stmt = stmt.filter(models.Case.assigned_to == current_user.id)
     
     if status:
@@ -234,6 +234,10 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
         raise HTTPException(status_code=404, detail="Case not found")
     
     update_data = case_update.dict(exclude_unset=True)
+    candidate_update_data = update_data.pop("candidate", None)
+    services_update = update_data.pop("services", None)
+    rates_update = update_data.pop("check_rates", {})
+
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
         db_case.completed_date = datetime.utcnow()
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
@@ -241,6 +245,51 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
         
     for key, value in update_data.items():
         setattr(db_case, key, value)
+    
+    # Update or Create Candidate
+    if candidate_update_data:
+        if db_case.candidate_id:
+            res_cand = await db.execute(select(models.Candidate).filter(models.Candidate.id == db_case.candidate_id))
+            db_candidate = res_cand.scalar_one_or_none()
+            if db_candidate:
+                for key, value in candidate_update_data.items():
+                    if value is not None:
+                        setattr(db_candidate, key, value)
+        else:
+            # Create new candidate if missing
+            db_candidate = models.Candidate(**candidate_update_data)
+            db.add(db_candidate)
+            await db.flush()
+            db_case.candidate_id = db_candidate.id
+
+    # Sync Services/Checks
+    if services_update is not None:
+        # 1. Get existing checks
+        existing_checks_res = await db.execute(select(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_id))
+        existing_checks = {c.check_type: c for c in existing_checks_res.scalars().all()}
+        
+        # 2. Add missing ones
+        for svc in services_update:
+            rate = rates_update.get(svc, 0.0)
+            if svc in existing_checks:
+                # Update rate if provided
+                existing_checks[svc].rate = rate
+            else:
+                # Create new
+                new_check = models.VerificationCheck(
+                    case_id=case_id,
+                    check_type=svc,
+                    status=models.CheckStatus.INTERIM,
+                    rate=rate
+                )
+                db.add(new_check)
+        
+        # 3. Optional: Remove checks not in services_update? 
+        # For now, let's keep them (safer) or remove them if user specifically unselected them
+        # (Decision: Unselected checks in Step 2 should be removed)
+        for svc_type in list(existing_checks.keys()):
+            if svc_type not in services_update:
+                await db.delete(existing_checks[svc_type])
     
     await db.commit()
     res = await db.execute(

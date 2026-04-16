@@ -258,6 +258,9 @@ class CaseUpdate(BaseModel):
     batch_id: Optional[str] = None
     status: Optional[CaseStatus] = None
     tat_days: Optional[int] = None
+    candidate: Optional[CandidateUpdate] = None
+    services: Optional[List[str]] = None
+    check_rates: Optional[Dict[str, float]] = None
 
 class CaseCreateExtended(BaseModel):
     batch_id: str
@@ -397,3 +400,26 @@ class DailyReportResponse(BaseModel):
     date: str
     stats: List[DailyStat]
     totals: DailyStat
+
+class VerifierDailyStat(BaseModel):
+    verifier_name: str
+    verifier_email: str
+    assigned: int
+    completed: int
+    in_progress: int
+
+class VerifierDailyResponse(BaseModel):
+    date: str
+    verifiers: List[VerifierDailyStat]
+
+class TodayClientRecord(BaseModel):
+    client: str
+    received: int
+    completed: int
+    pending: int
+    insufficient: int
+
+class TodayRecordsResponse(BaseModel):
+    date: str
+    records: List[TodayClientRecord]
+    totals: TodayClientRecord

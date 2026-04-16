@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi.responses import StreamingResponse
+from typing import Optional
+import io
 import logging
 import cloudinary
 import cloudinary.uploader
@@ -100,15 +103,23 @@ async def upload_file(
 async def get_signed_url(
     public_id: str,
     resource_type: str = "image",
+    original_filename: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
     try:
         # S3 Presigned URL
-        if s3_client and aws_bucket and public_id.startswith('bgv_documents/'):
+        is_s3_path = public_id.startswith('bgv_documents/') or public_id.startswith('bqv_documents/')
+        if s3_client and aws_bucket and is_s3_path:
+            params = {'Bucket': aws_bucket, 'Key': public_id}
+            if original_filename:
+                # Sanitize filename
+                safe_name = "".join([c if c.isalnum() or c in ['-', '_', '.'] else '_' for c in original_filename])
+                params['ResponseContentDisposition'] = f'inline; filename="{safe_name}"'
+            
             url = await to_thread.run_sync(
                 s3_client.generate_presigned_url,
                 'get_object',
-                {'Bucket': aws_bucket, 'Key': public_id},
+                params,
                 3600
             )
             return {"url": url}
@@ -127,6 +138,40 @@ async def get_signed_url(
             sign_url=True
         )
         return {"url": url}
+
     except Exception as e:
         logging.error(f"Error generating URL: {str(e)}")
         return {"url": f"https://res.cloudinary.com/dfrfq0ch8/{resource_type}/upload/{public_id}"}
+
+@router.get("/proxy")
+async def proxy_media(
+    public_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        if s3_client and aws_bucket:
+            # Run both get_object and read() in the thread pool to avoid blocking
+            def fetch_s3_data():
+                resp = s3_client.get_object(Bucket=aws_bucket, Key=public_id)
+                return resp['Body'].read(), resp.get('ContentType', 'image/png')
+            
+            data, content_type = await to_thread.run_sync(fetch_s3_data)
+            
+            return StreamingResponse(
+                io.BytesIO(data),
+                media_type=content_type,
+                headers={
+                    "Cache-Control": "max-age=3600",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+        
+        # Fallback for Cloudinary (usually doesn't need proxying, but for consistency)
+        import requests
+        url = f"https://res.cloudinary.com/dfrfq0ch8/image/upload/{public_id}"
+        resp = requests.get(url)
+        return StreamingResponse(io.BytesIO(resp.content), media_type="image/png")
+
+    except Exception as e:
+        logging.error(f"Proxy error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to proxy media")

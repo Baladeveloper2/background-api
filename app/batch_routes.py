@@ -13,13 +13,38 @@ router = APIRouter(
     tags=["batches"]
 )
 
+async def get_next_batch_number(db: AsyncSession):
+    year = datetime.now().year
+    prefix = f"Batch_{year}_"
+    # Find all batches for this year to determine the next sequence
+    stmt = select(models.Batch.batch_no).filter(models.Batch.batch_no.like(f"{prefix}%"))
+    res = await db.execute(stmt)
+    batch_nos = res.scalars().all()
+    
+    max_seq = 0
+    for bn in batch_nos:
+        try:
+            # Expected format: Batch_YEAR_SEQ (e.g., Batch_2026_001)
+            parts = bn.split('_')
+            if len(parts) >= 3:
+                seq = int(parts[2])
+                if seq > max_seq:
+                    max_seq = seq
+        except (ValueError, IndexError):
+            continue
+            
+    return f"{prefix}{max_seq + 1:03d}"
+
+@router.get("/next-batch-no")
+async def read_next_batch_no(db: AsyncSession = Depends(get_async_db)):
+    next_no = await get_next_batch_number(db)
+    return {"next_batch_no": next_no}
+
 @router.post("", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
 @limiter.limit("5/minute")
 async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSession = Depends(get_async_db)):
     if not batch.batch_no:
-        res = await db.execute(select(func.count(models.Batch.id)))
-        data_count = res.scalar() or 0
-        batch.batch_no = f"Batch_{26331 + data_count}"
+        batch.batch_no = await get_next_batch_number(db)
         
     db_batch = models.Batch(**batch.dict())
     db.add(db_batch)
@@ -44,6 +69,7 @@ async def read_batches_summary(
         func.count(models.Case.id).label("actual_case_count"),
         func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
         func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
+        func.sum(case((models.Case.status.in_([models.CaseStatus.VERIFICATION, models.CaseStatus.QC]), 1), else_=0)).label("in_progress_count"),
         func.max(models.Case.completed_date).label("completed_date")
     ).group_by(models.Case.batch_id).subquery()
 
@@ -68,6 +94,7 @@ async def read_batches_summary(
         case_counts.c.actual_case_count,
         case_counts.c.pending_count,
         case_counts.c.completed_count,
+        case_counts.c.in_progress_count,
         case_counts.c.completed_date,
         check_values.c.total_check_value
     ).join(models.Customer, models.Batch.customer_id == models.Customer.id)\
@@ -113,7 +140,10 @@ async def read_batches_summary(
             "total_value": total_value,
             "completed_date": r.completed_date,
             "file_url": r.file_url,
-            "status": "Entry Pending" if (r.actual_case_count or 0) < (r.cases_count or 0) else "Completed" if (r.pending_count or 0) == 0 else "Verification In-Progress"
+            "status": "Completed" if (r.pending_count or 0) == 0 and (r.actual_case_count or 0) >= (r.cases_count or 0) 
+                      else "In-Progress" if (r.in_progress_count or 0) > 0 or (r.completed_count or 0) > 0
+                      else "Ready for Verification" if (r.actual_case_count or 0) >= (r.cases_count or 0)
+                      else "Entry Pending"
         })
     return summaries
 

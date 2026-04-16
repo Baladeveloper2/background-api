@@ -64,19 +64,6 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
     
     await db.commit()
     await db.refresh(db_check)
-
-    # Auto-move case to QC check
-    case_obj = db_check.case
-    if case_obj:
-        # Fetch all checks for this case
-        checks_stmt = select(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_obj.id)
-        checks_res = await db.execute(checks_stmt)
-        all_checks = checks_res.scalars().all()
-        
-        if all(c.status not in [models.CheckStatus.INTERIM, models.CheckStatus.VERIFICATION] for c in all_checks):
-            case_obj.status = models.CaseStatus.QC
-            await db.commit()
-            
     return db_check
 
 @router.patch("/checks/{check_id}/generate-link", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])

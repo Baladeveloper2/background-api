@@ -57,6 +57,19 @@ def seed():
         
         # We want data for TODAY to show in the Daily Report
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        year = today.year
+        
+        # Create a Batch for today's cases
+        db_batch = models.Batch(
+            id=str(uuid.uuid4()),
+            customer_id=db_customers[0].id, # Just pick first client for the batch
+            batch_no=f"Batch_{year}_SEED_{random.randint(100, 999)}", # Special name for seed
+            upload_date=today,
+            cases_count=50,
+            tat_days=10
+        )
+        db.add(db_batch)
+        db.flush()
         
         total_cases = 50
         for i in range(total_cases):
@@ -95,6 +108,7 @@ def seed():
                 case_ref_no=f"REF-{10000 + i}",
                 customer_id=customer.id,
                 candidate_id=candidate.id,
+                batch_id=db_batch.id,
                 status=status,
                 received_date=today + timedelta(hours=random.randint(0, 4)), # Received today
                 completed_date=completed_date,

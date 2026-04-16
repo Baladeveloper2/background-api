@@ -67,6 +67,10 @@ def check_module_permission(module: str, sub_module: str = None, action: str = "
                 elif rp is True and action == "read": has_access = True
 
         if not has_access:
+            # Grant systemic write access to specific oversight roles for the verification module
+            oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN]
+            if module == "bvs" and current_user.role in oversight_roles:
+                return current_user
             raise HTTPException(status_code=403, detail=f"No {action} access to {module}")
         return current_user
     return permission_checker
@@ -84,7 +88,7 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
     perms = (user.role_rel.permissions or {}).copy() if user.role_id and user.role_rel else (user.bvs_permissions or {}).copy()
 
     token = auth.create_access_token(
-        data={"sub": user.email, "role": user.role, "full_name": user.full_name, "permissions": perms},
+        data={"sub": user.email, "id": user.id, "role": user.role, "full_name": user.full_name, "permissions": perms},
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     return {"access_token": token, "token_type": "bearer"}

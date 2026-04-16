@@ -5,42 +5,65 @@ from datetime import datetime, timedelta
 import traceback
 from . import models, schemas
 from .database import get_async_db
-from .auth_routes import check_module_permission
+from .auth_routes import check_module_permission, get_current_user
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
 @router.get("", response_model=schemas.DashboardStats)
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_async_db),
-    current_user: models.User = Depends(check_module_permission("bms", "applicants"))
+    current_user: models.User = Depends(get_current_user)
 ):
     try:
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
+        # Determine if we should filter by verifier
+        filter_verifier = current_user.role not in [
+            models.UserRole.SUPER_ADMIN, 
+            models.UserRole.ADMIN, 
+            models.UserRole.MANAGER,
+            models.UserRole.QA,
+            models.UserRole.QC
+        ]
+        
         # 1. Basic Counts
-        candidates_res = await db.execute(select(func.count(models.Case.id)))
+        candidates_stmt = select(func.count(models.Case.id))
+        if filter_verifier:
+            candidates_stmt = candidates_stmt.filter(models.Case.assigned_to == current_user.id)
+        candidates_res = await db.execute(candidates_stmt)
         total_candidates = candidates_res.scalar() or 0
         
         customers_res = await db.execute(select(func.count(models.Customer.id)))
         total_customers = customers_res.scalar() or 0
 
         # Current month entries for MoM comparison
-        this_month_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.received_date >= today.replace(day=1)))
+        this_month_stmt = select(func.count(models.Case.id)).filter(models.Case.received_date >= today.replace(day=1))
+        if filter_verifier:
+            this_month_stmt = this_month_stmt.filter(models.Case.assigned_to == current_user.id)
+        this_month_res = await db.execute(this_month_stmt)
         current_month = this_month_res.scalar() or 0
         
         # 2. Activity today
-        today_entry_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.received_date >= today))
+        today_entry_stmt = select(func.count(models.Case.id)).filter(models.Case.received_date >= today)
+        if filter_verifier:
+            today_entry_stmt = today_entry_stmt.filter(models.Case.assigned_to == current_user.id)
+        today_entry_res = await db.execute(today_entry_stmt)
         today_entry = today_entry_res.scalar() or 0
         
-        comp_today_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED, models.Case.completed_date >= today))
+        comp_today_stmt = select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED, models.Case.completed_date >= today)
+        if filter_verifier:
+            comp_today_stmt = comp_today_stmt.filter(models.Case.assigned_to == current_user.id)
+        comp_today_res = await db.execute(comp_today_stmt)
         completed_today = comp_today_res.scalar() or 0
         
         # 3. Status Distribution
         status_stmt = select(models.Case.status, func.count(models.Case.id)).group_by(models.Case.status)
+        if filter_verifier:
+            status_stmt = status_stmt.filter(models.Case.assigned_to == current_user.id)
         status_res = await db.execute(status_stmt)
         status_counts = dict(status_res.all())
         
-        interim_cases = sum(status_counts.get(s, 0) for s in [models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC])
+        interim_cases = sum(status_counts.get(s, 0) for s in [models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, models.CaseStatus.QA_PENDING])
         insufficient_cases = status_counts.get(models.CaseStatus.INSUFFICIENT, 0)
         pending_qc = status_counts.get(models.CaseStatus.QC, 0)
         
@@ -60,9 +83,13 @@ async def get_dashboard_stats(
             else: next_month = datetime(y, m + 1, 1)
             
             total_stmt = select(func.count(models.Case.id)).filter(models.Case.received_date >= month_start, models.Case.received_date < next_month)
+            if filter_verifier:
+                total_stmt = total_stmt.filter(models.Case.assigned_to == current_user.id)
             total_c = (await db.execute(total_stmt)).scalar() or 0
             
             comp_stmt = select(func.count(models.Case.id)).filter(models.Case.completed_date >= month_start, models.Case.completed_date < next_month)
+            if filter_verifier:
+                comp_stmt = comp_stmt.filter(models.Case.assigned_to == current_user.id)
             comp_c = (await db.execute(comp_stmt)).scalar() or 0
             
             analysis_data.append({
@@ -158,3 +185,96 @@ async def get_daily_report(db: AsyncSession = Depends(get_async_db)):
             "insufficient": 0
         }
     }
+
+
+@router.get("/verifier-daily", response_model=schemas.VerifierDailyResponse)
+async def get_verifier_daily(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns per-verifier case assignments and completion for today."""
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # All users that have cases assigned
+        stmt = (
+            select(
+                models.User.full_name,
+                models.User.email,
+                models.User.role,
+                func.count(models.Case.id).label("assigned"),
+                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
+            )
+            .outerjoin(models.Case, models.Case.assigned_to == models.User.id)
+            .group_by(models.User.id, models.User.full_name, models.User.email, models.User.role)
+        )
+        res = await db.execute(stmt)
+        rows = res.all()
+
+        verifiers = []
+        for full_name, email, role, assigned, completed in rows:
+            completed = int(completed or 0)
+            verifiers.append({
+                "verifier_name": full_name or email,
+                "verifier_email": email,
+                "role": role,
+                "assigned": assigned,
+                "completed": completed,
+                "in_progress": max(0, (assigned or 0) - completed),
+            })
+
+        return {"date": today.strftime("%Y-%m-%d"), "verifiers": verifiers}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+
+
+@router.get("/today-records", response_model=schemas.TodayRecordsResponse)
+async def get_today_records(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns today's received / completed / pending / insufficient per client."""
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        stmt = (
+            select(
+                models.Customer.name.label("client"),
+                func.count(models.Case.id).label("received"),
+                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
+                func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient"),
+            )
+            .join(models.Customer, models.Case.customer_id == models.Customer.id)
+            .filter(models.Case.received_date >= today)
+            .group_by(models.Customer.id, models.Customer.name)
+            .order_by(models.Customer.name)
+        )
+        res = await db.execute(stmt)
+        rows = res.all()
+
+        records = []
+        for client, received, completed, insufficient in rows:
+            completed = int(completed or 0)
+            insufficient = int(insufficient or 0)
+            pending = max(0, received - completed - insufficient)
+            records.append({
+                "client": client or "Unknown",
+                "received": received,
+                "completed": completed,
+                "pending": pending,
+                "insufficient": insufficient,
+            })
+
+        totals = {
+            "client": "TOTAL",
+            "received": sum(r["received"] for r in records),
+            "completed": sum(r["completed"] for r in records),
+            "pending": sum(r["pending"] for r in records),
+            "insufficient": sum(r["insufficient"] for r in records),
+        }
+        return {"date": today.strftime("%Y-%m-%d"), "records": records, "totals": totals}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+
