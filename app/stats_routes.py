@@ -196,7 +196,7 @@ async def get_verifier_daily(
     try:
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # All users that have cases assigned
+        # All users that have cases assigned, filtered for operational roles
         stmt = (
             select(
                 models.User.full_name,
@@ -206,6 +206,13 @@ async def get_verifier_daily(
                 func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
             )
             .outerjoin(models.Case, models.Case.assigned_to == models.User.id)
+            .filter(models.User.status == models.Status.ACTIVE)
+            .filter(models.User.role.in_([
+                models.UserRole.VERIFIER, 
+                models.UserRole.QC, 
+                models.UserRole.QA, 
+                models.UserRole.MANAGER
+            ]))
             .group_by(models.User.id, models.User.full_name, models.User.email, models.User.role)
         )
         res = await db.execute(stmt)

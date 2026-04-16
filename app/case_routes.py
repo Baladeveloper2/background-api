@@ -119,6 +119,8 @@ async def read_cases(
         joinedload(models.Case.customer),
         joinedload(models.Case.batch),
         joinedload(models.Case.assigned_user),
+        joinedload(models.Case.qa_user),
+        joinedload(models.Case.qc_user),
         selectinload(models.Case.checks)
     )
 
@@ -166,6 +168,8 @@ async def read_cases(
             case_data.batch_date = case.batch.upload_date
             case_data.batch_no = case.batch.batch_no
         if case.assigned_user: case_data.assigned_user_name = case.assigned_user.full_name
+        if case.qa_user: case_data.qa_user_name = case.qa_user.full_name
+        if case.qc_user: case_data.qc_user_name = case.qc_user.full_name
         cases_read.append(case_data)
     
     return cases_read
@@ -210,7 +214,10 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
         selectinload(models.Case.checks),
-        joinedload(models.Case.batch)
+        joinedload(models.Case.batch),
+        joinedload(models.Case.assigned_user),
+        joinedload(models.Case.qa_user),
+        joinedload(models.Case.qc_user)
     ).filter(models.Case.id == case_id)
     res = await db.execute(stmt)
     db_case = res.unique().scalar_one_or_none()
@@ -224,6 +231,9 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
     if db_case.batch:
         case_data.batch_no = db_case.batch.batch_no
         case_data.batch_date = db_case.batch.upload_date
+    if db_case.assigned_user: case_data.assigned_user_name = db_case.assigned_user.full_name
+    if db_case.qa_user: case_data.qa_user_name = db_case.qa_user.full_name
+    if db_case.qc_user: case_data.qc_user_name = db_case.qc_user.full_name
     return case_data
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
@@ -243,6 +253,9 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         db_case.completed_date = None
         
+    if update_data.get("assigned_to") and not db_case.assigned_at:
+        db_case.assigned_at = datetime.utcnow()
+
     for key, value in update_data.items():
         setattr(db_case, key, value)
     

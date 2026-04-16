@@ -240,6 +240,8 @@ class CaseBase(BaseModel):
     status: CaseStatus = CaseStatus.PENDING
     tat_days: int = 0
     assigned_to: Optional[str] = None
+    qa_id: Optional[str] = None
+    qc_id: Optional[str] = None
     
     @field_validator('status', mode='before')
     @classmethod
@@ -261,6 +263,10 @@ class CaseUpdate(BaseModel):
     candidate: Optional[CandidateUpdate] = None
     services: Optional[List[str]] = None
     check_rates: Optional[Dict[str, float]] = None
+    assigned_to: Optional[str] = None
+    qa_id: Optional[str] = None
+    qc_id: Optional[str] = None
+    assigned_at: Optional[datetime] = None
 
 class CaseCreateExtended(BaseModel):
     batch_id: str
@@ -273,6 +279,7 @@ class CaseCreateExtended(BaseModel):
 class Case(CaseBase):
     id: str
     received_date: datetime
+    assigned_at: Optional[datetime] = None
     completed_date: Optional[datetime] = None
     
     candidate: Optional[Candidate] = None
@@ -287,6 +294,9 @@ class CaseRead(Case):
     batch_date: Optional[datetime] = None
     batch_no: Optional[str] = None
     assigned_user_name: Optional[str] = None
+    qa_user_name: Optional[str] = None
+    qc_user_name: Optional[str] = None
+    queue_age: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -404,6 +414,7 @@ class DailyReportResponse(BaseModel):
 class VerifierDailyStat(BaseModel):
     verifier_name: str
     verifier_email: str
+    role: str
     assigned: int
     completed: int
     in_progress: int

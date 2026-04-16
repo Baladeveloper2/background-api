@@ -140,7 +140,10 @@ class Case(Base):
     batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True)
     status = Column(String(50), default=CaseStatus.PENDING, index=True)
     assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    qa_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    qc_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     received_date = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    assigned_at = Column(DateTime(timezone=True), nullable=True)
     completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
 
@@ -148,7 +151,9 @@ class Case(Base):
     candidate = relationship("Candidate", backref="cases")
     customer = relationship("Customer", backref="cases")
     batch = relationship("Batch", backref="cases")
-    assigned_user = relationship("User", foreign_keys=[assigned_to])
+    assigned_user = relationship("User", foreign_keys=[assigned_to], backref="assigned_cases")
+    qa_user = relationship("User", foreign_keys=[qa_id], backref="qa_cases")
+    qc_user = relationship("User", foreign_keys=[qc_id], backref="qc_cases")
     checks = relationship("VerificationCheck", back_populates="case", cascade="all, delete-orphan")
 
 class VerificationCheck(Base):

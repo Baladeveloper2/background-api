@@ -1,20 +1,14 @@
-import os
-from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
-
-load_dotenv()
-
-DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:password@localhost:3306/bgvms")
-engine = create_engine(DATABASE_URL)
+from sqlalchemy import text
+from app.database import engine
 
 def check_schema():
-    tables = ["users", "partners", "cases", "verification_checks", "candidates"]
-    with engine.connect() as connection:
-        for table in tables:
-            print(f"\n--- Schema for {table} ---")
-            result = connection.execute(text(f"DESCRIBE {table}"))
-            for row in result:
-                print(row)
+    with engine.connect() as conn:
+        print(f"Connecting to: {engine.url}")
+        res = conn.execute(text("DESCRIBE cases"))
+        rows = res.fetchall()
+        print("Columns in 'cases' table:")
+        for row in rows:
+            print(f" - {row[0]}: {row[1]}")
 
 if __name__ == "__main__":
     check_schema()
