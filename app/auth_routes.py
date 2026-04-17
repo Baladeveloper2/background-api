@@ -38,14 +38,15 @@ def check_permissions(role: models.UserRole):
     async def role_checker(current_user: models.User = Depends(get_current_user)):
         user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         target_role_str = str(role.value if hasattr(role, 'value') else role).upper()
-        if user_role_str == target_role_str or user_role_str == "SUPER_ADMIN": return current_user
+        is_sa = user_role_str == "SUPER_ADMIN" or (current_user.role_rel and current_user.role_rel.name == "Super Admin")
+        if user_role_str == target_role_str or is_sa: return current_user
         raise HTTPException(status_code=403, detail="Insufficient privileges")
     return role_checker
 
 def check_module_permission(module: str, sub_module: str = None, action: str = "read"):
     async def permission_checker(current_user: models.User = Depends(get_current_user)):
         if current_user.role == models.UserRole.SUPER_ADMIN: return current_user
-        
+        if current_user.role_rel and current_user.role_rel.name == "Super Admin": return current_user
         # Simplified permission check for async (can be expanded later)
         # Assuming permissions are in current_user.bvs_permissions or role_rel
         has_access = False
@@ -58,18 +59,30 @@ def check_module_permission(module: str, sub_module: str = None, action: str = "
                 rk = f"{module}.{sub_module}"
                 rp = current_user.role_rel.permissions.get(rk)
                 if isinstance(rp, dict) and rp.get(action): has_access = True
+                elif isinstance(rp, str):
+                    m = {"read": "R", "write": "W", "delete": "D"}[action]
+                    if m in rp: has_access = True
                 elif rp is True and action == "read": has_access = True
         else:
             if any((perms.get(module, {})).values()): has_access = True
             if current_user.role_rel and current_user.role_rel.permissions:
                 rp = current_user.role_rel.permissions.get(module)
                 if isinstance(rp, dict) and rp.get(action): has_access = True
+                elif isinstance(rp, str):
+                    m = {"read": "R", "write": "W", "delete": "D"}[action]
+                    if m in rp: has_access = True
                 elif rp is True and action == "read": has_access = True
 
         if not has_access:
             # Grant systemic write access to specific oversight roles for the verification module
             oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN]
-            if module == "bvs" and current_user.role in oversight_roles:
+            oversight_names = ["Super Admin", "QC Verifier"]
+            
+            is_oversight = current_user.role in oversight_roles
+            if current_user.role_rel and current_user.role_rel.name in oversight_names:
+                is_oversight = True
+
+            if module == "bvs" and is_oversight:
                 return current_user
             raise HTTPException(status_code=403, detail=f"No {action} access to {module}")
         return current_user
@@ -88,7 +101,13 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
     perms = (user.role_rel.permissions or {}).copy() if user.role_id and user.role_rel else (user.bvs_permissions or {}).copy()
 
     token = auth.create_access_token(
-        data={"sub": user.email, "id": user.id, "role": user.role, "full_name": user.full_name, "permissions": perms},
+        data={
+            "sub": user.email, 
+            "id": user.id, 
+            "role": user.role_rel.name if user.role_id and user.role_rel else ("Super Admin" if user.role == models.UserRole.SUPER_ADMIN else user.role), 
+            "full_name": user.full_name, 
+            "permissions": perms
+        },
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     return {"access_token": token, "token_type": "bearer"}
