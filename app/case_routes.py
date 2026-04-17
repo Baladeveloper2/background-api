@@ -11,8 +11,9 @@ from fastapi.responses import StreamingResponse
 import requests
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
+from .ocr_utils import get_scanner
 
-from .auth_routes import check_module_permission, limiter, get_current_user
+from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 
 router = APIRouter(
     prefix="/cases",
@@ -204,8 +205,8 @@ async def get_report_stats(customer_id: Optional[str] = None, db: AsyncSession =
     return {
         "pie_data": pie_data,
         "total_cases": total,
-        "completion_rate": round((completed / total * 100), 1) if total > 0 else 0,
-        "avg_tat": round(float(avg_tat), 1)
+        "completion_rate": float(round((completed / total * 100), 1)) if total > 0 else 0.0,
+        "avg_tat": float(round(float(avg_tat), 1))
     }
 
 @router.get("/{case_id}", response_model=schemas.CaseRead, dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
@@ -235,9 +236,120 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
     if db_case.qa_user: case_data.qa_user_name = db_case.qa_user.full_name
     if db_case.qc_user: case_data.qc_user_name = db_case.qc_user.full_name
     return case_data
+class BulkActionRequest(schemas.BaseModel):
+    case_ids: List[str]
+    action: str
+    target_value: Optional[str] = None
+
+@router.post("/face-match")
+async def face_match(req: dict, current_user: models.User = Depends(get_current_user)):
+    url1 = req.get("url1") # ID Photo
+    url2 = req.get("url2") # Profile/Selfie Photo
+    
+    if not url1 or not url2:
+        return {"success": False, "message": "Missing URLs"}
+        
+    try:
+        import requests
+        from .ocr_utils import get_scanner
+        
+        scanner = get_scanner()
+        
+        # Download images
+        r1 = requests.get(url1)
+        r2 = requests.get(url2)
+        
+        if r1.status_code != 200 or r2.status_code != 200:
+            return {"success": False, "message": "Failed to download images"}
+            
+        face1 = scanner.get_face(r1.content)
+        face2 = scanner.get_face(r2.content)
+        
+        if face1 is None: return {"success": False, "message": "No face detected in Image 1"}
+        if face2 is None: return {"success": False, "message": "No face detected in Image 2"}
+        
+        score = scanner.match_faces(face1, face2)
+        
+        return {
+            "success": True,
+            "match_score": round(score, 2),
+            "is_match": score > 60, # Threshold for match
+            "message": "Match successful" if score > 60 else "Potential mismatch"
+        }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+@router.post("/bulk-action", dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
+async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    if not req.case_ids:
+        return {"msg": "No cases provided"}
+        
+    update_data: Dict[str, Any] = {}
+    if req.action == "assign":
+        update_data["assigned_to"] = req.target_value
+        update_data["assigned_at"] = datetime.utcnow()
+    elif req.action == "status":
+        update_data["status"] = req.target_value
+        if req.target_value == models.CaseStatus.COMPLETED:
+            update_data["completed_date"] = datetime.utcnow()
+            
+    if not update_data:
+        return {"msg": "Invalid action"}
+        
+    stmt = update(models.Case).where(models.Case.id.in_(req.case_ids)).values(**update_data)
+    await db.execute(stmt)
+    await db.commit()
+    return {"msg": "Bulk action completed successfullly"}
+    
+    # Audit log and broadcast
+@router.post("/auto-allocate")
+async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    if not req.case_ids:
+        return {"msg": "No cases provided"}
+        
+    # 1. Fetch available verifiers
+    res_users = await db.execute(select(models.User).filter(models.User.role == models.UserRole.VERIFIER, models.User.status == "ACTIVE"))
+    verifiers = res_users.scalars().all()
+    
+    if not verifiers:
+        return {"msg": "No active verifiers found", "success": False}
+        
+    # 2. Get current workloads
+    # This counts cases with status PENDING or VERIFICATION assigned to each verifier
+    workloads = {}
+    for v in verifiers:
+        count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.assigned_to == v.id, models.Case.status != models.CaseStatus.COMPLETED))
+        workloads[v.id] = count_res.scalar() or 0
+        
+    # 3. Assign cases greedily to verifier with least cases
+    assigned_count = 0
+    from .ws import manager
+    
+    for cid in req.case_ids:
+        # Find verifier with minimum workload
+        target_v_id = min(workloads, key=workloads.get)
+        
+        # Update case
+        await db.execute(
+            update(models.Case).where(models.Case.id == cid).values(
+                assigned_to=target_v_id,
+                assigned_at=datetime.utcnow()
+            )
+        )
+        
+        # Increment workload for next iteration
+        workloads[target_v_id] += 1
+        assigned_count += 1
+        
+        # Audit log and broadcast
+        await create_audit_log(db, current_user.id, "AUTO_ALLOCATION", f"Case automatically assigned to verifier", resource_id=cid)
+        await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "auto-assignment"})
+        
+    await db.commit()
+    return {"msg": f"Successfully auto-allocated {assigned_count} cases", "success": True}
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSession = Depends(get_async_db)):
+async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     res = await db.execute(select(models.Case).filter(models.Case.id == case_id))
     db_case = res.scalar_one_or_none()
     if db_case is None:
@@ -257,6 +369,12 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
         db_case.assigned_at = datetime.utcnow()
 
     for key, value in update_data.items():
+        if getattr(db_case, key) != value:
+            # Simple audit log for status changes
+            if key == "status":
+                await create_audit_log(db, current_user.id, "STATUS_CHANGE", f"Case status updated from {db_case.status} to {value}", resource_id=case_id)
+            elif key == "assigned_to":
+                await create_audit_log(db, current_user.id, "CASE_ASSIGNMENT", f"Case assigned to user ID {value}", resource_id=case_id)
         setattr(db_case, key, value)
     
     # Update or Create Candidate
@@ -315,6 +433,24 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     db_case = res.unique().scalar_one()
 
     return db_case
+
+@router.get("/{resource_id}/audit-logs", response_model=List[schemas.AuditLogRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
+async def get_audit_logs(resource_id: str, db: AsyncSession = Depends(get_async_db)):
+    # Note: I used DATABASE_get_async_db to avoid conflict with local variable if any, 
+    # but the import is actually get_async_db in this file. Correcting to get_async_db.
+    stmt = (
+        select(models.AuditLog, models.User.full_name.label("user_full_name"))
+        .outerjoin(models.User, models.AuditLog.user_id == models.User.id)
+        .filter(models.AuditLog.resource_id == resource_id)
+        .order_by(models.AuditLog.timestamp.desc())
+    )
+    res = await db.execute(stmt)
+    results = []
+    for log, full_name in res.all():
+        log_data = schemas.AuditLogRead.model_validate(log)
+        log_data.user_full_name = full_name
+        results.append(log_data)
+    return results
 
 @router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def delete_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
@@ -392,3 +528,88 @@ async def bulk_allocate(data: Dict[str, Any], db: AsyncSession = Depends(get_asy
     await db.execute(update(models.Case).where(models.Case.id.in_(case_ids)).values(assigned_to=user_id))
     await db.commit()
     return {"message": "Success"}
+
+@router.post("/ocr-extract")
+async def ocr_extract(data: Dict[str, str], db: AsyncSession = Depends(get_async_db)):
+    url = data.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="Document URL required")
+    
+    try:
+        # Fetch the document
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch document")
+        
+        # OCR Processing
+        scanner = get_scanner()
+        text = scanner.reader.readtext(response.content, detail=0)
+        full_text = " ".join(text)
+        
+        # Basic parsing
+        extracted = scanner.parse_id(full_text)
+        
+        return {
+            "success": True,
+            "extracted_data": extracted,
+            "raw_text_debug": str(full_text)[:500] # for debugging
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/{case_id}/ai-summary")
+async def generate_ai_summary(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    stmt = select(models.Case).options(
+        joinedload(models.Case.candidate),
+        selectinload(models.Case.checks)
+    ).filter(models.Case.id == case_id)
+    
+    res = await db.execute(stmt)
+    db_case = res.unique().scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=404, detail="Case not found")
+        
+    checks = db_case.checks
+    summary_parts = []
+    
+    # 1. Overall Status
+    status_counts = {}
+    for c in checks:
+        status_counts[c.status] = status_counts.get(c.status, 0) + 1
+    
+    overall = "GREEN" if status_counts.get("GREEN") == len(checks) else "AMBER" if status_counts.get("RED") else "GREEN"
+    if status_counts.get("RED"): overall = "RED"
+    
+    name = db_case.candidate.name if db_case.candidate else "The candidate"
+    summary_parts.append(f"Verification Summary for {name}:")
+    summary_parts.append(f"The overall verification status is {overall}.")
+    
+    # 2. Key Findings
+    findings = []
+    for c in checks:
+        if c.status == "GREEN":
+            findings.append(f"• {c.check_type}: Verified successfully with no discrepancies.")
+        elif c.status == "RED":
+            findings.append(f"• {c.check_type}: CRITICAL DISCREPANCY FOUND. {c.verifier_remarks or 'Verification failed.'}")
+        elif c.status == "AMBER":
+            findings.append(f"• {c.check_type}: Minor discrepancy noted. {c.verifier_remarks or 'Check results were clear with minor remarks.'}")
+        else:
+            findings.append(f"• {c.check_type}: Verification is currently {c.status}.")
+            
+    summary_parts.extend(findings)
+    
+    # 3. Final Conclusion
+    if overall == "GREEN":
+        summary_parts.append("\nConclusion: All provided credentials and background details have been verified as authentic. The candidate is cleared for further processing.")
+    elif overall == "RED":
+        summary_parts.append("\nConclusion: Due to critical discrepancies found in one or more verification modules, extreme caution is advised. Further internal review is recommended.")
+    else:
+        summary_parts.append("\nConclusion: The verification process revealed minor inconsistencies. Please review the specific notes for each module.")
+        
+    full_summary = "\n".join(summary_parts)
+    
+    # Save to DB
+    db_case.ai_summary = full_summary
+    await db.commit()
+    
+    return {"summary": full_summary}

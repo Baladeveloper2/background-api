@@ -242,6 +242,7 @@ class CaseBase(BaseModel):
     assigned_to: Optional[str] = None
     qa_id: Optional[str] = None
     qc_id: Optional[str] = None
+    ai_summary: Optional[str] = None
     
     @field_validator('status', mode='before')
     @classmethod
@@ -434,3 +435,19 @@ class TodayRecordsResponse(BaseModel):
     date: str
     records: List[TodayClientRecord]
     totals: TodayClientRecord
+
+class AuditLogRead(BaseModel):
+    id: str
+    user_id: str
+    action: str
+    resource_id: Optional[str] = None
+    details: str
+    timestamp: datetime
+    user_full_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class BulkActionRequest(BaseModel):
+    case_ids: List[str]
+    action: str # 'status', 'assign', 'delete', 'allocate'
+    target_value: Optional[str] = None

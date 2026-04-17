@@ -66,3 +66,4 @@ get_db_sync = get_db
 
 # For backward compatibility
 engine = sync_engine
+SQLALCHEMY_DATABASE_URL = SYNC_URL

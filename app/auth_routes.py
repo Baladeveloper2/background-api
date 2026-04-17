@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from datetime import timedelta
+from typing import Optional
 from jose import JWTError, jwt
 from . import models, schemas, auth, database
 from slowapi import Limiter
@@ -34,6 +35,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     if user is None: raise credentials_exception
     return user
 
+async def create_audit_log(db: AsyncSession, user_id: str, action: str, details: str, resource_id: Optional[str] = None):
+    log = models.AuditLog(user_id=user_id, action=action, details=details, resource_id=resource_id)
+    db.add(log)
+    await db.flush()
+
 def check_permissions(role: models.UserRole):
     async def role_checker(current_user: models.User = Depends(get_current_user)):
         user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
@@ -43,7 +49,7 @@ def check_permissions(role: models.UserRole):
         raise HTTPException(status_code=403, detail="Insufficient privileges")
     return role_checker
 
-def check_module_permission(module: str, sub_module: str = None, action: str = "read"):
+def check_module_permission(module: str, sub_module: Optional[str] = None, action: str = "read"):
     async def permission_checker(current_user: models.User = Depends(get_current_user)):
         if current_user.role == models.UserRole.SUPER_ADMIN: return current_user
         if current_user.role_rel and current_user.role_rel.name == "Super Admin": return current_user

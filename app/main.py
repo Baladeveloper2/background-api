@@ -74,6 +74,16 @@ app.include_router(stats_routes.router)
 app.include_router(role_routes.router)
 app.include_router(media_routes.router)
 
+from .ws import manager, WebSocketDisconnect, WebSocket
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
 @app.get("")
 async def root():
     return {"message": "Welcome to Background Verification Management System API"}

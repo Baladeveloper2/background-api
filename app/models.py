@@ -146,6 +146,7 @@ class Case(Base):
     assigned_at = Column(DateTime(timezone=True), nullable=True)
     completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
+    ai_summary = Column(Text, nullable=True) # AI-generated executive summary
 
     # Relationships
     candidate = relationship("Candidate", backref="cases")
@@ -174,5 +175,6 @@ class AuditLog(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"))
     action = Column(String(255), index=True)
+    resource_id = Column(String(100), index=True, nullable=True) # ID of Case, Batch, etc.
     details = Column(Text)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
