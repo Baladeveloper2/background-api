@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+import json
 from typing import List
 from . import models, schemas, auth_routes
 from .database import get_db_sync as get_db
@@ -34,15 +35,31 @@ async def check_candidate_update_access(current_user: models.User = Depends(auth
     
     # Check for either recruitment management or BVS verification write access
     perms = current_user.bvs_permissions or {}
+    if isinstance(perms, str):
+        try: perms = json.loads(perms)
+        except: perms = {}
+        
     role_perms = current_user.role_rel.permissions if current_user.role_rel else {}
+    if isinstance(role_perms, str):
+        try: role_perms = json.loads(role_perms)
+        except: role_perms = {}
     
-    # Check Recruit Module
-    if perms.get("recruit", {}).get("management"): return current_user
-    if role_perms.get("recruit.management", {}).get("write"): return current_user
-    
-    # Check BVS Module (allowing verifiers to attach proofs)
-    if perms.get("bvs", {}).get("verification"): return current_user
-    if role_perms.get("bvs.verification", {}).get("write"): return current_user
+    # Role-based systemic access (matching auth_routes oversight logic)
+    oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN]
+    if current_user.role in oversight_roles: return current_user
+    if current_user.role_rel and current_user.role_rel.name in ["Super Admin", "QC Verifier", "Case Auditor"]: return current_user
+
+    # Granular permission check
+    def has_write(p_obj, key):
+        val = p_obj.get(key)
+        if val is True: return True
+        if isinstance(val, dict) and val.get("write"): return True
+        if isinstance(val, str) and "W" in val.upper(): return True
+        return False
+
+    # Check Recruit Module or BVS Module
+    if has_write(perms, "recruit") or has_write(role_perms, "recruit.management"): return current_user
+    if has_write(perms, "bvs") or has_write(role_perms, "bvs.verification"): return current_user
     
     raise HTTPException(status_code=403, detail="Insufficient permissions to update candidate record")
 

@@ -226,6 +226,35 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
         
+    # Dynamic fix for media visibility: Populate candidate.documents from address_details if empty
+    if db_case.candidate and (not db_case.candidate.documents) and db_case.candidate.address_details:
+        all_docs = []
+        doc_mapping = {
+            'addresses': 'Address',
+            'employments': 'Employment',
+            'educations': 'Education',
+            'identities': 'Identity',
+            'references': 'Reference',
+            'criminal_records': 'Criminal',
+            'drug_tests': 'Drug Test',
+            'cibil_checks': 'CIBIL',
+            'global_database_checks': 'Global Database'
+        }
+        
+        addr_details = db_case.candidate.address_details
+        for key, check_label in doc_mapping.items():
+            section_items = addr_details.get(key, [])
+            if isinstance(section_items, list):
+                for item in section_items:
+                    if isinstance(item, dict) and 'files' in item and isinstance(item['files'], list):
+                        for f in item['files']:
+                            if isinstance(f, dict):
+                                doc_item = f.copy()
+                                doc_item['check_type'] = check_label
+                                all_docs.append(doc_item)
+        
+        db_case.candidate.documents = all_docs
+
     case_data = schemas.CaseRead.model_validate(db_case)
     if db_case.candidate: case_data.candidate_name = db_case.candidate.name
     if db_case.customer: case_data.customer_name = db_case.customer.name
