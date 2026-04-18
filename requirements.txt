@@ -20,3 +20,4 @@ slowapi
 firebase-admin
 pypdf
 Pillow
+aiomysql
