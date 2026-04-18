@@ -21,3 +21,5 @@ firebase-admin
 pypdf
 Pillow
 aiomysql
+boto3
+requests

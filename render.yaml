@@ -12,5 +12,7 @@ services:
         generateValue: true
       - key: CLOUDINARY_URL
         sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: REDIS_URL
         sync: false
