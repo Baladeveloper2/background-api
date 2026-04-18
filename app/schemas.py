@@ -157,6 +157,9 @@ class BatchSummary(BaseModel):
     case_rate: float
     age_days: int
     pending_count: int
+    verification_active_count: int = 0
+    qc_active_count: int = 0
+    qa_pending_count: int = 0
     completed_count: int
     tat: int
     total_value: float

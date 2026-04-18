@@ -67,7 +67,11 @@ async def read_batches_summary(
     case_counts = select(
         models.Case.batch_id,
         func.count(models.Case.id).label("actual_case_count"),
-        func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("pending_count"),
+        func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("total_pending_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.PENDING, 1), else_=0)).label("pending_arrival_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.VERIFICATION, 1), else_=0)).label("verification_active_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.QC, 1), else_=0)).label("qc_active_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.QA_PENDING, 1), else_=0)).label("qa_pending_count"),
         func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
         func.sum(case((models.Case.status.in_([models.CaseStatus.VERIFICATION, models.CaseStatus.QC]), 1), else_=0)).label("in_progress_count"),
         func.max(models.Case.completed_date).label("completed_date")
@@ -92,7 +96,11 @@ async def read_batches_summary(
         models.Batch.case_rate,
         models.Batch.file_url,
         case_counts.c.actual_case_count,
-        case_counts.c.pending_count,
+        case_counts.c.total_pending_count,
+        case_counts.c.pending_arrival_count,
+        case_counts.c.verification_active_count,
+        case_counts.c.qc_active_count,
+        case_counts.c.qa_pending_count,
         case_counts.c.completed_count,
         case_counts.c.in_progress_count,
         case_counts.c.completed_date,
@@ -124,6 +132,22 @@ async def read_batches_summary(
         if total_value == 0 and r.case_rate and r.cases_count:
             total_value = r.case_rate * r.cases_count
 
+        # Operational Status Hierarchy Logic
+        if (r.total_pending_count or 0) == 0 and (r.actual_case_count or 0) >= (r.cases_count or 0):
+            batch_status = "Completed"
+        elif (r.qa_pending_count or 0) > 0:
+            batch_status = "QA Pending"
+        elif (r.qc_active_count or 0) > 0:
+            batch_status = "In QC Stage"
+        elif (r.verification_active_count or 0) > 0:
+            batch_status = "Verifying"
+        elif (r.actual_case_count or 0) < (r.cases_count or 0):
+            batch_status = "Partial Entry"
+        elif (r.pending_arrival_count or 0) > 0:
+            batch_status = "Ready for Verif"
+        else:
+            batch_status = "Entry Pending"
+
         summaries.append({
             "id": r.id,
             "batch_no": r.batch_no,
@@ -134,16 +158,16 @@ async def read_batches_summary(
             "intended_cases": r.cases_count or 0,
             "case_rate": r.case_rate or 0,
             "age_days": max(0, age),
-            "pending_count": r.pending_count or 0,
+            "pending_count": r.pending_arrival_count or 0,
+            "verification_active_count": int(r.verification_active_count or 0),
+            "qc_active_count": int(r.qc_active_count or 0),
+            "qa_pending_count": int(r.qa_pending_count or 0),
             "completed_count": int(r.completed_count or 0),
             "tat": r.tat_days or 10,
             "total_value": total_value,
             "completed_date": r.completed_date,
             "file_url": r.file_url,
-            "status": "Completed" if (r.pending_count or 0) == 0 and (r.actual_case_count or 0) >= (r.cases_count or 0) 
-                      else "In-Progress" if (r.in_progress_count or 0) > 0 or (r.completed_count or 0) > 0
-                      else "Ready for Verification" if (r.actual_case_count or 0) >= (r.cases_count or 0)
-                      else "Entry Pending"
+            "status": batch_status
         })
     return summaries
 
