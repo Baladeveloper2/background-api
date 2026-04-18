@@ -340,3 +340,49 @@ async def get_throughput_heatmap(
         traceback.print_exc()
         raise HTTPException(500, detail=str(e))
 
+@router.get("/cumulative", response_model=schemas.TodayRecordsResponse)
+async def get_cumulative_stats(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns all-time received / completed / pending / insufficient per client."""
+    try:
+        stmt = (
+            select(
+                models.Customer.name.label("client"),
+                func.count(models.Case.id).label("received"),
+                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
+                func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient"),
+            )
+            .join(models.Customer, models.Case.customer_id == models.Customer.id)
+            .group_by(models.Customer.id, models.Customer.name)
+            .order_by(models.Customer.name)
+        )
+        res = await db.execute(stmt)
+        rows = res.all()
+
+        records = []
+        for client, received, completed, insufficient in rows:
+            completed = int(completed or 0)
+            insufficient = int(insufficient or 0)
+            pending = max(0, received - completed - insufficient)
+            records.append({
+                "client": client or "Unknown",
+                "received": received,
+                "completed": completed,
+                "pending": pending,
+                "insufficient": insufficient,
+            })
+
+        totals = {
+            "client": "TOTAL",
+            "received": sum(r["received"] for r in records),
+            "completed": sum(r["completed"] for r in records),
+            "pending": sum(r["pending"] for r in records),
+            "insufficient": sum(r["insufficient"] for r in records),
+        }
+        return {"date": "ALL TIME", "records": records, "totals": totals}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+
