@@ -334,6 +334,11 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
         update_data["status"] = req.target_value
         if req.target_value == models.CaseStatus.COMPLETED:
             update_data["completed_date"] = datetime.utcnow()
+            # Attribute audit/completion to the actor
+            if current_user.role == models.UserRole.QC:
+                update_data["qc_id"] = current_user.id
+            if current_user.role == models.UserRole.QA:
+                update_data["qa_id"] = current_user.id
             
     if not update_data:
         return {"msg": "Invalid action"}
@@ -404,9 +409,17 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
 
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
         db_case.completed_date = datetime.utcnow()
+        # Attribute completion credit to current user based on role
+        if current_user.role == models.UserRole.QC:
+            db_case.qc_id = current_user.id
+        elif current_user.role == models.UserRole.QA:
+            db_case.qa_id = current_user.id
+    elif update_data.get("status") == models.CaseStatus.QC and db_case.status != models.CaseStatus.QC:
+         if current_user.role == models.UserRole.QA:
+            db_case.qa_id = current_user.id # QA Verifier moving it to QC Auditor stage
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         db_case.completed_date = None
-        
+
     if update_data.get("assigned_to") and not db_case.assigned_at:
         db_case.assigned_at = datetime.utcnow()
 

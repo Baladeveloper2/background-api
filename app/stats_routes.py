@@ -197,6 +197,8 @@ async def get_verifier_daily(
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         # All users that have cases assigned, filtered for operational roles
+        # We need to consider assignments across assigned_to, qc_id, and qa_id
+        from sqlalchemy import or_
         stmt = (
             select(
                 models.User.full_name,
@@ -205,7 +207,11 @@ async def get_verifier_daily(
                 func.count(models.Case.id).label("assigned"),
                 func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
             )
-            .outerjoin(models.Case, models.Case.assigned_to == models.User.id)
+            .outerjoin(models.Case, or_(
+                models.Case.assigned_to == models.User.id,
+                models.Case.qc_id == models.User.id,
+                models.Case.qa_id == models.User.id
+            ))
             .filter(models.User.status == models.Status.ACTIVE)
             .filter(models.User.role.in_([
                 models.UserRole.VERIFIER, 

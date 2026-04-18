@@ -8,7 +8,7 @@ async def check():
         res = await db.execute(select(User))
         users = res.scalars().all()
         for u in users:
-            print(f"USER: {u.full_name}, Email: {u.email}, Role: {u.role}")
+            print(f"ID: {u.id}, USER: {u.full_name}, Email: {u.email}, Role: {u.role}")
 
 if __name__ == "__main__":
     asyncio.run(check())
