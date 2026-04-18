@@ -37,7 +37,7 @@ else:
     )
 
 @router.post("/upload")
-@limiter.limit("20/minute")
+@limiter.limit("100/minute")
 async def upload_file(
     request: Request,
     file: UploadFile = File(...),
@@ -52,13 +52,15 @@ async def upload_file(
         resource_type = "image" if ext in ['.pdf', '.jpg', '.jpeg', '.png'] else "raw"
         
         file_data = await file.read()
+        file_size = len(file_data)
         base_filename = "".join([c if c.isalnum() or c in ['-', '_'] else '_' for c in os.path.splitext(file.filename)[0]])
         
-        # S3 Upload logic (run in thread to avoid blocking)
+        # S3 Upload logic
         if s3_client and aws_bucket:
             unique_filename = f"bgv_documents/{uuid.uuid4()}_{file.filename}"
             from io import BytesIO
             
+            print(f"DEBUG: Starting S3 upload to {aws_bucket}/{unique_filename}")
             await to_thread.run_sync(
                 s3_client.upload_fileobj,
                 BytesIO(file_data),
@@ -66,13 +68,17 @@ async def upload_file(
                 unique_filename,
                 {'ContentType': file.content_type}
             )
+            print(f"DEBUG: S3 upload successful: {unique_filename}")
             
             return {
                 "url": f"https://{aws_bucket}.s3.{aws_region}.amazonaws.com/{unique_filename}",
                 "public_id": unique_filename,
+                "path": unique_filename,
                 "resource_type": resource_type,
                 "storage_provider": "s3",
-                "original_filename": file.filename
+                "original_filename": file.filename,
+                "mimetype": file.content_type,
+                "size": file_size
             }
 
         # Cloudinary Fallback
@@ -87,9 +93,12 @@ async def upload_file(
         return {
             "url": upload_result.get("secure_url"),
             "public_id": upload_result.get("public_id"),
+            "path": upload_result.get("public_id"),
             "resource_type": upload_result.get("resource_type"),
             "storage_provider": "cloudinary",
-            "original_filename": file.filename
+            "original_filename": file.filename,
+            "mimetype": file.content_type,
+            "size": file_size
         }
     except Exception as e:
         provider = "S3" if (s3_client and aws_bucket) else "Cloudinary"

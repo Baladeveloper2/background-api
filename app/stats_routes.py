@@ -285,3 +285,58 @@ async def get_today_records(
         traceback.print_exc()
         raise HTTPException(500, detail=str(e))
 
+
+@router.get("/throughput", response_model=schemas.ThroughputResponse)
+async def get_throughput_heatmap(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Calculates hourly throughput for today and generates a load forecast."""
+    try:
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # 1. Actual Load: Case entries per hour for today
+        load_stmt = (
+            select(
+                extract('hour', models.Case.received_date).label('hour'),
+                func.count(models.Case.id).label('load')
+            )
+            .filter(models.Case.received_date >= today)
+            .group_by(extract('hour', models.Case.received_date))
+        )
+        load_res = await db.execute(load_stmt)
+        actual_load = {int(h): l for h, l in load_res.all()}
+        
+        # 2. Forecast: Average actions per hour for the last 7 days
+        week_ago = today - timedelta(days=7)
+        forecast_stmt = (
+            select(
+                extract('hour', models.Case.received_date).label('hour'),
+                func.count(models.Case.id).label('total_load')
+            )
+            .filter(models.Case.received_date >= week_ago, models.Case.received_date < today)
+            .group_by(extract('hour', models.Case.received_date))
+        )
+        forecast_res = await db.execute(forecast_stmt)
+        forecast_raw = {int(h): l for h, l in forecast_res.all()}
+        
+        heatmap_data = []
+        # Standard active hours (08:00 to 20:00)
+        for h in range(8, 21, 2):
+            hour_str = f"{str(h).zfill(2)}:00"
+            load = actual_load.get(h, 0)
+            # Forecast is weekly total / 7, or fallback to load + random variance if no history
+            forecast = int(forecast_raw.get(h, 0) / 7) or (load + (10 if h < 16 else -10))
+            if forecast < 10: forecast = 15 # baseline
+            
+            heatmap_data.append({
+                "hour": hour_str,
+                "load": load,
+                "forecast": forecast
+            })
+            
+        return {"date": today.strftime("%Y-%m-%d"), "data": heatmap_data}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+

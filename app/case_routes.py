@@ -524,8 +524,18 @@ async def merge_pdfs(case_id: str, request: Request, background_tasks: Backgroun
 async def bulk_allocate(data: Dict[str, Any], db: AsyncSession = Depends(get_async_db)):
     case_ids = data.get("case_ids", [])
     user_id = data.get("user_id")
-    if not user_id and user_id is not None: raise HTTPException(400, "User ID required")
-    await db.execute(update(models.Case).where(models.Case.id.in_(case_ids)).values(assigned_to=user_id))
+    
+    update_vals = {
+        "assigned_to": user_id,
+        "assigned_at": datetime.utcnow() if user_id else None,
+        "status": models.CaseStatus.VERIFICATION if user_id else models.CaseStatus.PENDING
+    }
+    
+    await db.execute(
+        update(models.Case)
+        .where(models.Case.id.in_(case_ids))
+        .values(**update_vals)
+    )
     await db.commit()
     return {"message": "Success"}
 
@@ -613,3 +623,55 @@ async def generate_ai_summary(case_id: str, db: AsyncSession = Depends(get_async
     await db.commit()
     
     return {"summary": full_summary}
+
+@router.get("/{case_id}/comments", response_model=List[schemas.CaseComment])
+async def read_case_comments(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    stmt = (
+        select(models.CaseComment, models.User.full_name.label("user_full_name"))
+        .outerjoin(models.User, models.CaseComment.user_id == models.User.id)
+        .filter(models.CaseComment.case_id == case_id)
+        .order_by(models.CaseComment.created_at.asc())
+    )
+    res = await db.execute(stmt)
+    results = []
+    for comment, full_name in res.all():
+        data = schemas.CaseComment.model_validate(comment)
+        data.user_full_name = full_name
+        results.append(data)
+    return results
+
+@router.post("/{case_id}/comments", response_model=schemas.CaseComment)
+async def create_case_comment(
+    case_id: str, 
+    comment: schemas.CaseCommentCreate, 
+    db: AsyncSession = Depends(get_async_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    db_comment = models.CaseComment(
+        case_id=case_id,
+        user_id=current_user.id,
+        content=comment.content
+    )
+    db.add(db_comment)
+    await db.commit()
+    
+    # Reload with user name
+    res = await db.execute(
+        select(models.CaseComment, models.User.full_name.label("user_full_name"))
+        .outerjoin(models.User, models.CaseComment.user_id == models.User.id)
+        .filter(models.CaseComment.id == db_comment.id)
+    )
+    comment_model, full_name = res.one()
+    data = schemas.CaseComment.model_validate(comment_model)
+    data.user_full_name = full_name
+    
+    # Broadcast to WebSockets
+    from .ws import manager
+    await manager.broadcast({
+        "type": "NEW_COMMENT",
+        "case_id": case_id,
+        "user": full_name,
+        "content": comment.content
+    })
+    
+    return data

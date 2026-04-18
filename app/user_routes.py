@@ -50,7 +50,7 @@ async def read_users(
     skip: int = 0, 
     limit: int = 100, 
     db: AsyncSession = Depends(database.get_async_db),
-    current_user: models.User = Depends(check_module_permission("bms", "applicants"))
+    current_user: models.User = Depends(get_current_user)
 ):
     res = await db.execute(select(models.User).offset(skip).limit(limit))
     users = res.scalars().all()

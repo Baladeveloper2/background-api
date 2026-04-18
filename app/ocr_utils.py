@@ -41,8 +41,18 @@ class OCRScanner:
             if pan_match:
                 data["id_number"] = pan_match.group()
             
+            # Name is usually the line after "INCOME TAX DEPARTMENT" or common labels
+            # We'll look for Uppercase words that don't match common labels
+            lines = text.split(' ')
+            for line in lines:
+                if len(line) > 3 and line.isupper() and not any(x in line for x in ['INCOME', 'TAX', 'DEPARTMENT', 'INDIA', 'GOVT', 'PERMANENT', 'ACCOUNT', 'NUMBER', 'CARD']):
+                   if not data["name_on_id"]:
+                       data["name_on_id"] = line
+                   elif not data["father_name"] and line != data["name_on_id"]:
+                       data["father_name"] = line
+            
         # Aadhaar Detection
-        elif re.search(r'Aadhaar|Unique Identification Authority', text, re.IGNORECASE):
+        elif re.search(r'Aadhaar| Unique Identification Authority', text, re.IGNORECASE):
             data["id_type"] = "Aadhaar Card"
             aadhaar_match = re.search(r'\d{4}\s?\d{4}\s?\d{4}', text)
             if aadhaar_match:
@@ -50,10 +60,28 @@ class OCRScanner:
             
             if "Male" in text: data["gender"] = "Male"
             elif "Female" in text: data["gender"] = "Female"
+
+            # Name extraction for Aadhaar is tricky from raw text, 
+            # but usually it's the first few words that are not "Aadhaar" or "Authority"
+            words = text.split(' ')
+            potential_names = [w for w in words if w.isalpha() and len(w) > 2 and w[0].isupper() and w.upper() not in ['AADHAAR', 'UNIQUE', 'IDENTIFICATION', 'AUTHORITY', 'GOVERNMENT', 'INDIA', 'MALE', 'FEMALE']]
+            if potential_names:
+                data["name_on_id"] = " ".join(potential_names[:2])
             
             dob_match = re.search(r'DOB:?\s?(\d{2}/\d{2}/\d{4})', text)
             if dob_match:
                 data["dob_on_id"] = dob_match.group(1)
+
+            # Father/Husband Name (S/O, D/O, W/O)
+            parent_match = re.search(r'(?:S/O|D/O|W/O):?\s?([A-Z\s]+)', text, re.IGNORECASE)
+            if parent_match:
+                data["father_name"] = parent_match.group(1).strip()
+
+            # Address (usually after a pin code or specific keywords)
+            # This is very rough but better than nothing
+            address_match = re.search(r'Address:?\s?(.+?)\s?\d{6}', text, re.IGNORECASE)
+            if address_match:
+                data["address"] = address_match.group(1).strip()
 
         return data
 

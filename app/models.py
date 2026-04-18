@@ -178,3 +178,14 @@ class AuditLog(Base):
     resource_id = Column(String(100), index=True, nullable=True) # ID of Case, Batch, etc.
     details = Column(Text)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+class CaseComment(Base):
+    __tablename__ = "case_comments"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), index=True)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    user = relationship("User")
+    case = relationship("Case", backref="comments")

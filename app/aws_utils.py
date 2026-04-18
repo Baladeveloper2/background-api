@@ -20,11 +20,11 @@ def get_s3_client():
             aws_access_key_id=aws_access_key,
             aws_secret_access_key=aws_secret_key,
             region_name=aws_region,
-            endpoint_url=f"https://s3.{aws_region}.amazonaws.com",
-            config=Config(signature_version='s3v4')
+            config=Config(signature_version='s3v4', retries={'max_attempts': 3})
         )
         return client
-    except Exception:
+    except Exception as e:
+        print(f"ERROR: Failed to create S3 client: {str(e)}")
         return None
 
 s3_client = get_s3_client()

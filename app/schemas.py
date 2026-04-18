@@ -436,6 +436,15 @@ class TodayRecordsResponse(BaseModel):
     records: List[TodayClientRecord]
     totals: TodayClientRecord
 
+class HeatmapPoint(BaseModel):
+    hour: str
+    load: int
+    forecast: int
+
+class ThroughputResponse(BaseModel):
+    date: str
+    data: List[HeatmapPoint]
+
 class AuditLogRead(BaseModel):
     id: str
     user_id: str
@@ -451,3 +460,19 @@ class BulkActionRequest(BaseModel):
     case_ids: List[str]
     action: str # 'status', 'assign', 'delete', 'allocate'
     target_value: Optional[str] = None
+
+class CaseCommentBase(BaseModel):
+    content: str
+
+class CaseCommentCreate(CaseCommentBase):
+    pass
+
+class CaseComment(CaseCommentBase):
+    id: str
+    case_id: str
+    user_id: str
+    created_at: datetime
+    user_full_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+

@@ -7,11 +7,8 @@ async def check():
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(Case))
         cases = res.scalars().all()
-        print(f"TOTAL CASES: {len(cases)}")
-        
-        res_u = await db.execute(select(User))
-        users = res_u.scalars().all()
-        print(f"TOTAL USERS: {len(users)}")
+        for c in cases:
+            print(f"ID: {c.id}, Assigned: {c.assigned_to}")
 
 if __name__ == "__main__":
     asyncio.run(check())
