@@ -99,6 +99,19 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSessi
     res = await db.execute(stmt)
     return res.unique().scalar_one()
 
+@router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
+async def get_allocation_stats(db: AsyncSession = Depends(get_async_db)):
+    unallocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to == None)
+    allocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to != None)
+    
+    unallocated_res = await db.execute(unallocated_stmt)
+    allocated_res = await db.execute(allocated_stmt)
+    
+    return {
+        "unallocated": unallocated_res.scalar() or 0,
+        "allocated": allocated_res.scalar() or 0
+    }
+
 @router.get("", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def read_cases(
     response: Response,
