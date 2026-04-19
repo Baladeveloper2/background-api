@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import (
     models, auth_routes, customer_routes, partner_routes, 
     user_routes, candidate_routes, batch_routes, case_routes, 
-    verification_routes, stats_routes, role_routes, media_routes
+    verification_routes, stats_routes, role_routes, media_routes,
+    notification_routes
 )
 from .database import engine, Base, get_async_db, async_engine
 from sqlalchemy import text, select
@@ -74,6 +75,7 @@ app.include_router(verification_routes.router)
 app.include_router(stats_routes.router)
 app.include_router(role_routes.router)
 app.include_router(media_routes.router)
+app.include_router(notification_routes.router)
 
 from .ws import manager, WebSocketDisconnect, WebSocket
 @app.websocket("/ws")

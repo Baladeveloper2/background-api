@@ -18,18 +18,21 @@ async def get_dashboard_stats(
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
         # Determine if we should filter by verifier
-        filter_verifier = current_user.role not in [
-            models.UserRole.SUPER_ADMIN, 
-            models.UserRole.ADMIN, 
-            models.UserRole.MANAGER,
-            models.UserRole.QA,
-            models.UserRole.QC
-        ]
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        
+        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        is_admin = user_role in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"] or role_name in ["SUPER ADMIN", "QC VERIFIER"]
+        
+        filter_verifier = not (is_admin or is_customer)
+        filter_customer = is_customer
         
         # 1. Basic Counts
         candidates_stmt = select(func.count(models.Case.id))
         if filter_verifier:
             candidates_stmt = candidates_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_customer:
+            candidates_stmt = candidates_stmt.filter(models.Case.customer_id == current_user.customer_id)
         candidates_res = await db.execute(candidates_stmt)
         total_candidates = candidates_res.scalar() or 0
         
@@ -40,6 +43,8 @@ async def get_dashboard_stats(
         this_month_stmt = select(func.count(models.Case.id)).filter(models.Case.received_date >= today.replace(day=1))
         if filter_verifier:
             this_month_stmt = this_month_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_customer:
+            this_month_stmt = this_month_stmt.filter(models.Case.customer_id == current_user.customer_id)
         this_month_res = await db.execute(this_month_stmt)
         current_month = this_month_res.scalar() or 0
         
@@ -60,6 +65,8 @@ async def get_dashboard_stats(
         status_stmt = select(models.Case.status, func.count(models.Case.id)).group_by(models.Case.status)
         if filter_verifier:
             status_stmt = status_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_customer:
+            status_stmt = status_stmt.filter(models.Case.customer_id == current_user.customer_id)
         status_res = await db.execute(status_stmt)
         status_counts = dict(status_res.all())
         
@@ -125,9 +132,14 @@ async def get_dashboard_stats(
         log_stmt = (
             select(models.AuditLog, models.User.email)
             .join(models.User)
-            .order_by(models.AuditLog.timestamp.desc())
-            .limit(10)
         )
+        if filter_verifier:
+            log_stmt = log_stmt.filter(models.AuditLog.user_id == current_user.id)
+        if filter_customer:
+            # Customers should only see logs related to their cases
+            log_stmt = log_stmt.join(models.Case, models.AuditLog.resource_id == models.Case.id).filter(models.Case.customer_id == current_user.customer_id)
+            
+        log_stmt = log_stmt.order_by(models.AuditLog.timestamp.desc()).limit(10)
         log_res = await db.execute(log_stmt)
         activity_log = [{
             "id": idx,
@@ -149,6 +161,8 @@ async def get_dashboard_stats(
             "pending_verification": interim_cases,
             "pending_qc": pending_qc,
             "completed_today": completed_today,
+            "entry_pending_count": status_counts.get(models.CaseStatus.PENDING, 0),
+            "verification_pending_count": status_counts.get(models.CaseStatus.VERIFICATION, 0),
             "case_analysis": analysis_data,
             "verification_pending": verification_pending,
             "today_data_entry": [],
@@ -260,9 +274,14 @@ async def get_today_records(
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
             .filter(models.Case.received_date >= today)
-            .group_by(models.Customer.id, models.Customer.name)
-            .order_by(models.Customer.name)
         )
+        
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+
+        stmt = stmt.group_by(models.Customer.id, models.Customer.name).order_by(models.Customer.name)
         res = await db.execute(stmt)
         rows = res.all()
 
@@ -308,8 +327,14 @@ async def get_throughput_heatmap(
                 func.count(models.Case.id).label('load')
             )
             .filter(models.Case.received_date >= today)
-            .group_by(extract('hour', models.Case.received_date))
         )
+        
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+            load_stmt = load_stmt.filter(models.Case.customer_id == current_user.customer_id)
+            
+        load_stmt = load_stmt.group_by(extract('hour', models.Case.received_date))
         load_res = await db.execute(load_stmt)
         actual_load = {int(h): l for h, l in load_res.all()}
         
@@ -361,9 +386,14 @@ async def get_cumulative_stats(
                 func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient"),
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
-            .group_by(models.Customer.id, models.Customer.name)
-            .order_by(models.Customer.name)
         )
+        
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+            
+        stmt = stmt.group_by(models.Customer.id, models.Customer.name).order_by(models.Customer.name)
         res = await db.execute(stmt)
         rows = res.all()
 

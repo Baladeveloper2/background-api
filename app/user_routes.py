@@ -33,6 +33,7 @@ async def create_user(
             status=user.status,
             territory=user.territory,
             business_unit=user.business_unit,
+            customer_id=user.customer_id,
             bvs_permissions=user.bvs_permissions or {}
         )
         db.add(db_user)

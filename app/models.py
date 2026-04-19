@@ -5,7 +5,7 @@ from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
-from .enums import UserRole, Status, CaseStatus, CheckStatus
+from .enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel
 from datetime import datetime
 
 class JSONEncodedDict(TypeDecorator):
@@ -53,9 +53,11 @@ class User(Base):
     business_unit = Column(String(255), nullable=True)
     bvs_permissions = Column(JSONEncodedDict, default=lambda: {})
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True)
 
     # Relationships
     role_rel = relationship("Role", backref="users")
+    customer = relationship("Customer", backref="users")
 
 class Role(Base):
     __tablename__ = "roles"
@@ -184,8 +186,24 @@ class CaseComment(Base):
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
     user_id = Column(String(36), ForeignKey("users.id"), index=True)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     # Relationships
     user = relationship("User")
     case = relationship("Case", backref="comments")
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), index=True)
+    title = Column(String(255))
+    message = Column(Text)
+    category = Column(Enum(NotificationCategory), default=NotificationCategory.SYSTEM_ALERT)
+    channel = Column(Enum(NotificationChannel), default=NotificationChannel.SYSTEM)
+    is_read = Column(Integer, default=0, index=True) # 0 for unread, 1 for read
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    # Relationships
+    user = relationship("User", backref="notifications")
+    case_item = relationship("Case")

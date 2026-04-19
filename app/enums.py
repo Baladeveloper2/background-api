@@ -31,3 +31,16 @@ class CheckStatus(str, enum.Enum):
     VERIFICATION = "VERIFICATION"
     STOP = "STOP"
     QC_PENDING = "QC_PENDING"
+
+class NotificationChannel(str, enum.Enum):
+    SYSTEM = "SYSTEM"
+    EMAIL = "EMAIL"
+    SMS = "SMS"
+
+class NotificationCategory(str, enum.Enum):
+    CASE_ASSIGNED = "CASE_ASSIGNED"
+    INSUFFICIENT_DOCS = "INSUFFICIENT_DOCS"
+    CASE_COMPLETED = "CASE_COMPLETED"
+    FORM_SUBMITTED = "FORM_SUBMITTED"
+    EMAIL_TRIGGERED = "EMAIL_TRIGGERED"
+    SYSTEM_ALERT = "SYSTEM_ALERT"

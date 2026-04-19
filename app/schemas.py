@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr, field_validator, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from app.enums import UserRole, Status, CaseStatus, CheckStatus
+from app.enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel
 
 class UserBase(BaseModel):
     email: str
@@ -11,6 +11,7 @@ class UserBase(BaseModel):
     status: str = "ACTIVE"
     territory: Optional[str] = None
     business_unit: Optional[str] = None
+    customer_id: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
     
     @field_validator('status', 'role', mode='before')
@@ -61,6 +62,7 @@ class UserUpdate(BaseModel):
     status: Optional[Status] = None
     territory: Optional[str] = None
     business_unit: Optional[str] = None
+    customer_id: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
     password: Optional[str] = None
 
@@ -395,6 +397,8 @@ class DashboardStats(BaseModel):
     pending_verification: int = 0
     pending_qc: int = 0
     completed_today: int = 0
+    entry_pending_count: int = 0
+    verification_pending_count: int = 0
     case_analysis: List[CaseAnalysisPoint] = []
     verification_pending: List[VerificationPendingItem] = []
     today_data_entry: List[DataEntryItem] = []
@@ -478,4 +482,19 @@ class CaseComment(CaseCommentBase):
     user_full_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class NotificationRead(BaseModel):
+    id: str
+    title: str
+    message: str
+    category: NotificationCategory
+    channel: NotificationChannel
+    is_read: int
+    case_id: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class NotificationMarkRead(BaseModel):
+    notification_ids: List[str]
 

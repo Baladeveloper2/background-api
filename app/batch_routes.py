@@ -61,7 +61,7 @@ async def read_batches_summary(
     batch_no: Optional[str] = None,
     filter_upload_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
-    current_user: models.User = Depends(check_module_permission("bvs", "verification", action="read"))
+    current_user: models.User = Depends(check_module_permission("bvs", "batch", action="read"))
 ):
     # 1. Subquery for Case counts per batch
     case_counts = select(
@@ -112,6 +112,11 @@ async def read_batches_summary(
     if client: stmt = stmt.filter(models.Customer.name.ilike(f"%{client}%"))
     if batch_no: stmt = stmt.filter(models.Batch.batch_no.ilike(f"%{batch_no}%"))
     if filter_upload_date: stmt = stmt.filter(func.date(models.Batch.upload_date) == filter_upload_date)
+    
+    # Tenancy check
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+        stmt = stmt.filter(models.Batch.customer_id == current_user.customer_id)
 
     # Count total
     count_stmt = select(func.count()).select_from(stmt.subquery())
@@ -178,17 +183,28 @@ async def read_batch_clients(db: AsyncSession = Depends(get_async_db)):
     return [r for r in res.scalars().all() if r]
 
 @router.get("", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
-async def read_batches(response: Response, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_db)):
-    count_res = await db.execute(select(func.count(models.Batch.id)))
+async def read_batches(response: Response, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="read"))):
+    stmt = select(models.Batch)
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+        stmt = stmt.filter(models.Batch.customer_id == current_user.customer_id)
+        
+    count_res = await db.execute(select(func.count(models.Batch.id)).select_from(stmt.subquery()))
     response.headers["X-Total-Count"] = str(count_res.scalar() or 0)
-    res = await db.execute(select(models.Batch).offset(skip).limit(limit))
+    res = await db.execute(stmt.offset(skip).limit(limit))
     return res.scalars().all()
 
 @router.get("/{batch_id}", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
-async def read_batch(batch_id: str, db: AsyncSession = Depends(get_async_db)):
+async def read_batch(batch_id: str, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="read"))):
     res = await db.execute(select(models.Batch).filter(models.Batch.id == batch_id))
     db_batch = res.scalar_one_or_none()
     if db_batch is None: raise HTTPException(404, "Batch not found")
+    
+    # Tenancy check
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_batch.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this batch")
+        
     return db_batch
 
 @router.patch("/{batch_id}", response_model=schemas.Batch, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])

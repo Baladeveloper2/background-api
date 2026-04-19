@@ -12,7 +12,7 @@ import requests
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
 from .ocr_utils import get_scanner
-
+from . import notification_utils
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 
 router = APIRouter(
@@ -21,7 +21,7 @@ router = APIRouter(
 )
 
 @router.post("", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_async_db)):
+async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     if not case.case_ref_no:
         customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case.customer_id))
         customer = customer_res.scalar_one_or_none()
@@ -32,6 +32,11 @@ async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_a
         count = count_res.scalar() or 0
         case.case_ref_no = f"{prefix}{str(count + 1).zfill(3)}"
         
+    # For Customer role, force their own customer_id
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+        case.customer_id = current_user.customer_id
+
     db_case = models.Case(**case.dict())
     db.add(db_case)
     await db.commit()
@@ -47,7 +52,7 @@ async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_a
     return db_case
 
 @router.post("/create-full", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSession = Depends(get_async_db)):
+async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     # 1. Create/Get Candidate
     candidate_dict = case_data.candidate.dict()
     db_candidate = models.Candidate(**candidate_dict)
@@ -66,9 +71,13 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSessi
     else:
         case_ref = case_data.case_ref_no
 
+    # For Customer role, force their own customer_id
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    target_customer_id = current_user.customer_id if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) else case_data.customer_id
+
     db_case = models.Case(
         case_ref_no=case_ref,
-        customer_id=case_data.customer_id,
+        customer_id=target_customer_id,
         candidate_id=db_candidate.id,
         batch_id=case_data.batch_id,
         status=models.CaseStatus.PENDING,
@@ -138,8 +147,12 @@ async def read_cases(
         selectinload(models.Case.checks)
     )
 
-    # 2. Assignment-based filtering (Data Isolation)
-    if current_user.role not in [models.UserRole.SUPER_ADMIN, models.UserRole.ADMIN, models.UserRole.MANAGER, models.UserRole.QA, models.UserRole.QC]:
+    # 2. Role-based data isolation
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+        stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+    elif user_role not in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"]:
+        # Verifier-specific filtering: only show what is assigned to them
         stmt = stmt.filter(models.Case.assigned_to == current_user.id)
     
     if status:
@@ -223,7 +236,7 @@ async def get_report_stats(customer_id: Optional[str] = None, db: AsyncSession =
     }
 
 @router.get("/{case_id}", response_model=schemas.CaseRead, dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
+async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     stmt = select(models.Case).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
@@ -238,6 +251,13 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
     
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
+    
+    # Tenancy/Isolation check
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+    if current_user.role == models.UserRole.VERIFIER and db_case.assigned_to != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     # Dynamic fix for media visibility: Populate candidate.documents from address_details if empty
     if db_case.candidate and (not db_case.candidate.documents) and db_case.candidate.address_details:
@@ -346,6 +366,29 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
     stmt = update(models.Case).where(models.Case.id.in_(req.case_ids)).values(**update_data)
     await db.execute(stmt)
     await db.commit()
+
+    # Trigger Notifications for Bulk
+    for cid in req.case_ids:
+        # Re-fetch for reference info
+        ref_res = await db.execute(select(models.Case).filter(models.Case.id == cid))
+        cbd = ref_res.scalar_one_or_none()
+        if not cbd: continue
+
+        if req.action == "assign" and req.target_value:
+            await notification_utils.notify_new_assignment(db, req.target_value, cbd.case_ref_no, cid)
+        elif req.action == "status":
+            if req.target_value == models.CaseStatus.INSUFFICIENT:
+                await notification_utils.notify_insufficient(db, cbd.assigned_to, cbd.case_ref_no, cid)
+            elif req.target_value == models.CaseStatus.COMPLETED or req.target_value == models.CaseStatus.QC:
+                # Notify Verifier
+                await notification_utils.notify_case_completed(db, cbd.assigned_to, cbd.case_ref_no, cid)
+                
+                # ALSO Notify Customer Stakeholders
+                if cbd.customer_id:
+                    cust_users_res = await db.execute(select(models.User).filter(models.User.customer_id == cbd.customer_id))
+                    for cust_user in cust_users_res.scalars().all():
+                        await notification_utils.notify_case_completed(db, cust_user.id, cbd.case_ref_no, cid)
+
     return {"msg": "Bulk action completed successfullly"}
     
     # Audit log and broadcast
@@ -391,6 +434,11 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
         # Audit log and broadcast
         await create_audit_log(db, current_user.id, "AUTO_ALLOCATION", f"Case automatically assigned to verifier", resource_id=cid)
         await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "auto-assignment"})
+        
+        # Trigger Notification
+        ref_res = await db.execute(select(models.Case).filter(models.Case.id == cid))
+        cbd = ref_res.scalar_one()
+        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no, cid)
         
     await db.commit()
     return {"msg": f"Successfully auto-allocated {assigned_count} cases", "success": True}
@@ -477,6 +525,16 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
             if svc_type not in services_update:
                 await db.delete(existing_checks[svc_type])
     
+    # Check for triggers before returning
+    if "status" in update_data:
+        if update_data["status"] == models.CaseStatus.INSUFFICIENT:
+            await notification_utils.notify_insufficient(db, db_case.assigned_to, db_case.case_ref_no, case_id)
+        elif update_data["status"] == models.CaseStatus.COMPLETED or update_data["status"] == models.CaseStatus.QC:
+            await notification_utils.notify_case_completed(db, db_case.assigned_to, db_case.case_ref_no, case_id)
+    
+    if "assigned_to" in update_data and update_data["assigned_to"]:
+        await notification_utils.notify_new_assignment(db, update_data["assigned_to"], db_case.case_ref_no, case_id)
+
     await db.commit()
     res = await db.execute(
         select(models.Case).options(
@@ -565,11 +623,16 @@ def _do_merge(case_id: str, docs: list, candidate_name: str, case_ref: str):
 
 @router.post("/{case_id}/merge-pdfs", status_code=202, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 @limiter.limit("10/minute")
-async def merge_pdfs(case_id: str, request: Request, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
+async def merge_pdfs(case_id: str, request: Request, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == case_id))
     db_case = res.unique().scalar_one_or_none()
     if not db_case or not db_case.candidate:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
+    
+    # Tenancy check
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
     
     docs = db_case.candidate.documents or []
     background_tasks.add_task(_do_merge, case_id, docs, db_case.candidate.name, db_case.case_ref_no)
@@ -623,7 +686,7 @@ async def ocr_extract(data: Dict[str, str], db: AsyncSession = Depends(get_async
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{case_id}/ai-summary")
-async def generate_ai_summary(case_id: str, db: AsyncSession = Depends(get_async_db)):
+async def generate_ai_summary(case_id: str, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     stmt = select(models.Case).options(
         joinedload(models.Case.candidate),
         selectinload(models.Case.checks)
@@ -633,6 +696,11 @@ async def generate_ai_summary(case_id: str, db: AsyncSession = Depends(get_async
     db_case = res.unique().scalar_one_or_none()
     if not db_case:
         raise HTTPException(status_code=404, detail="Case not found")
+        
+    # Tenancy Check
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     checks = db_case.checks
     summary_parts = []

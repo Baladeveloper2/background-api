@@ -8,6 +8,7 @@ from .database import get_async_db
 import uuid
 
 from .auth_routes import check_module_permission
+from . import notification_utils
 
 router = APIRouter(
     prefix="/verifications",
@@ -118,4 +119,15 @@ async def submit_public_verification(token: str, submission: Dict[str, Any], db:
     db_check.verifier_remarks = "Digital Address submitted by candidate."
     
     await db.commit()
+    
+    # Notify verifier if assigned
+    if db_check.case and db_check.case.assigned_to:
+        await notification_utils.create_notification(
+            db, db_check.case.assigned_to,
+            "Form Submitted",
+            f"Candidate has submitted form for Case {db_check.case.case_ref_no}.",
+            models.NotificationCategory.FORM_SUBMITTED,
+            case_id=db_check.case_id
+        )
+    
     return {"message": "Verification data submitted successfully"}
