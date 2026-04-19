@@ -47,7 +47,7 @@ async def check_candidate_update_access(current_user: models.User = Depends(auth
     # Role-based systemic access (matching auth_routes oversight logic)
     oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN]
     if current_user.role in oversight_roles: return current_user
-    if current_user.role_rel and current_user.role_rel.name in ["Super Admin", "QC Verifier", "Case Auditor"]: return current_user
+    if current_user.role_rel and current_user.role_rel.name in ["Super Admin", "QC Verifier", "Verifier"]: return current_user
 
     # Granular permission check
     def has_write(p_obj, key):

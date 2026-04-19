@@ -464,7 +464,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
             db_case.qa_id = current_user.id
     elif update_data.get("status") == models.CaseStatus.QC and db_case.status != models.CaseStatus.QC:
          if current_user.role == models.UserRole.QA:
-            db_case.qa_id = current_user.id # QA Verifier moving it to QC Auditor stage
+            db_case.qa_id = current_user.id # Verifier moving it to QC Verification stage
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         db_case.completed_date = None
 
@@ -547,8 +547,8 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
 
     return db_case
 
-@router.get("/{resource_id}/audit-logs", response_model=List[schemas.AuditLogRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-async def get_audit_logs(resource_id: str, db: AsyncSession = Depends(get_async_db)):
+@router.get("/{resource_id}/verification-logs", response_model=List[schemas.AuditLogRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
+async def get_verification_logs(resource_id: str, db: AsyncSession = Depends(get_async_db)):
     # Note: I used DATABASE_get_async_db to avoid conflict with local variable if any, 
     # but the import is actually get_async_db in this file. Correcting to get_async_db.
     stmt = (
