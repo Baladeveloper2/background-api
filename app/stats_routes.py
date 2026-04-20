@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case, extract
 from datetime import datetime, timedelta
@@ -9,8 +10,14 @@ from .auth_routes import check_module_permission, get_current_user
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
+from fastapi.responses import StreamingResponse
+import io
+import pandas as pd
+
 @router.get("", response_model=schemas.DashboardStats)
 async def get_dashboard_stats(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -28,11 +35,27 @@ async def get_dashboard_stats(
         filter_customer = is_customer
         
         # 1. Basic Counts
+        filter_start = None
+        filter_end = None
+        if from_date:
+            try:
+                filter_start = datetime.strptime(from_date, "%Y-%m-%d")
+            except: pass
+        if to_date:
+            try:
+                filter_end = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            except: pass
+
         candidates_stmt = select(func.count(models.Case.id))
         if filter_verifier:
             candidates_stmt = candidates_stmt.filter(models.Case.assigned_to == current_user.id)
         if filter_customer:
             candidates_stmt = candidates_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        
+        if filter_start:
+            candidates_stmt = candidates_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end:
+            candidates_stmt = candidates_stmt.filter(models.Case.received_date < filter_end)
         candidates_res = await db.execute(candidates_stmt)
         total_candidates = candidates_res.scalar() or 0
         
@@ -61,12 +84,50 @@ async def get_dashboard_stats(
         comp_today_res = await db.execute(comp_today_stmt)
         completed_today = comp_today_res.scalar() or 0
         
+        # 2b. Total Completed & Revenue
+        total_comp_stmt = select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED)
+        if filter_verifier:
+            total_comp_stmt = total_comp_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_customer:
+            total_comp_stmt = total_comp_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        
+        if filter_start:
+            total_comp_stmt = total_comp_stmt.filter(models.Case.completed_date >= filter_start)
+        if filter_end:
+            total_comp_stmt = total_comp_stmt.filter(models.Case.completed_date < filter_end)
+
+        total_completed_res = await db.execute(total_comp_stmt)
+        total_completed = total_completed_res.scalar() or 0
+
+        rev_stmt = (
+            select(func.sum(models.VerificationCheck.rate))
+            .select_from(models.Case)
+            .join(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)
+            .filter(models.Case.status == models.CaseStatus.COMPLETED)
+        )
+        if filter_verifier:
+            rev_stmt = rev_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_customer:
+            rev_stmt = rev_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        
+        if filter_start:
+            rev_stmt = rev_stmt.filter(models.Case.completed_date >= filter_start)
+        if filter_end:
+            rev_stmt = rev_stmt.filter(models.Case.completed_date < filter_end)
+        total_revenue_res = await db.execute(rev_stmt)
+        total_revenue = total_revenue_res.scalar() or 0.0
+        
         # 3. Status Distribution
         status_stmt = select(models.Case.status, func.count(models.Case.id)).group_by(models.Case.status)
         if filter_verifier:
             status_stmt = status_stmt.filter(models.Case.assigned_to == current_user.id)
         if filter_customer:
             status_stmt = status_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        if filter_start:
+            status_stmt = status_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end:
+            status_stmt = status_stmt.filter(models.Case.received_date < filter_end)
+        
         status_res = await db.execute(status_stmt)
         status_counts = dict(status_res.all())
         
@@ -125,6 +186,10 @@ async def get_dashboard_stats(
 
         # 6. Geo Data
         geo_stmt = select(models.Customer.city, func.count(models.Case.id)).join(models.Case).group_by(models.Customer.city)
+        if filter_start:
+            geo_stmt = geo_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end:
+            geo_stmt = geo_stmt.filter(models.Case.received_date < filter_end)
         geo_res = await db.execute(geo_stmt)
         geo_data = [{"name": r[0] or "REMOTE", "value": r[1], "color": "#3b82f6"} for r in geo_res.all()]
 
@@ -161,6 +226,8 @@ async def get_dashboard_stats(
             "pending_verification": interim_cases,
             "pending_qc": pending_qc,
             "completed_today": completed_today,
+            "total_completed": total_completed,
+            "total_revenue": float(total_revenue),
             "entry_pending_count": status_counts.get(models.CaseStatus.PENDING, 0),
             "verification_pending_count": status_counts.get(models.CaseStatus.VERIFICATION, 0),
             "case_analysis": analysis_data,
@@ -371,22 +438,114 @@ async def get_throughput_heatmap(
         traceback.print_exc()
         raise HTTPException(500, detail=str(e))
 
-@router.get("/cumulative", response_model=schemas.TodayRecordsResponse)
-async def get_cumulative_stats(
+@router.get("/export")
+async def export_dashboard_data(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Returns all-time received / completed / pending / insufficient per client."""
+    """Generates Excel export of cases with full details."""
     try:
+        # Determine filters
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        is_admin = user_role in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"] or role_name in ["SUPER ADMIN", "QC VERIFIER"]
+        
+        stmt = select(
+            models.Case.case_ref_no,
+            models.Candidate.name.label("candidate_name"),
+            models.Customer.name.label("client_name"),
+            models.Case.received_date,
+            models.Case.completed_date,
+            models.Case.status,
+            models.Case.tat_days,
+            models.Batch.batch_no
+        ).join(models.Candidate, models.Case.candidate_id == models.Candidate.id)\
+         .join(models.Customer, models.Case.customer_id == models.Customer.id)\
+         .outerjoin(models.Batch, models.Case.batch_id == models.Batch.id)
+
+        if not (is_admin or is_customer):
+            stmt = stmt.filter(models.Case.assigned_to == current_user.id)
+        if is_customer:
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+
+        if from_date:
+            stmt = stmt.filter(models.Case.received_date >= datetime.strptime(from_date, "%Y-%m-%d"))
+        if to_date:
+            stmt = stmt.filter(models.Case.received_date < datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1))
+
+        res = await db.execute(stmt)
+        rows = res.all()
+
+        # Convert to DataFrame
+        data = []
+        for r in rows:
+            data.append({
+                "Case Ref No": r.case_ref_no,
+                "Candidate Name": r.candidate_name,
+                "Client": r.client_name,
+                "Received Date": r.received_date.strftime("%Y-%m-%d %H:%M") if r.received_date else "N/A",
+                "Completed Date": r.completed_date.strftime("%Y-%m-%d %H:%M") if r.completed_date else "Pending",
+                "Status": r.status,
+                "SLA (Days)": r.tat_days,
+                "Batch ID": r.batch_no or "Direct Entry"
+            })
+
+        df = pd.DataFrame(data)
+        
+        # Save to buffer
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Strategic Report')
+        
+        output.seek(0)
+        
+        headers = {
+            'Content-Disposition': f'attachment; filename="BGV_Report_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx"'
+        }
+        return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+
+@router.get("/cumulative", response_model=schemas.TodayRecordsResponse)
+async def get_cumulative_stats(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns received / completed / pending / insufficient per client, filtered by date if provided."""
+    try:
+        filter_start = None
+        filter_end = None
+        if from_date:
+            try: filter_start = datetime.strptime(from_date, "%Y-%m-%d")
+            except: pass
+        if to_date:
+            try: filter_end = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            except: pass
+
         stmt = (
             select(
                 models.Customer.name.label("client"),
                 func.count(models.Case.id).label("received"),
                 func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
                 func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient"),
+                func.sum(models.Case.verifier_revoke_count).label("v_revokes"),
+                func.sum(models.Case.qc_revoke_count).label("qc_revokes"),
+                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, case((models.Case.is_in_tat == 1, 1), else_=0)), else_=0)).label("in_tat")
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
         )
+        
+        if filter_start:
+            stmt = stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end:
+            stmt = stmt.filter(models.Case.received_date < filter_end)
         
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
@@ -398,24 +557,34 @@ async def get_cumulative_stats(
         rows = res.all()
 
         records = []
-        for client, received, completed, insufficient in rows:
-            completed = int(completed or 0)
-            insufficient = int(insufficient or 0)
-            pending = max(0, received - completed - insufficient)
+        for client, received, completed, insufficient, v_revokes, qc_revokes, in_tat in rows:
+            completedCnt = int(completed or 0)
+            insufficientCnt = int(insufficient or 0)
+            pending = max(0, received - completedCnt - insufficientCnt)
+            
+            tat_percent = (float(in_tat or 0) / float(completedCnt) * 100.0) if completedCnt > 0 else 0.0
+            
             records.append({
                 "client": client or "Unknown",
                 "received": received,
-                "completed": completed,
+                "completed": completedCnt,
                 "pending": pending,
-                "insufficient": insufficient,
+                "insufficient": insufficientCnt,
+                "verifier_revoke_count": int(v_revokes or 0),
+                "qc_revoke_count": int(qc_revokes or 0),
+                "tat_percent": round(float(tat_percent), 1)
             })
 
+        avg_tat = (sum(float(r["tat_percent"]) for r in records) / float(len(records))) if records else 0.0
         totals = {
             "client": "TOTAL",
             "received": sum(r["received"] for r in records),
             "completed": sum(r["completed"] for r in records),
             "pending": sum(r["pending"] for r in records),
             "insufficient": sum(r["insufficient"] for r in records),
+            "verifier_revoke_count": sum(r["verifier_revoke_count"] for r in records),
+            "qc_revoke_count": sum(r["qc_revoke_count"] for r in records),
+            "tat_percent": round(float(avg_tat), 1)
         }
         return {"date": "ALL TIME", "records": records, "totals": totals}
     except Exception as e:

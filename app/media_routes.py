@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi import Request
 from .auth_routes import limiter
 from anyio import to_thread
+from .ocr_utils import get_scanner
 
 router = APIRouter(prefix="/media", tags=["media"])
 print("--- MEDIA ROUTES RELOADED (ASYNC VERSION) ---")
@@ -184,3 +185,30 @@ async def proxy_media(
     except Exception as e:
         logging.error(f"Proxy error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to proxy media")
+
+@router.post("/extract")
+async def extract_ocr_data(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        scanner = get_scanner()
+        file_data = await file.read()
+        
+        # 1. Extract raw text
+        text = await to_thread.run_sync(scanner.extract_text, file_data)
+        
+        # 2. Parse into structured data
+        parsed = await to_thread.run_sync(scanner.parse_id, text)
+        
+        return {
+            "success": True,
+            "raw_text": text,
+            "extracted_data": parsed
+        }
+    except Exception as e:
+        logging.error(f"OCR Extraction Error: {str(e)}")
+        return {
+            "success": False, 
+            "message": f"Failed to extract text: {str(e)}"
+        }

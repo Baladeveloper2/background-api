@@ -148,6 +148,9 @@ class Case(Base):
     assigned_at = Column(DateTime(timezone=True), nullable=True)
     completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
+    verifier_revoke_count = Column(Integer, default=0)
+    qc_revoke_count = Column(Integer, default=0)
+    is_in_tat = Column(Integer, default=1) # 1 for In-TAT, 0 for Out-TAT
     ai_summary = Column(Text, nullable=True) # AI-generated executive summary
 
     # Relationships

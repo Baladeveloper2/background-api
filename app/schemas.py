@@ -273,6 +273,8 @@ class CaseUpdate(BaseModel):
     qa_id: Optional[str] = None
     qc_id: Optional[str] = None
     assigned_at: Optional[datetime] = None
+    received_date: Optional[datetime] = None
+    completed_date: Optional[datetime] = None
     scope_of_work: Optional[str] = None
     check_scopes: Optional[Dict[str, str]] = None
 
@@ -288,12 +290,14 @@ class CaseCreateExtended(BaseModel):
 
 class Case(CaseBase):
     id: str
-    received_date: datetime
+    received_date: Optional[datetime] = None
     assigned_at: Optional[datetime] = None
     completed_date: Optional[datetime] = None
-    
-    candidate: Optional[Candidate] = None
-    customer: Optional[Customer] = None
+    tat_days: Optional[int] = 0
+    verifier_revoke_count: Optional[int] = 0
+    qc_revoke_count: Optional[int] = 0
+    is_in_tat: Optional[int] = 1
+    ai_summary: Optional[str] = None
     checks: List[VerificationCheck] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -304,6 +308,7 @@ class CaseRead(Case):
     batch_date: Optional[datetime] = None
     batch_no: Optional[str] = None
     assigned_user_name: Optional[str] = None
+    assigned_user_role: Optional[str] = None
     qa_user_name: Optional[str] = None
     qc_user_name: Optional[str] = None
     queue_age: Optional[str] = None
@@ -401,6 +406,8 @@ class DashboardStats(BaseModel):
     pending_verification: int = 0
     pending_qc: int = 0
     completed_today: int = 0
+    total_completed: int = 0
+    total_revenue: float = 0.0
     entry_pending_count: int = 0
     verification_pending_count: int = 0
     case_analysis: List[CaseAnalysisPoint] = []
@@ -435,17 +442,20 @@ class VerifierDailyResponse(BaseModel):
     date: str
     verifiers: List[VerifierDailyStat]
 
-class TodayClientRecord(BaseModel):
+class TodayRecord(BaseModel):
     client: str
     received: int
     completed: int
     pending: int
     insufficient: int
+    verifier_revoke_count: Optional[int] = 0
+    qc_revoke_count: Optional[int] = 0
+    tat_percent: Optional[float] = 0.0
 
 class TodayRecordsResponse(BaseModel):
     date: str
-    records: List[TodayClientRecord]
-    totals: TodayClientRecord
+    records: List[TodayRecord]
+    totals: TodayRecord
 
 class HeatmapPoint(BaseModel):
     hour: str

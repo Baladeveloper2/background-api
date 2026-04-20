@@ -139,17 +139,17 @@ async def read_batches_summary(
 
         # Operational Status Hierarchy Logic
         if (r.total_pending_count or 0) == 0 and (r.actual_case_count or 0) >= (r.cases_count or 0):
-            batch_status = "Completed"
+            batch_status = "Finalized"
         elif (r.qa_pending_count or 0) > 0:
             batch_status = "QA Pending"
         elif (r.qc_active_count or 0) > 0:
-            batch_status = "In QC Stage"
+            batch_status = "QC Pending"
         elif (r.verification_active_count or 0) > 0:
-            batch_status = "Verifying"
+            batch_status = "In Verification"
         elif (r.actual_case_count or 0) < (r.cases_count or 0):
-            batch_status = "Partial Entry"
+            batch_status = "Finalized"
         elif (r.pending_arrival_count or 0) > 0:
-            batch_status = "Ready for Verif"
+            batch_status = "Ready for Verification"
         else:
             batch_status = "Entry Pending"
 

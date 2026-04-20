@@ -77,15 +77,24 @@ app.include_router(role_routes.router)
 app.include_router(media_routes.router)
 app.include_router(notification_routes.router)
 
+import json
 from .ws import manager, WebSocketDisconnect, WebSocket
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    await manager.connect(websocket, user_id)
     try:
         while True:
             data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "JOIN_ROOM":
+                    await manager.join_room(user_id, msg.get("case_id"))
+                elif msg.get("type") == "LEAVE_ROOM":
+                    await manager.leave_room(user_id, msg.get("case_id"))
+            except Exception:
+                pass # Ignore malformed json
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
 
 @app.get("")
 async def root():

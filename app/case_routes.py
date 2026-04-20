@@ -20,6 +20,21 @@ router = APIRouter(
     tags=["cases"]
 )
 
+@router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
+async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    stmt = select(models.AuditLog, models.User.full_name).join(models.User, models.AuditLog.user_id == models.User.id).filter(models.AuditLog.resource_id == case_id).order_by(models.AuditLog.timestamp.desc())
+    res = await db.execute(stmt)
+    history = []
+    for log, name in res.all():
+        history.append({
+            "id": log.id,
+            "action": log.action,
+            "details": log.details,
+            "timestamp": log.timestamp,
+            "user_name": name
+        })
+    return history
+
 @router.post("", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     if not case.case_ref_no:
@@ -200,7 +215,9 @@ async def read_cases(
             if not case_data.tat_days: case_data.tat_days = case.batch.tat_days
             case_data.batch_date = case.batch.upload_date
             case_data.batch_no = case.batch.batch_no
-        if case.assigned_user: case_data.assigned_user_name = case.assigned_user.full_name
+        if case.assigned_user: 
+            case_data.assigned_user_name = case.assigned_user.full_name
+            case_data.assigned_user_role = str(case.assigned_user.role.value if hasattr(case.assigned_user.role, 'value') else case.assigned_user.role).upper()
         if case.qa_user: case_data.qa_user_name = case.qa_user.full_name
         if case.qc_user: case_data.qc_user_name = case.qc_user.full_name
         cases_read.append(case_data)
@@ -300,7 +317,9 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
     if db_case.batch:
         case_data.batch_no = db_case.batch.batch_no
         case_data.batch_date = db_case.batch.upload_date
-    if db_case.assigned_user: case_data.assigned_user_name = db_case.assigned_user.full_name
+    if db_case.assigned_user: 
+        case_data.assigned_user_name = db_case.assigned_user.full_name
+        case_data.assigned_user_role = str(db_case.assigned_user.role.value if hasattr(db_case.assigned_user.role, 'value') else db_case.assigned_user.role).upper()
     if db_case.qa_user: case_data.qa_user_name = db_case.qa_user.full_name
     if db_case.qc_user: case_data.qc_user_name = db_case.qc_user.full_name
     return case_data
@@ -369,8 +388,33 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
     if not update_data:
         return {"msg": "Invalid action"}
         
-    stmt = update(models.Case).where(models.Case.id.in_(req.case_ids)).values(**update_data)
-    await db.execute(stmt)
+    # Revoke Logic for Bulk
+    if req.action == "status":
+        for cid in req.case_ids:
+            res_c = await db.execute(select(models.Case).filter(models.Case.id == cid))
+            case_obj = res_c.scalar_one_or_none()
+            if not case_obj: continue
+            
+            # Verifier Revoke: Moving back from QC or Completed
+            if (case_obj.status in [models.CaseStatus.QC_PENDING, models.CaseStatus.COMPLETED]) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+                case_obj.verifier_revoke_count += 1
+            
+            # QC Revoke: Moving back from Completed
+            if case_obj.status == models.CaseStatus.COMPLETED and req.target_value in [models.CaseStatus.QC_PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+                case_obj.qc_revoke_count += 1
+                
+            # Update status and dates
+            case_obj.status = req.target_value
+            if req.target_value == models.CaseStatus.COMPLETED:
+                case_obj.completed_date = datetime.utcnow()
+                # TAT Logic
+                if case_obj.batch_id:
+                    res_batch = await db.execute(select(models.Batch).filter(models.Batch.id == case_obj.batch_id))
+                    batch = res_batch.scalar_one_or_none()
+                    if batch and case_obj.received_date:
+                        diff = (datetime.utcnow() - case_obj.received_date).days
+                        case_obj.is_in_tat = 1 if diff <= (batch.tat_days or 10) else 0
+
     await db.commit()
 
     # Trigger Notifications for Bulk
@@ -381,20 +425,18 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
         if not cbd: continue
 
         if req.action == "assign" and req.target_value:
-            await notification_utils.notify_new_assignment(db, req.target_value, cbd.case_ref_no, cid)
+             # Standard assignment logic...
+             update_stmt = update(models.Case).where(models.Case.id == cid).values(assigned_to=req.target_value, assigned_at=datetime.utcnow() if not cbd.assigned_at else cbd.assigned_at)
+             await db.execute(update_stmt)
+             await notification_utils.notify_new_assignment(db, req.target_value, cbd.case_ref_no, cid)
         elif req.action == "status":
             if req.target_value == models.CaseStatus.INSUFFICIENT:
                 await notification_utils.notify_insufficient(db, cbd.assigned_to, cbd.case_ref_no, cid)
-            elif req.target_value == models.CaseStatus.COMPLETED or req.target_value == models.CaseStatus.QC:
+            elif req.target_value == models.CaseStatus.COMPLETED or req.target_value == models.CaseStatus.QC_PENDING:
                 # Notify Verifier
                 await notification_utils.notify_case_completed(db, cbd.assigned_to, cbd.case_ref_no, cid)
-                
-                # ALSO Notify Customer Stakeholders
-                if cbd.customer_id:
-                    cust_users_res = await db.execute(select(models.User).filter(models.User.customer_id == cbd.customer_id))
-                    for cust_user in cust_users_res.scalars().all():
-                        await notification_utils.notify_case_completed(db, cust_user.id, cbd.case_ref_no, cid)
-
+    
+    await db.commit()
     return {"msg": "Bulk action completed successfullly"}
     
     # Audit log and broadcast
@@ -463,18 +505,41 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     scope_of_work = update_data.pop("scope_of_work", None)
     check_scopes = update_data.pop("check_scopes", None) or {}
 
+    manual_received_date = update_data.get("received_date")
+    manual_completed_date = update_data.get("completed_date")
+
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
-        db_case.completed_date = datetime.utcnow()
-        # Attribute completion credit to current user based on role
+        db_case.completed_date = manual_completed_date or datetime.utcnow()
+        # TAT Performance tracking
+        if db_case.batch_id and db_case.received_date:
+            res_batch = await db.execute(select(models.Batch).filter(models.Batch.id == db_case.batch_id))
+            batch = res_batch.scalar_one_or_none()
+            if batch:
+                diff = (datetime.utcnow() - db_case.received_date).days
+                db_case.is_in_tat = 1 if diff <= (batch.tat_days or 10) else 0
+        
+        # Attribute completion credit...
         if current_user.role == models.UserRole.QC:
             db_case.qc_id = current_user.id
         elif current_user.role == models.UserRole.QA:
             db_case.qa_id = current_user.id
-    elif update_data.get("status") == models.CaseStatus.QC and db_case.status != models.CaseStatus.QC:
+    elif update_data.get("status") == models.CaseStatus.QC_PENDING and db_case.status != models.CaseStatus.QC_PENDING:
          if current_user.role == models.UserRole.QA:
-            db_case.qa_id = current_user.id # Verifier moving it to QC Verification stage
+            db_case.qa_id = current_user.id
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
-        db_case.completed_date = None
+        # Revoke Logic for Single Update
+        # Verifier Revoke: from QC/Completed to Verification/Pending
+        if (db_case.status in [models.CaseStatus.QC_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+            db_case.verifier_revoke_count += 1
+            
+        # QC Revoke: from Completed to QC Pending
+        if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") == models.CaseStatus.QC_PENDING:
+            db_case.qc_revoke_count += 1
+
+        if manual_completed_date is None:
+            db_case.completed_date = None
+        else:
+            db_case.completed_date = manual_completed_date
 
     if update_data.get("assigned_to") and not db_case.assigned_at:
         db_case.assigned_at = datetime.utcnow()
