@@ -273,6 +273,8 @@ class CaseUpdate(BaseModel):
     qa_id: Optional[str] = None
     qc_id: Optional[str] = None
     assigned_at: Optional[datetime] = None
+    scope_of_work: Optional[str] = None
+    check_scopes: Optional[Dict[str, str]] = None
 
 class CaseCreateExtended(BaseModel):
     batch_id: str
@@ -281,6 +283,8 @@ class CaseCreateExtended(BaseModel):
     services: List[str]
     case_ref_no: Optional[str] = None
     check_rates: Optional[Dict[str, float]] = None
+    check_scopes: Optional[Dict[str, str]] = None
+    scope_of_work: Optional[str] = None # Keeping for backward compatibility if needed, though we moved to per-check
 
 class Case(CaseBase):
     id: str

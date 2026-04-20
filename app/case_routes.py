@@ -89,11 +89,17 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSessi
     # 3. Create Verification Checks
     for service in case_data.services:
         rate = case_data.check_rates.get(service, 0.0) if case_data.check_rates else 0.0
+        # Get scope from map or global field
+        check_scope = case_data.scope_of_work
+        if case_data.check_scopes and service in case_data.check_scopes:
+            check_scope = case_data.check_scopes[service]
+            
         db_check = models.VerificationCheck(
             case_id=db_case.id,
             check_type=service,
             status=models.CheckStatus.INTERIM,
-            rate=rate
+            rate=rate,
+            data={"scope_of_work": check_scope} if check_scope else {}
         )
         db.add(db_check)
     
@@ -454,6 +460,8 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     candidate_update_data = update_data.pop("candidate", None)
     services_update = update_data.pop("services", None)
     rates_update = update_data.pop("check_rates", {})
+    scope_of_work = update_data.pop("scope_of_work", None)
+    check_scopes = update_data.pop("check_scopes", None) or {}
 
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
         db_case.completed_date = datetime.utcnow()
@@ -496,34 +504,48 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
             await db.flush()
             db_case.candidate_id = db_candidate.id
 
-    # Sync Services/Checks
+    # Sync Services/Checks & Scope of Work
+    
     if services_update is not None:
         # 1. Get existing checks
         existing_checks_res = await db.execute(select(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_id))
         existing_checks = {c.check_type: c for c in existing_checks_res.scalars().all()}
         
-        # 2. Add missing ones
+        # 2. Add or Update checks
         for svc in services_update:
             rate = rates_update.get(svc, 0.0)
+            svc_scope = check_scopes.get(svc, scope_of_work)
+            
             if svc in existing_checks:
                 # Update rate if provided
                 existing_checks[svc].rate = rate
+                # Also update scope_of_work if provided (either per-check or global)
+                if svc_scope is not None:
+                    if existing_checks[svc].data is None: existing_checks[svc].data = {}
+                    existing_checks[svc].data["scope_of_work"] = svc_scope
             else:
                 # Create new
                 new_check = models.VerificationCheck(
                     case_id=case_id,
                     check_type=svc,
                     status=models.CheckStatus.INTERIM,
-                    rate=rate
+                    rate=rate,
+                    data={"scope_of_work": svc_scope} if svc_scope else {}
                 )
                 db.add(new_check)
         
-        # 3. Optional: Remove checks not in services_update? 
-        # For now, let's keep them (safer) or remove them if user specifically unselected them
-        # (Decision: Unselected checks in Step 2 should be removed)
+        # 3. Remove checks not in services_update
         for svc_type in list(existing_checks.keys()):
             if svc_type not in services_update:
                 await db.delete(existing_checks[svc_type])
+    elif check_scopes or scope_of_work:
+        # Update scope for all existing checks if services list not provided
+        existing_checks_res = await db.execute(select(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_id))
+        for chk in existing_checks_res.scalars().all():
+            svc_scope = check_scopes.get(chk.check_type, scope_of_work)
+            if svc_scope is not None:
+                if chk.data is None: chk.data = {}
+                chk.data["scope_of_work"] = svc_scope
     
     # Check for triggers before returning
     if "status" in update_data:
