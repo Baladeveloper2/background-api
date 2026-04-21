@@ -152,6 +152,7 @@ class Case(Base):
     qc_revoke_count = Column(Integer, default=0)
     is_in_tat = Column(Integer, default=1) # 1 for In-TAT, 0 for Out-TAT
     ai_summary = Column(Text, nullable=True) # AI-generated executive summary
+    file_no = Column(String(50), nullable=True, index=True)
 
     # Relationships
     candidate = relationship("Candidate", backref="cases")

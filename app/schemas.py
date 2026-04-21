@@ -248,6 +248,7 @@ class CaseBase(BaseModel):
     qa_id: Optional[str] = None
     qc_id: Optional[str] = None
     ai_summary: Optional[str] = None
+    file_no: Optional[str] = None
     
     @field_validator('status', mode='before')
     @classmethod
@@ -277,6 +278,7 @@ class CaseUpdate(BaseModel):
     completed_date: Optional[datetime] = None
     scope_of_work: Optional[str] = None
     check_scopes: Optional[Dict[str, str]] = None
+    file_no: Optional[str] = None
 
 class CaseCreateExtended(BaseModel):
     batch_id: str
@@ -287,6 +289,7 @@ class CaseCreateExtended(BaseModel):
     check_rates: Optional[Dict[str, float]] = None
     check_scopes: Optional[Dict[str, str]] = None
     scope_of_work: Optional[str] = None # Keeping for backward compatibility if needed, though we moved to per-check
+    file_no: Optional[str] = None
 
 class Case(CaseBase):
     id: str
@@ -298,6 +301,7 @@ class Case(CaseBase):
     qc_revoke_count: Optional[int] = 0
     is_in_tat: Optional[int] = 1
     ai_summary: Optional[str] = None
+    file_no: Optional[str] = None
     checks: List[VerificationCheck] = []
 
     model_config = ConfigDict(from_attributes=True)

@@ -96,7 +96,8 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSessi
         candidate_id=db_candidate.id,
         batch_id=case_data.batch_id,
         status=models.CaseStatus.PENDING,
-        received_date=datetime.utcnow()
+        received_date=datetime.utcnow(),
+        file_no=case_data.file_no
     )
     db.add(db_case)
     await db.flush()
