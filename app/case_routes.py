@@ -403,10 +403,24 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
             # Verifier Revoke: Moving back from QC or Completed
             if (case_obj.status in [models.CaseStatus.QC_PENDING, models.CaseStatus.COMPLETED]) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
                 case_obj.verifier_revoke_count += 1
+                db.add(models.RevokeLog(
+                    case_id=cid,
+                    user_id=current_user.id,
+                    revoke_type='VERIFIER',
+                    from_status=case_obj.status,
+                    to_status=req.target_value
+                ))
             
             # QC Revoke: Moving back from Completed
             if case_obj.status == models.CaseStatus.COMPLETED and req.target_value in [models.CaseStatus.QC_PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
                 case_obj.qc_revoke_count += 1
+                db.add(models.RevokeLog(
+                    case_id=cid,
+                    user_id=current_user.id,
+                    revoke_type='QC',
+                    from_status=case_obj.status,
+                    to_status=req.target_value
+                ))
                 
             # Update status and dates
             case_obj.status = req.target_value
@@ -541,6 +555,13 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
         # Verifier Revoke: from QC/Completed to Verification/Pending
         if (db_case.status in [models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
             db_case.verifier_revoke_count += 1
+            db.add(models.RevokeLog(
+                case_id=case_id,
+                user_id=current_user.id,
+                revoke_type='VERIFIER',
+                from_status=db_case.status,
+                to_status=update_data.get('status')
+            ))
             # Reset checks to WIP so verifier can re-verify
             for chk in db_case.checks:
                 if chk.status == models.CheckStatus.QC_PENDING:
@@ -549,6 +570,13 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
         # QC Revoke: from Completed to QC Pending
         if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") == models.CaseStatus.QA_PENDING:
             db_case.qc_revoke_count += 1
+            db.add(models.RevokeLog(
+                case_id=case_id,
+                user_id=current_user.id,
+                revoke_type='QC',
+                from_status=db_case.status,
+                to_status=update_data.get('status')
+            ))
 
         if manual_completed_date is None:
             db_case.completed_date = None
@@ -899,3 +927,110 @@ async def create_case_comment(
     })
     
     return data
+
+# ─── Revoke Log Endpoints ────────────────────────────────────────────────────
+
+@router.get("/{case_id}/revoke-logs", dependencies=[Depends(get_current_user)])
+async def get_case_revoke_logs(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    """Return all revoke events for a specific case."""
+    stmt = (
+        select(models.RevokeLog, models.User.full_name, models.Case.case_ref_no)
+        .join(models.User, models.RevokeLog.user_id == models.User.id)
+        .join(models.Case, models.RevokeLog.case_id == models.Case.id)
+        .filter(models.RevokeLog.case_id == case_id)
+        .order_by(models.RevokeLog.revoked_at.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [
+        {
+            "id": r.id,
+            "case_id": r.case_id,
+            "case_ref_no": ref_no,
+            "user_id": r.user_id,
+            "user_name": full_name,
+            "revoke_type": r.revoke_type,
+            "from_status": r.from_status,
+            "to_status": r.to_status,
+            "notes": r.notes,
+            "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
+        }
+        for r, full_name, ref_no in rows
+    ]
+
+@router.get("/revoke-logs/all", dependencies=[Depends(get_current_user)])
+async def get_all_revoke_logs(
+    revoke_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db)
+):
+    """Global revoke tracking: list all revoke events with filters."""
+    stmt = (
+        select(models.RevokeLog, models.User.full_name, models.Case.case_ref_no)
+        .join(models.User, models.RevokeLog.user_id == models.User.id)
+        .join(models.Case, models.RevokeLog.case_id == models.Case.id)
+        .order_by(models.RevokeLog.revoked_at.desc())
+    )
+    if revoke_type:
+        stmt = stmt.filter(models.RevokeLog.revoke_type == revoke_type.upper())
+    if user_id:
+        stmt = stmt.filter(models.RevokeLog.user_id == user_id)
+    if from_date:
+        try:
+            dt = datetime.fromisoformat(from_date)
+            stmt = stmt.filter(models.RevokeLog.revoked_at >= dt)
+        except ValueError:
+            pass
+    if to_date:
+        try:
+            dt = datetime.fromisoformat(to_date)
+            stmt = stmt.filter(models.RevokeLog.revoked_at <= dt)
+        except ValueError:
+            pass
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    # Aggregate counts per user
+    user_summary: Dict[str, Any] = {}
+    all_logs = []
+    for r, full_name, ref_no in rows:
+        log = {
+            "id": r.id,
+            "case_id": r.case_id,
+            "case_ref_no": ref_no,
+            "user_id": r.user_id,
+            "user_name": full_name,
+            "revoke_type": r.revoke_type,
+            "from_status": r.from_status,
+            "to_status": r.to_status,
+            "notes": r.notes,
+            "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
+        }
+        all_logs.append(log)
+
+        key = r.user_id
+        if key not in user_summary:
+            user_summary[key] = {
+                "user_id": r.user_id,
+                "user_name": full_name,
+                "verifier_revoke_count": 0,
+                "qc_revoke_count": 0,
+                "total_revoke_count": 0,
+                "cases": set()
+            }
+        if r.revoke_type == "VERIFIER":
+            user_summary[key]["verifier_revoke_count"] += 1
+        elif r.revoke_type == "QC":
+            user_summary[key]["qc_revoke_count"] += 1
+        user_summary[key]["total_revoke_count"] += 1
+        user_summary[key]["cases"].add(ref_no)
+
+    summary = []
+    for v in user_summary.values():
+        v["cases"] = list(v["cases"])
+        summary.append(v)
+
+    return {"logs": all_logs, "user_summary": summary}

@@ -211,3 +211,18 @@ class Notification(Base):
     # Relationships
     user = relationship("User", backref="notifications")
     case_item = relationship("Case")
+
+class RevokeLog(Base):
+    __tablename__ = "revoke_logs"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    revoke_type = Column(String(50), nullable=False)  # 'VERIFIER' or 'QC'
+    from_status = Column(String(50), nullable=False)
+    to_status = Column(String(50), nullable=False)
+    notes = Column(Text, nullable=True)
+    revoked_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    # Relationships
+    user = relationship("User")
+    case = relationship("Case", backref="revoke_logs")
