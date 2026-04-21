@@ -169,7 +169,7 @@ class VerificationCheck(Base):
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
     case = relationship("Case", back_populates="checks")
     check_type = Column(String(100), index=True) # Education, Employment, etc.
-    status = Column(String(50), default=CheckStatus.INTERIM, index=True)
+    status = Column(String(50), default=CheckStatus.VERIFICATION, index=True)
     data = Column(JSONEncodedDict) # Verification details
     digital_token = Column(String(100), unique=True, nullable=True) # For candidate link
     verifier_remarks = Column(Text)

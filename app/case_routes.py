@@ -113,7 +113,7 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSessi
         db_check = models.VerificationCheck(
             case_id=db_case.id,
             check_type=service,
-            status=models.CheckStatus.INTERIM,
+            status=models.CheckStatus.VERIFICATION,
             rate=rate,
             data={"scope_of_work": check_scope} if check_scope else {}
         )
@@ -498,7 +498,8 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
-    res = await db.execute(select(models.Case).filter(models.Case.id == case_id))
+    stmt = select(models.Case).options(selectinload(models.Case.checks)).filter(models.Case.id == case_id)
+    res = await db.execute(stmt)
     db_case = res.scalar_one_or_none()
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -531,11 +532,19 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     elif update_data.get("status") == models.CaseStatus.QA_PENDING and db_case.status != models.CaseStatus.QA_PENDING:
          if current_user.role == models.UserRole.QA:
             db_case.qa_id = current_user.id
+         # Auto-propagate to checks
+         for chk in db_case.checks:
+            if chk.status in [models.CheckStatus.VERIFICATION, models.CheckStatus.INTERIM]:
+                chk.status = models.CheckStatus.QC_PENDING
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         # Revoke Logic for Single Update
         # Verifier Revoke: from QC/Completed to Verification/Pending
         if (db_case.status in [models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
             db_case.verifier_revoke_count += 1
+            # Reset checks to WIP so verifier can re-verify
+            for chk in db_case.checks:
+                if chk.status == models.CheckStatus.QC_PENDING:
+                    chk.status = models.CheckStatus.VERIFICATION
             
         # QC Revoke: from Completed to QC Pending
         if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") == models.CaseStatus.QA_PENDING:
