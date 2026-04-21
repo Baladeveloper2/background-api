@@ -270,30 +270,49 @@ async def get_daily_report(db: AsyncSession = Depends(get_async_db)):
 
 @router.get("/verifier-daily", response_model=schemas.VerifierDailyResponse)
 async def get_verifier_daily(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Returns per-verifier case assignments and completion for today."""
+    """Returns per-verifier case assignments and completion filtered by date if provided."""
     try:
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        filter_start = None
+        filter_end = None
+        if from_date:
+            try: filter_start = datetime.strptime(from_date, "%Y-%m-%d")
+            except: pass
+        if to_date:
+            try: filter_end = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            except: pass
 
         # All users that have cases assigned, filtered for operational roles
-        # We need to consider assignments across assigned_to, qc_id, and qa_id
         from sqlalchemy import or_
         stmt = (
             select(
+                models.User.id,
                 models.User.full_name,
                 models.User.email,
                 models.User.role,
                 func.count(models.Case.id).label("assigned"),
                 func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
+                func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient"),
+                func.sum(case((or_(models.Case.verifier_revoke_count > 0, models.Case.qc_revoke_count > 0), 1), else_=0)).label("revoked")
             )
             .outerjoin(models.Case, or_(
                 models.Case.assigned_to == models.User.id,
                 models.Case.qc_id == models.User.id,
                 models.Case.qa_id == models.User.id
             ))
-            .filter(models.User.status == models.Status.ACTIVE)
+        )
+        
+        if filter_start:
+            stmt = stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end:
+            stmt = stmt.filter(models.Case.received_date < filter_end)
+            
+        stmt = (
+            stmt.filter(models.User.status == models.Status.ACTIVE)
             .filter(models.User.role.in_([
                 models.UserRole.VERIFIER, 
                 models.UserRole.QC, 
@@ -306,18 +325,23 @@ async def get_verifier_daily(
         rows = res.all()
 
         verifiers = []
-        for full_name, email, role, assigned, completed in rows:
-            completed = int(completed or 0)
+        for v_id, full_name, email, role, assigned, completed, insufficient, revoked in rows:
+            completedCnt = int(completed or 0)
+            insufficientCnt = int(insufficient or 0)
+            revokedCnt = int(revoked or 0)
             verifiers.append({
+                "id": v_id,
                 "verifier_name": full_name or email,
                 "verifier_email": email,
                 "role": role,
                 "assigned": assigned,
-                "completed": completed,
-                "in_progress": max(0, (assigned or 0) - completed),
+                "completed": completedCnt,
+                "insufficient": insufficientCnt,
+                "revoked": revokedCnt,
+                "in_progress": max(0, (assigned or 0) - completedCnt - insufficientCnt),
             })
 
-        return {"date": today.strftime("%Y-%m-%d"), "verifiers": verifiers}
+        return {"date": from_date or datetime.now().strftime("%Y-%m-%d"), "verifiers": verifiers}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, detail=str(e))
@@ -572,7 +596,7 @@ async def get_cumulative_stats(
                 "insufficient": insufficientCnt,
                 "verifier_revoke_count": int(v_revokes or 0),
                 "qc_revoke_count": int(qc_revokes or 0),
-                "tat_percent": round(float(tat_percent), 1)
+                "tat_percent": float(round(float(tat_percent), 1))
             })
 
         avg_tat = (sum(float(r["tat_percent"]) for r in records) / float(len(records))) if records else 0.0
@@ -584,9 +608,49 @@ async def get_cumulative_stats(
             "insufficient": sum(r["insufficient"] for r in records),
             "verifier_revoke_count": sum(r["verifier_revoke_count"] for r in records),
             "qc_revoke_count": sum(r["qc_revoke_count"] for r in records),
-            "tat_percent": round(float(avg_tat), 1)
+            "tat_percent": float(round(float(avg_tat), 1))
         }
         return {"date": "ALL TIME", "records": records, "totals": totals}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+
+@router.get("/verifier-daily/export")
+async def export_executive_data(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Generates Excel export of executive performance stats."""
+    try:
+        # Reuse logic from get_verifier_daily
+        res = await get_verifier_daily(from_date, to_date, db, current_user)
+        verifiers = res.get("verifiers", [])
+        
+        data = []
+        for v in verifiers:
+            eff = ((v["completed"] + v["insufficient"]) / v["assigned"] * 100) if v["assigned"] > 0 else 0
+            data.append({
+                "Executive Name": v["verifier_name"],
+                "Executive Email": v["verifier_email"],
+                "Role": str(v["role"]),
+                "Assigned Cases": v["assigned"],
+                "Completed": v["completed"],
+                "Pending": v["in_progress"],
+                "Insufficient": v["insufficient"],
+                "Revoked": v["revoked"],
+                "Efficiency (%)": float(round(float(eff), 1))
+            })
+            
+        df = pd.DataFrame(data)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Executive MIS')
+        
+        output.seek(0)
+        headers = {'Content-Disposition': f'attachment; filename="Executive_MIS_{datetime.now().strftime("%Y%m%d")}.xlsx"'}
+        return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, detail=str(e))

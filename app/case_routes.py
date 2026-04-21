@@ -152,6 +152,7 @@ async def read_cases(
     search_name: Optional[str] = None,
     search_ref: Optional[str] = None,
     assigned: Optional[bool] = None,
+    assigned_to: Optional[str] = None,
     skip: int = 0, 
     limit: int = 200, 
     db: AsyncSession = Depends(get_async_db),
@@ -182,6 +183,8 @@ async def read_cases(
         stmt = stmt.filter(models.Case.batch_id == batch_id)
     if customer_id:
         stmt = stmt.filter(models.Case.customer_id == customer_id)
+    if assigned_to:
+        stmt = stmt.filter(models.Case.assigned_to == assigned_to)
     if search:
         stmt = stmt.filter(or_(models.Case.case_ref_no.ilike(f"%{search}%"), models.Candidate.name.ilike(f"{search}%")))
     if search_name:
@@ -254,7 +257,7 @@ async def get_report_stats(customer_id: Optional[str] = None, db: AsyncSession =
     return {
         "pie_data": pie_data,
         "total_cases": total,
-        "completion_rate": float(round((completed / total * 100), 1)) if total > 0 else 0.0,
+        "completion_rate": float(round(float(completed / total * 100), 1)) if total > 0 else 0.0,
         "avg_tat": float(round(float(avg_tat), 1))
     }
 
@@ -523,17 +526,17 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
             db_case.qc_id = current_user.id
         elif current_user.role == models.UserRole.QA:
             db_case.qa_id = current_user.id
-    elif update_data.get("status") == models.CaseStatus.QC_PENDING and db_case.status != models.CaseStatus.QC_PENDING:
+    elif update_data.get("status") == models.CaseStatus.QA_PENDING and db_case.status != models.CaseStatus.QA_PENDING:
          if current_user.role == models.UserRole.QA:
             db_case.qa_id = current_user.id
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         # Revoke Logic for Single Update
         # Verifier Revoke: from QC/Completed to Verification/Pending
-        if (db_case.status in [models.CaseStatus.QC_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+        if (db_case.status in [models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
             db_case.verifier_revoke_count += 1
             
         # QC Revoke: from Completed to QC Pending
-        if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") == models.CaseStatus.QC_PENDING:
+        if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") == models.CaseStatus.QA_PENDING:
             db_case.qc_revoke_count += 1
 
         if manual_completed_date is None:

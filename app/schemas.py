@@ -303,6 +303,7 @@ class Case(CaseBase):
     model_config = ConfigDict(from_attributes=True)
 
 class CaseRead(Case):
+    candidate: Optional[Candidate] = None
     candidate_name: Optional[str] = None
     customer_name: Optional[str] = None
     batch_date: Optional[datetime] = None
@@ -431,12 +432,15 @@ class DailyReportResponse(BaseModel):
     totals: DailyStat
 
 class VerifierDailyStat(BaseModel):
+    id: str
     verifier_name: str
     verifier_email: str
     role: str
     assigned: int
     completed: int
     in_progress: int
+    insufficient: int = 0
+    revoked: int = 0
 
 class VerifierDailyResponse(BaseModel):
     date: str
