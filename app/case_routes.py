@@ -199,7 +199,8 @@ async def read_cases(
             stmt = stmt.filter(models.Case.assigned_to == None)
     
     # 2. Results
-    count_stmt = select(func.count(func.distinct(models.Case.id))).select_from(stmt.subquery())
+    subq = stmt.subquery()
+    count_stmt = select(func.count(func.distinct(subq.c.id)))
     total_count_res = await db.execute(count_stmt)
     total_count = total_count_res.scalar() or 0
     response.headers["X-Total-Count"] = str(total_count)

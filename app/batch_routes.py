@@ -189,7 +189,7 @@ async def read_batches(response: Response, skip: int = 0, limit: int = 100, db: 
     if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
         stmt = stmt.filter(models.Batch.customer_id == current_user.customer_id)
         
-    count_res = await db.execute(select(func.count(models.Batch.id)).select_from(stmt.subquery()))
+    count_res = await db.execute(select(func.count()).select_from(stmt.subquery()))
     response.headers["X-Total-Count"] = str(count_res.scalar() or 0)
     res = await db.execute(stmt.offset(skip).limit(limit))
     return res.scalars().all()
