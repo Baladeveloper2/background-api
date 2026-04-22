@@ -28,6 +28,8 @@ async def export_mis_data(
     customer_id: Optional[str] = None,
     customer_name: Optional[str] = None,
     search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -63,6 +65,17 @@ async def export_mis_data(
                 models.Candidate.name.ilike(f"%{search}%")
             ))
 
+        if from_date:
+            try:
+                f_date = datetime.strptime(from_date, "%Y-%m-%d")
+                stmt = stmt.filter(models.Case.received_date >= f_date)
+            except: pass
+        if to_date:
+            try:
+                t_date = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                stmt = stmt.filter(models.Case.received_date <= t_date)
+            except: pass
+
         stmt = stmt.order_by(models.Case.received_date.desc())
         res = await db.execute(stmt)
         cases = res.unique().scalars().all()
@@ -70,9 +83,9 @@ async def export_mis_data(
         data = []
         for c in cases:
             data.append({
-                "Reference ID": c.case_ref_no,
+                "Case ID": c.case_ref_no,
                 "Candidate Name": c.candidate.name if c.candidate else "N/A",
-                "Client/Customer": c.customer.name if c.customer else "N/A",
+                "Client Name": c.customer.name if c.customer else "N/A",
                 "Status": c.status,
                 "Received Date": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A",
                 "Completed Date": c.completed_date.strftime("%Y-%m-%d %H:%M") if c.completed_date else "In Progress",
@@ -305,6 +318,20 @@ async def read_cases(
             case_data.assigned_user_role = role_name.upper()
         if case.qa_user: case_data.qa_user_name = case.qa_user.full_name
         if case.qc_user: case_data.qc_user_name = case.qc_user.full_name
+        
+        # Calculate Queue Age
+        if case.received_date:
+            now = datetime.now(case.received_date.tzinfo)
+            delta = now - case.received_date
+            hours = int(delta.total_seconds() // 3600)
+            if hours < 24:
+                case_data.queue_age = f"{hours}h"
+            else:
+                days = hours // 24
+                case_data.queue_age = f"{days}d {hours % 24}h"
+        else:
+            case_data.queue_age = "0h"
+        
         cases_read.append(case_data)
     
     return cases_read

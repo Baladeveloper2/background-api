@@ -524,9 +524,9 @@ async def export_dashboard_data(
         data = []
         for r in rows:
             data.append({
-                "Case Ref No": r.case_ref_no,
+                "Case ID": r.case_ref_no,
                 "Candidate Name": r.candidate_name,
-                "Client": r.client_name,
+                "Client Name": r.client_name,
                 "Received Date": r.received_date.strftime("%Y-%m-%d %H:%M") if r.received_date else "N/A",
                 "Completed Date": r.completed_date.strftime("%Y-%m-%d %H:%M") if r.completed_date else "Pending",
                 "Status": r.status,
