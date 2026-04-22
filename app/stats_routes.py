@@ -287,58 +287,75 @@ async def get_verifier_daily(
             except: pass
 
         # All users that have cases assigned, filtered for operational roles
-        from sqlalchemy import or_
+        from sqlalchemy import or_, distinct
+        
+        # Build date filters as case conditions
+        date_cond = True
+        if filter_start:
+            date_cond = (models.Case.received_date >= filter_start)
+        if filter_end:
+            date_cond &= (models.Case.received_date < filter_end)
+
         stmt = (
             select(
                 models.User.id,
                 models.User.full_name,
                 models.User.email,
                 models.User.role,
-                func.count(models.Case.id).label("assigned"),
-                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed"),
-                func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT, 1), else_=0)).label("insufficient"),
-                func.sum(case((or_(models.Case.verifier_revoke_count > 0, models.Case.qc_revoke_count > 0), 1), else_=0)).label("revoked")
+                models.Role.name.label("custom_role_name"),
+                func.count(distinct(case((date_cond, models.Case.id), else_=None))).label("assigned"),
+                func.count(distinct(case(((models.Case.status == models.CaseStatus.COMPLETED) & date_cond, models.Case.id), else_=None))).label("completed"),
+                func.count(distinct(case(((models.Case.status == models.CaseStatus.INSUFFICIENT) & date_cond, models.Case.id), else_=None))).label("insufficient"),
+                func.count(distinct(case(((or_(models.Case.verifier_revoke_count > 0, models.Case.qc_revoke_count > 0)) & date_cond, models.Case.id), else_=None))).label("revoked"),
+                func.sum(case((date_cond, models.VerificationCheck.rate), else_=0)).label("earnings")
             )
             .outerjoin(models.Case, or_(
                 models.Case.assigned_to == models.User.id,
                 models.Case.qc_id == models.User.id,
                 models.Case.qa_id == models.User.id
             ))
-        )
-        
-        if filter_start:
-            stmt = stmt.filter(models.Case.received_date >= filter_start)
-        if filter_end:
-            stmt = stmt.filter(models.Case.received_date < filter_end)
-            
-        stmt = (
-            stmt.filter(models.User.status == models.Status.ACTIVE)
+            .outerjoin(models.Role, models.User.role_id == models.Role.id)
+            .outerjoin(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)
+            .filter(models.User.status == models.Status.ACTIVE)
             .filter(models.User.role.in_([
                 models.UserRole.VERIFIER, 
                 models.UserRole.QC, 
                 models.UserRole.QA, 
                 models.UserRole.MANAGER
             ]))
-            .group_by(models.User.id, models.User.full_name, models.User.email, models.User.role)
+            .group_by(models.User.id, models.User.full_name, models.User.email, models.User.role, models.Role.name)
         )
+        
         res = await db.execute(stmt)
         rows = res.all()
 
         verifiers = []
-        for v_id, full_name, email, role, assigned, completed, insufficient, revoked in rows:
+        for v_id, full_name, email, role, custom_role_name, assigned, completed, insufficient, revoked, earnings in rows:
             completedCnt = int(completed or 0)
             insufficientCnt = int(insufficient or 0)
             revokedCnt = int(revoked or 0)
+            assignedCnt = int(assigned or 0)
+            
+            # Map QA/QC to QC Verifier if no custom name
+            u_role = role.value if hasattr(role, 'value') else str(role)
+            display_role = custom_role_name
+            if not display_role:
+                if u_role in ["QA", "QC"]:
+                    display_role = "QC Verifier"
+                else:
+                    display_role = u_role.replace('_', ' ').title()
+
             verifiers.append({
                 "id": v_id,
                 "verifier_name": full_name or email,
                 "verifier_email": email,
-                "role": role,
-                "assigned": assigned,
+                "role": display_role,
+                "assigned": assignedCnt,
                 "completed": completedCnt,
                 "insufficient": insufficientCnt,
                 "revoked": revokedCnt,
-                "in_progress": max(0, (assigned or 0) - completedCnt - insufficientCnt),
+                "earnings": float(earnings or 0),
+                "in_progress": max(0, assignedCnt - completedCnt - insufficientCnt),
             })
 
         return {"date": from_date or datetime.now().strftime("%Y-%m-%d"), "verifiers": verifiers}

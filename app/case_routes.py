@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 import requests
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
+import pandas as pd
+import io
 from .ocr_utils import get_scanner
 from . import notification_utils
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
@@ -19,6 +21,79 @@ router = APIRouter(
     prefix="/cases",
     tags=["cases"]
 )
+
+@router.get("/export")
+async def export_mis_data(
+    status: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    customer_name: Optional[str] = None,
+    search: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Generates structured MIS Excel report for cases."""
+    try:
+        stmt = select(models.Case).options(
+            joinedload(models.Case.candidate),
+            joinedload(models.Case.customer),
+            joinedload(models.Case.assigned_user)
+        )
+        
+        # Join Customer if client_name or search is used
+        if customer_name or search:
+            stmt = stmt.join(models.Customer, models.Case.customer_id == models.Customer.id)
+
+        # RBAC for Customers
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+        else:
+            if customer_id:
+                stmt = stmt.filter(models.Case.customer_id == customer_id)
+            if customer_name:
+                stmt = stmt.filter(models.Customer.name == customer_name)
+
+        if status and status != 'ALL':
+            stmt = stmt.filter(models.Case.status == status)
+        
+        if search:
+            stmt = stmt.join(models.Candidate).filter(or_(
+                models.Case.case_ref_no.ilike(f"%{search}%"),
+                models.Candidate.name.ilike(f"%{search}%")
+            ))
+
+        stmt = stmt.order_by(models.Case.received_date.desc())
+        res = await db.execute(stmt)
+        cases = res.unique().scalars().all()
+
+        data = []
+        for c in cases:
+            data.append({
+                "Reference ID": c.case_ref_no,
+                "Candidate Name": c.candidate.name if c.candidate else "N/A",
+                "Client/Customer": c.customer.name if c.customer else "N/A",
+                "Status": c.status,
+                "Received Date": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A",
+                "Completed Date": c.completed_date.strftime("%Y-%m-%d %H:%M") if c.completed_date else "In Progress",
+                "Assigned To": c.assigned_user.full_name if c.assigned_user else "Unallocated",
+                "TAT (Days)": c.tat_days or 10,
+                "SLA Status": "In-TAT" if c.is_in_tat == 1 else "Out-TAT"
+            })
+
+        df = pd.DataFrame(data)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Case MIS')
+        
+        output.seek(0)
+        filename = f"MIS_Export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
 async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db)):
@@ -149,6 +224,7 @@ async def read_cases(
     status: Optional[models.CaseStatus] = None, 
     batch_id: Optional[str] = None,
     customer_id: Optional[str] = None,
+    customer_name: Optional[str] = None,
     search: Optional[str] = None,
     search_name: Optional[str] = None,
     search_ref: Optional[str] = None,
@@ -160,11 +236,11 @@ async def read_cases(
     current_user: models.User = Depends(get_current_user)
 ):
     # 1. Base query for cases with their relationships
-    stmt = select(models.Case).outerjoin(models.Case.candidate).options(
+    stmt = select(models.Case).outerjoin(models.Case.candidate).outerjoin(models.Case.customer).options(
         contains_eager(models.Case.candidate),
-        joinedload(models.Case.customer),
+        contains_eager(models.Case.customer),
         joinedload(models.Case.batch),
-        joinedload(models.Case.assigned_user),
+        joinedload(models.Case.assigned_user).joinedload(models.User.role_rel),
         joinedload(models.Case.qa_user),
         joinedload(models.Case.qc_user),
         selectinload(models.Case.checks)
@@ -184,6 +260,8 @@ async def read_cases(
         stmt = stmt.filter(models.Case.batch_id == batch_id)
     if customer_id:
         stmt = stmt.filter(models.Case.customer_id == customer_id)
+    if customer_name:
+        stmt = stmt.filter(models.Customer.name == customer_name)
     if assigned_to:
         stmt = stmt.filter(models.Case.assigned_to == assigned_to)
     if search:
@@ -222,7 +300,9 @@ async def read_cases(
             case_data.batch_no = case.batch.batch_no
         if case.assigned_user: 
             case_data.assigned_user_name = case.assigned_user.full_name
-            case_data.assigned_user_role = str(case.assigned_user.role.value if hasattr(case.assigned_user.role, 'value') else case.assigned_user.role).upper()
+            r_enum_val = str(case.assigned_user.role.value if hasattr(case.assigned_user.role, 'value') else case.assigned_user.role).upper()
+            role_name = case.assigned_user.role_rel.name if case.assigned_user.role_rel else ("QC Verifier" if r_enum_val in ["QA", "QC"] else r_enum_val)
+            case_data.assigned_user_role = role_name.upper()
         if case.qa_user: case_data.qa_user_name = case.qa_user.full_name
         if case.qc_user: case_data.qc_user_name = case.qc_user.full_name
         cases_read.append(case_data)
@@ -270,7 +350,7 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
         joinedload(models.Case.customer),
         selectinload(models.Case.checks),
         joinedload(models.Case.batch),
-        joinedload(models.Case.assigned_user),
+        joinedload(models.Case.assigned_user).joinedload(models.User.role_rel),
         joinedload(models.Case.qa_user),
         joinedload(models.Case.qc_user)
     ).filter(models.Case.id == case_id)
@@ -324,7 +404,9 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
         case_data.batch_date = db_case.batch.upload_date
     if db_case.assigned_user: 
         case_data.assigned_user_name = db_case.assigned_user.full_name
-        case_data.assigned_user_role = str(db_case.assigned_user.role.value if hasattr(db_case.assigned_user.role, 'value') else db_case.assigned_user.role).upper()
+        r_enum_val = str(db_case.assigned_user.role.value if hasattr(db_case.assigned_user.role, 'value') else db_case.assigned_user.role).upper()
+        role_name = db_case.assigned_user.role_rel.name if db_case.assigned_user.role_rel else ("QC Verifier" if r_enum_val in ["QA", "QC"] else r_enum_val)
+        case_data.assigned_user_role = role_name.upper()
     if db_case.qa_user: case_data.qa_user_name = db_case.qa_user.full_name
     if db_case.qc_user: case_data.qc_user_name = db_case.qc_user.full_name
     return case_data
@@ -400,19 +482,20 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
             case_obj = res_c.scalar_one_or_none()
             if not case_obj: continue
             
-            # Verifier Revoke: Moving back from QC or Completed
-            if (case_obj.status in [models.CaseStatus.QC_PENDING, models.CaseStatus.COMPLETED]) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
-                case_obj.verifier_revoke_count += 1
+            # QC Revoke: Moving back from QC or Completed
+            if (case_obj.status in [models.CaseStatus.QC, models.CaseStatus.COMPLETED]) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+                case_obj.qc_revoke_count += 1
                 db.add(models.RevokeLog(
                     case_id=cid,
                     user_id=current_user.id,
-                    revoke_type='VERIFIER',
+                    revoke_type='QC',
                     from_status=case_obj.status,
                     to_status=req.target_value
                 ))
             
-            # QC Revoke: Moving back from Completed
-            if case_obj.status == models.CaseStatus.COMPLETED and req.target_value in [models.CaseStatus.QC_PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+            # QA/Lead Revoke: Moving back from QA to QC or Verifier
+            if case_obj.status == models.CaseStatus.QA_PENDING and req.target_value in [models.CaseStatus.QC, models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+                # We'll treat QA-initiated revokes as QC revokes for the purpose of the current tracking dashboard
                 case_obj.qc_revoke_count += 1
                 db.add(models.RevokeLog(
                     case_id=cid,
@@ -552,13 +635,13 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
                 chk.status = models.CheckStatus.QC_PENDING
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         # Revoke Logic for Single Update
-        # Verifier Revoke: from QC/Completed to Verification/Pending
-        if (db_case.status in [models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
-            db_case.verifier_revoke_count += 1
+        # QC Revoke: from QC/QA/Completed to Verification/Pending
+        if (db_case.status in [models.CaseStatus.QC, models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+            db_case.qc_revoke_count += 1
             db.add(models.RevokeLog(
                 case_id=case_id,
                 user_id=current_user.id,
-                revoke_type='VERIFIER',
+                revoke_type='QC',
                 from_status=db_case.status,
                 to_status=update_data.get('status')
             ))
@@ -567,8 +650,8 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
                 if chk.status == models.CheckStatus.QC_PENDING:
                     chk.status = models.CheckStatus.VERIFICATION
             
-        # QC Revoke: from Completed to QC Pending
-        if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") == models.CaseStatus.QA_PENDING:
+        # Transition Revoke: from Completed back to QC/QA
+        if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") in [models.CaseStatus.QC, models.CaseStatus.QA_PENDING]:
             db_case.qc_revoke_count += 1
             db.add(models.RevokeLog(
                 case_id=case_id,
@@ -934,9 +1017,10 @@ async def create_case_comment(
 async def get_case_revoke_logs(case_id: str, db: AsyncSession = Depends(get_async_db)):
     """Return all revoke events for a specific case."""
     stmt = (
-        select(models.RevokeLog, models.User.full_name, models.Case.case_ref_no)
-        .join(models.User, models.RevokeLog.user_id == models.User.id)
-        .join(models.Case, models.RevokeLog.case_id == models.Case.id)
+        select(models.RevokeLog, models.User.full_name, models.Case.case_ref_no, models.User.role, models.Role.name.label("custom_role_name"))
+        .outerjoin(models.User, models.RevokeLog.user_id == models.User.id)
+        .outerjoin(models.Role, models.User.role_id == models.Role.id)
+        .outerjoin(models.Case, models.RevokeLog.case_id == models.Case.id)
         .filter(models.RevokeLog.case_id == case_id)
         .order_by(models.RevokeLog.revoked_at.desc())
     )
@@ -949,13 +1033,14 @@ async def get_case_revoke_logs(case_id: str, db: AsyncSession = Depends(get_asyn
             "case_ref_no": ref_no,
             "user_id": r.user_id,
             "user_name": full_name,
+            "user_role": custom_role_name if custom_role_name else ("QC Verifier" if str(role.value if hasattr(role, 'value') else role).upper() in ["QA", "QC"] else str(role.value if hasattr(role, 'value') else role).replace('_', ' ').title()),
             "revoke_type": r.revoke_type,
             "from_status": r.from_status,
             "to_status": r.to_status,
             "notes": r.notes,
             "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
         }
-        for r, full_name, ref_no in rows
+        for r, full_name, ref_no, role, custom_role_name in rows
     ]
 
 @router.get("/revoke-logs/all", dependencies=[Depends(get_current_user)])
@@ -968,9 +1053,10 @@ async def get_all_revoke_logs(
 ):
     """Global revoke tracking: list all revoke events with filters."""
     stmt = (
-        select(models.RevokeLog, models.User.full_name, models.Case.case_ref_no)
-        .join(models.User, models.RevokeLog.user_id == models.User.id)
-        .join(models.Case, models.RevokeLog.case_id == models.Case.id)
+        select(models.RevokeLog, models.User.full_name, models.Case.case_ref_no, models.User.role, models.Role.name.label("custom_role_name"))
+        .outerjoin(models.User, models.RevokeLog.user_id == models.User.id)
+        .outerjoin(models.Role, models.User.role_id == models.Role.id)
+        .outerjoin(models.Case, models.RevokeLog.case_id == models.Case.id)
         .order_by(models.RevokeLog.revoked_at.desc())
     )
     if revoke_type:
@@ -996,13 +1082,16 @@ async def get_all_revoke_logs(
     # Aggregate counts per user
     user_summary: Dict[str, Any] = {}
     all_logs = []
-    for r, full_name, ref_no in rows:
+    for r, full_name, ref_no, role, custom_role_name in rows:
+        u_role_val = str(role.value if hasattr(role, 'value') else role).upper()
+        ur_string = custom_role_name if custom_role_name else ("QC Verifier" if u_role_val in ["QA", "QC"] else u_role_val.replace('_', ' ').title())
         log = {
             "id": r.id,
             "case_id": r.case_id,
             "case_ref_no": ref_no,
             "user_id": r.user_id,
             "user_name": full_name,
+            "user_role": ur_string,
             "revoke_type": r.revoke_type,
             "from_status": r.from_status,
             "to_status": r.to_status,
@@ -1016,6 +1105,7 @@ async def get_all_revoke_logs(
             user_summary[key] = {
                 "user_id": r.user_id,
                 "user_name": full_name,
+                "user_role": ur_string,
                 "verifier_revoke_count": 0,
                 "qc_revoke_count": 0,
                 "total_revoke_count": 0,
