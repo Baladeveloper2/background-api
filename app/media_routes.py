@@ -114,6 +114,7 @@ async def get_signed_url(
     public_id: str,
     resource_type: str = "image",
     original_filename: Optional[str] = None,
+    download: bool = False,
     current_user: User = Depends(get_current_user)
 ):
     try:
@@ -121,10 +122,14 @@ async def get_signed_url(
         is_s3_path = public_id.startswith('bgv_documents/') or public_id.startswith('bqv_documents/')
         if s3_client and aws_bucket and is_s3_path:
             params = {'Bucket': aws_bucket, 'Key': public_id}
+            
+            disposition = 'attachment' if download else 'inline'
             if original_filename:
                 # Sanitize filename
                 safe_name = "".join([c if c.isalnum() or c in ['-', '_', '.'] else '_' for c in original_filename])
-                params['ResponseContentDisposition'] = f'inline; filename="{safe_name}"'
+                params['ResponseContentDisposition'] = f'{disposition}; filename="{safe_name}"'
+            else:
+                params['ResponseContentDisposition'] = disposition
             
             url = await to_thread.run_sync(
                 s3_client.generate_presigned_url,
