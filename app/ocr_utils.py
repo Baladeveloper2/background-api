@@ -83,6 +83,25 @@ class OCRScanner:
             if address_match:
                 data["address"] = address_match.group(1).strip()
 
+        # Employment / Education Detection (Generic)
+        elif re.search(r'Experience|Relieving|Letter|Offer|Certificate|Degree|Marksheet|University|College|Institute|Limited|Pvt|Ltd', text, re.IGNORECASE):
+            data["id_type"] = "Supporting Document"
+            
+            # Extract Organization (Employer/University)
+            # Usually found near "Limited", "Ltd", "University", "College"
+            org_match = re.search(r'([A-Z][A-Za-z\s&\.]+ (?:Limited|Pvt|Ltd|University|College|Institute|School))', text, re.IGNORECASE)
+            if org_match:
+                data["organization"] = org_match.group(1).strip()
+            
+            # Extract Candidate Name from common salutations
+            name_match = re.search(r'(?:Mr\.|Ms\.|Mrs\.|Shri|Smt\.?)\s?([A-Z][A-Z\s]+)', text)
+            if name_match:
+                data["name_on_id"] = name_match.group(1).split('\n')[0].strip()
+            
+            # Specialized for Degree
+            if re.search(r'Degree|Diploma|Certificate', text, re.IGNORECASE):
+                data["id_type"] = "Education Certificate"
+            
         return data
 
     def get_face(self, image_bytes: bytes):

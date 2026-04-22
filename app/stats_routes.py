@@ -243,6 +243,32 @@ async def get_dashboard_stats(
         traceback.print_exc()
         raise HTTPException(500, detail=str(e))
 
+@router.get("/summary", dependencies=[Depends(get_current_user)])
+async def get_dashboard_summary(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Unified endpoint for dashboard stats, verifier tracking, and today's records."""
+    try:
+        # Retrieve all components in one go
+        stats = await get_dashboard_stats(from_date, to_date, db, current_user)
+        verifier_daily = await get_verifier_daily(from_date, to_date, db, current_user)
+        today_records = await get_today_records(db, current_user)
+        throughput = await get_throughput_heatmap(db, current_user)
+        
+        return {
+            "stats": stats,
+            "verifier_daily": verifier_daily,
+            "today_records": today_records,
+            "throughput": throughput,
+            "server_time": datetime.now().isoformat()
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, detail=str(e))
+
 @router.get("/daily", response_model=schemas.DailyReportResponse)
 async def get_daily_report(db: AsyncSession = Depends(get_async_db)):
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)

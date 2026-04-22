@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from typing import Optional
 import io
+import requests
 import logging
 import cloudinary
 import cloudinary.uploader
@@ -164,11 +166,18 @@ async def proxy_media(
     current_user: User = Depends(get_current_user)
 ):
     try:
-        if s3_client and aws_bucket:
+        logging.info(f"Proxying media: {public_id}")
+        is_s3 = public_id.startswith('bgv_documents/') or public_id.startswith('bqv_documents/')
+        
+        if s3_client and aws_bucket and is_s3:
             # Run both get_object and read() in the thread pool to avoid blocking
             def fetch_s3_data():
-                resp = s3_client.get_object(Bucket=aws_bucket, Key=public_id)
-                return resp['Body'].read(), resp.get('ContentType', 'image/png')
+                try:
+                    resp = s3_client.get_object(Bucket=aws_bucket, Key=public_id)
+                    return resp['Body'].read(), resp.get('ContentType', 'image/png')
+                except Exception as e:
+                    logging.error(f"S3 fetch failed for key {public_id}: {str(e)}")
+                    raise
             
             data, content_type = await to_thread.run_sync(fetch_s3_data)
             
@@ -191,15 +200,41 @@ async def proxy_media(
         logging.error(f"Proxy error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to proxy media")
 
+class ExtractRequest(BaseModel):
+    url: Optional[str] = None
+    public_id: Optional[str] = None
+
 @router.post("/extract")
 async def extract_ocr_data(
-    file: UploadFile = File(...),
+    req: Optional[ExtractRequest] = None,
+    file: Optional[UploadFile] = File(None),
     current_user: User = Depends(get_current_user)
 ):
     try:
         scanner = get_scanner()
-        file_data = await file.read()
-        
+        file_data = None
+
+        if file:
+            file_data = await file.read()
+        elif req:
+            if req.public_id:
+                # Fetch from S3
+                is_s3 = req.public_id.startswith('bgv_documents/') or req.public_id.startswith('bqv_documents/')
+                if s3_client and aws_bucket and is_s3:
+                    def fetch_s3():
+                        resp = s3_client.get_object(Bucket=aws_bucket, Key=req.public_id)
+                        return resp['Body'].read()
+                    file_data = await to_thread.run_sync(fetch_s3)
+            elif req.url:
+                # Fetch from URL
+                def fetch_url():
+                    resp = requests.get(req.url)
+                    return resp.content
+                file_data = await to_thread.run_sync(fetch_url)
+
+        if not file_data:
+            return {"success": False, "message": "No file data provided"}
+
         # 1. Extract raw text
         text = await to_thread.run_sync(scanner.extract_text, file_data)
         
