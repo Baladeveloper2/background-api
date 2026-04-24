@@ -154,6 +154,7 @@ class Case(Base):
     is_in_tat = Column(Integer, default=1)
     ai_summary = Column(Text, nullable=True)
     file_no = Column(String(50), nullable=True, index=True)
+    insufficiency_count = Column(Integer, default=0)
 
     __table_args__ = (
         Index("index_customer_status", "customer_id", "status"),
@@ -211,6 +212,7 @@ class Notification(Base):
     channel = Column(Enum(NotificationChannel), default=NotificationChannel.SYSTEM)
     is_read = Column(Integer, default=0, index=True)
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
+    extra_data = Column(JSONEncodedDict, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     __table_args__ = (
@@ -233,3 +235,16 @@ class RevokeLog(Base):
     revoked_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     user = relationship("User")
     case = relationship("Case", backref="revoke_logs")
+
+class InsufficiencyLog(Base):
+    __tablename__ = "insufficiency_logs"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    from_status = Column(String(50), nullable=False)
+    notes = Column(Text, nullable=True)
+    marked_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    
+    user = relationship("User")
+    case = relationship("Case", backref="insufficiency_logs")

@@ -302,6 +302,7 @@ class Case(CaseBase):
     is_in_tat: Optional[int] = 1
     ai_summary: Optional[str] = None
     file_no: Optional[str] = None
+    insufficiency_count: Optional[int] = 0
     checks: List[VerificationCheck] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -319,6 +320,22 @@ class CaseRead(Case):
     queue_age: Optional[str] = None
     in_tat: Optional[int] = 0
     out_tat: Optional[int] = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+class InsufficiencyLogBase(BaseModel):
+    case_id: str
+    user_id: str
+    from_status: str
+    notes: Optional[str] = None
+
+class InsufficiencyLog(InsufficiencyLogBase):
+    id: str
+    marked_at: datetime
+    resolved_at: Optional[datetime] = None
+    user_name: Optional[str] = None
+    case_ref_no: Optional[str] = None
+    customer_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -518,6 +535,7 @@ class NotificationRead(BaseModel):
     case_name: Optional[str] = None
     case_ref: Optional[str] = None
     case_status: Optional[str] = None
+    extra_data: Optional[dict[str, Any]] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

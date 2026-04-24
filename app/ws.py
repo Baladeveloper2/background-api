@@ -3,6 +3,9 @@ from typing import List, Dict, Set
 import json
 import asyncio
 
+import logging
+logger = logging.getLogger(__name__)
+
 class ConnectionManager:
     def __init__(self):
         # Maps user_id to their active websocket (local to this node)
@@ -14,7 +17,8 @@ class ConnectionManager:
 
     async def connect(self, websocket: WebSocket, user_id: str):
         await websocket.accept()
-        self.active_connections[user_id] = websocket
+        self.active_connections[str(user_id)] = websocket
+        logger.info(f"WebSocket connected: user_id={user_id}. Active pool: {list(self.active_connections.keys())}")
 
     async def disconnect(self, websocket: WebSocket, user_id: str):
         if user_id in self.active_connections:
@@ -59,5 +63,21 @@ class ConnectionManager:
         
         for uid, s in dead_users:
             await self.disconnect(s, uid)
+
+    async def broadcast(self, message: dict):
+        """Alias for convenience and possible future multi-node support."""
+        await self.broadcast_local(message)
+
+    async def send_personal_message(self, user_id: str, message: dict):
+        """Send message only to a specific user if they are connected."""
+        u_id = str(user_id)
+        if u_id in self.active_connections:
+            try:
+                await self.active_connections[u_id].send_text(json.dumps(message))
+                logger.info(f"WebSocket message sent to user_id={u_id}: type={message.get('type')}")
+            except Exception as e:
+                logger.error(f"Failed to send personal message to {u_id}: {str(e)}")
+        else:
+            logger.warning(f"WebSocket message target user_id={u_id} not connected. Pool: {list(self.active_connections.keys())}")
 
 manager = ConnectionManager()

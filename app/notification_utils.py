@@ -1,8 +1,11 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Any, Optional, List
+from typing import Any, Optional
+from datetime import datetime
 from . import models, enums
+from .ws import manager
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,7 @@ async def create_notification(
     category: enums.NotificationCategory,
     channel: enums.NotificationChannel = enums.NotificationChannel.SYSTEM,
     case_id: Optional[str] = None,
+    extra_data: Optional[dict[str, Any]] = None,
     background_tasks: Optional[Any] = None
 ):
     """
@@ -26,9 +30,34 @@ async def create_notification(
             message=message,
             category=category,
             channel=channel,
-            case_id=case_id
+            case_id=case_id,
+            extra_data=extra_data
         )
         db.add(notif)
+        await db.flush() # Get the ID for the WebSocket message
+        
+        logger.info(f"Notification created in DB: id={notif.id} for user_id={user_id}")
+
+        # Real-time WebSocket Broadcast (Direct to User)
+        try:
+            # We don't await this to keep the API response snappy
+            import asyncio
+            asyncio.create_task(manager.send_personal_message(str(user_id), {
+                "type": "NEW_NOTIFICATION",
+                "data": {
+                    "id": notif.id,
+                    "title": notif.title,
+                    "message": notif.message,
+                    "category": category.value if hasattr(category, 'value') else category,
+                    "case_id": case_id,
+                    "extra_data": extra_data,
+                    "created_at": datetime.utcnow().isoformat()
+                }
+            }))
+            logger.info(f"WebSocket broadcast task scheduled for user_id={user_id}")
+        except Exception as ws_err:
+            logger.error(f"WebSocket notification push failed: {str(ws_err)}")
+
         return notif
     except Exception as e:
         logger.error(f"Failed to create notification: {str(e)}")
@@ -36,7 +65,7 @@ async def create_notification(
 
 # --- Specialized Stakeholder Alerting ---
 
-async def get_users_by_role(db: AsyncSession, roles: List[enums.UserRole]):
+async def get_users_by_role(db: AsyncSession, roles: list[enums.UserRole]):
     """Helper to fetch all users with given roles."""
     stmt = select(models.User).filter(models.User.role.in_(roles), models.User.status == "ACTIVE")
     res = await db.execute(stmt)
@@ -49,6 +78,16 @@ async def notify_new_assignment(db: AsyncSession, user_id: str, case_ref: str, c
         "New Case Assigned", 
         f"Case {case_ref} for {candidate_name} has been assigned to your queue for verification.",
         enums.NotificationCategory.CASE_ASSIGNED,
+        case_id=case_id
+    )
+
+async def notify_allocation_to_admin(db: AsyncSession, admin_id: str, verifier_name: str, case_ref: str, case_id: str, candidate_name: str):
+    """Notify the admin that an allocation they initiated was successful."""
+    await create_notification(
+        db, admin_id,
+        "Allocation Confirmed",
+        f"Protocol {case_ref} ({candidate_name}) successfully deployed to {verifier_name}.",
+        enums.NotificationCategory.SYSTEM_ALERT,
         case_id=case_id
     )
 

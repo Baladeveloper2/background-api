@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, update, delete
 from sqlalchemy.orm import contains_eager, joinedload, selectinload
 from typing import List, Optional, Dict, Any
-from . import models, schemas
+from . import models, schemas, enums
 from .database import get_async_db, SessionLocal
 import uuid
 from datetime import datetime
@@ -15,6 +15,7 @@ import pandas as pd
 import io
 from .ocr_utils import get_scanner
 from . import notification_utils
+from .ws import manager
 from .cache import delete_cache, cache_response
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 
@@ -585,6 +586,7 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
     if not update_data:
         return {"msg": "Invalid action"}
         
+    from .ws import manager
     # Revoke Logic for Bulk
     if req.action == "status":
         for cid in req.case_ids:
@@ -615,6 +617,25 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
                     to_status=req.target_value
                 ))
                 
+            # Insufficiency Logic: Marking as insufficient
+            if req.target_value == models.CaseStatus.INSUFFICIENT and case_obj.status != models.CaseStatus.INSUFFICIENT:
+                case_obj.insufficiency_count += 1
+                db.add(models.InsufficiencyLog(
+                    case_id=cid,
+                    user_id=current_user.id,
+                    from_status=case_obj.status,
+                    notes="Bulk marked as insufficient"
+                ))
+            
+            # Resolution Logic: Moving out of insufficient
+            if case_obj.status == models.CaseStatus.INSUFFICIENT and req.target_value != models.CaseStatus.INSUFFICIENT:
+                # Update latest log with resolution time
+                res_log_stmt = select(models.InsufficiencyLog).filter(models.InsufficiencyLog.case_id == cid).order_by(models.InsufficiencyLog.marked_at.desc())
+                res_log_exec = await db.execute(res_log_stmt)
+                latest_log = res_log_exec.scalars().first()
+                if latest_log and not latest_log.resolved_at:
+                    latest_log.resolved_at = datetime.utcnow()
+
             # Update status and dates
             case_obj.status = req.target_value
             if req.target_value == models.CaseStatus.COMPLETED:
@@ -633,19 +654,30 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
 
     await db.commit()
 
+    verifier_name = "Verifier"
+    if req.action == "assign" and req.target_value:
+        v_res = await db.execute(select(models.User).filter(models.User.id == req.target_value))
+        v_obj = v_res.scalar_one_or_none()
+        if v_obj: verifier_name = v_obj.full_name
+
     # Trigger Notifications for Bulk
+    bulk_case_info = []
     for cid in req.case_ids:
         # Re-fetch for reference info with candidate
         ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
         cbd = ref_res.scalar_one_or_none()
         if not cbd: continue
         candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
+        
+        # Track for admin summary
+        bulk_case_info.append({"id": cid, "ref": cbd.case_ref_no, "candidate": candidate_name})
 
         if req.action == "assign" and req.target_value:
              # Standard assignment logic...
              update_stmt = update(models.Case).where(models.Case.id == cid).values(assigned_to=req.target_value, assigned_at=datetime.utcnow() if not cbd.assigned_at else cbd.assigned_at)
              await db.execute(update_stmt)
              await create_audit_log(db, current_user.id, "CASE_ASSIGNMENT", f"Case bulk-assigned to verifier via system operator", resource_id=cid)
+             await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "bulk-assignment", "assigned_to": req.target_value})
              await notification_utils.notify_new_assignment(db, req.target_value, cbd.case_ref_no, cid, candidate_name)
         elif req.action == "status":
             old_s = cbd.status.value if hasattr(cbd.status, 'value') else cbd.status
@@ -657,6 +689,16 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
                 await notification_utils.notify_case_closed(db, cid, cbd.case_ref_no, candidate_name)
             elif req.target_value == models.CaseStatus.QC:
                 await notification_utils.notify_verification_completed(db, cid, cbd.case_ref_no, candidate_name, current_user.full_name)
+
+    # Notify Admin ONE summary instead of many small ones
+    if req.action == "assign" and req.target_value:
+        await notification_utils.create_notification(
+            db, current_user.id,
+            "Bulk Allocation Finalized",
+            f"Successfully deployed {len(req.case_ids)} cases to {verifier_name}. All mission protocols are now active in the verifier queue.",
+            enums.NotificationCategory.SYSTEM_ALERT,
+            extra_data={"type": "BULK_ASSIGN", "verifier": verifier_name, "cases": bulk_case_info}
+        )
     
     await db.commit()
     return {"msg": "Bulk action completed successfullly"}
@@ -683,7 +725,7 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
         
     # 3. Assign cases greedily to verifier with least cases
     assigned_count = 0
-    from .ws import manager
+    auto_assigned_info = []
     
     for cid in req.case_ids:
         # Find verifier with minimum workload
@@ -709,8 +751,23 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
         ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
         cbd = ref_res.scalar_one()
         candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
-        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no, cid, candidate_name)
         
+        v_name = "Verifier"
+        v_obj = next((u for u in verifiers if u.id == target_v_id), None)
+        if v_obj: v_name = v_obj.full_name
+            
+        auto_assigned_info.append({"id": cid, "ref": cbd.case_ref_no, "candidate": candidate_name, "verifier": v_name})
+        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no, cid, candidate_name)
+
+    # Notify Admin ONE summary
+    await notification_utils.create_notification(
+        db, current_user.id,
+        "Auto-Allocation Protocol Executed",
+        f"Distributed {assigned_count} cases across active operational units. System load balancing complete.",
+        enums.NotificationCategory.SYSTEM_ALERT,
+        extra_data={"type": "AUTO_ALLOCATE", "cases": auto_assigned_info}
+    )
+    
     await db.commit()
     return {"msg": f"Successfully auto-allocated {assigned_count} cases", "success": True}
 
@@ -786,6 +843,25 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
                 from_status=db_case.status,
                 to_status=update_data.get('status')
             ))
+
+        # Insufficiency Logic: Marking as insufficient
+        if update_data.get("status") == models.CaseStatus.INSUFFICIENT and db_case.status != models.CaseStatus.INSUFFICIENT:
+            db_case.insufficiency_count += 1
+            db.add(models.InsufficiencyLog(
+                case_id=case_id,
+                user_id=current_user.id,
+                from_status=db_case.status,
+                notes=update_data.get("notes", "Marked as insufficient")
+            ))
+        
+        # Resolution Logic: Moving out of insufficient
+        if db_case.status == models.CaseStatus.INSUFFICIENT and update_data.get("status") and update_data.get("status") != models.CaseStatus.INSUFFICIENT:
+            # Update latest log with resolution time
+            res_log_stmt = select(models.InsufficiencyLog).filter(models.InsufficiencyLog.case_id == case_id).order_by(models.InsufficiencyLog.marked_at.desc())
+            res_log_exec = await db.execute(res_log_stmt)
+            latest_log = res_log_exec.scalars().first()
+            if latest_log and not latest_log.resolved_at:
+                latest_log.resolved_at = datetime.utcnow()
 
         if manual_completed_date is None:
             db_case.completed_date = None
@@ -995,9 +1071,12 @@ async def merge_pdfs(case_id: str, request: Request, background_tasks: Backgroun
     return {"message": "PDF merge queued"}
 
 @router.post("/bulk-allocate")
-async def bulk_allocate(data: Dict[str, Any], db: AsyncSession = Depends(get_async_db)):
+async def bulk_allocate(data: dict[str, Any], db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     case_ids = data.get("case_ids", [])
     user_id = data.get("user_id")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Bulk allocate requested for user_id: {user_id}, case_count: {len(case_ids)}")
     
     update_vals = {
         "assigned_to": user_id,
@@ -1010,6 +1089,34 @@ async def bulk_allocate(data: Dict[str, Any], db: AsyncSession = Depends(get_asy
         .where(models.Case.id.in_(case_ids))
         .values(**update_vals)
     )
+    
+    # Trigger Real-time Notifications & Broadcasts
+    if user_id:
+        v_res = await db.execute(select(models.User).filter(models.User.id == user_id))
+        v_obj = v_res.scalar_one_or_none()
+        verifier_name = v_obj.full_name if v_obj else "Verifier"
+
+        bulk_info = []
+        for cid in case_ids:
+            # Re-fetch for notification context
+            ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
+            cbd = ref_res.scalar_one_or_none()
+            if not cbd: continue
+            
+            candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
+            bulk_info.append({"id": cid, "ref": cbd.case_ref_no, "candidate": candidate_name})
+            await notification_utils.notify_new_assignment(db, user_id, cbd.case_ref_no, cid, candidate_name)
+            await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "allocation"})
+
+        # Notify Admin ONE summary
+        await notification_utils.create_notification(
+            db, current_user.id,
+            "Allocation Strategy Finalized",
+            f"Successfully deployed {len(case_ids)} cases to {verifier_name}. Mission protocols are now active.",
+            enums.NotificationCategory.SYSTEM_ALERT,
+            extra_data={"type": "BULK_ALLOCATE", "verifier": verifier_name, "cases": bulk_info}
+        )
+
     await db.commit()
     return {"message": "Success"}
 
@@ -1260,6 +1367,112 @@ async def get_all_revoke_logs(
         elif r.revoke_type == "QC":
             user_summary[key]["qc_revoke_count"] += 1
         user_summary[key]["total_revoke_count"] += 1
+        user_summary[key]["cases"].add(ref_no)
+
+    summary = []
+    for v in user_summary.values():
+        v["cases"] = list(v["cases"])
+        summary.append(v)
+
+    return {"logs": all_logs, "user_summary": summary}
+
+# ─── Insufficiency Log Endpoints ───────────────────────────────────────────
+
+@router.get("/{case_id}/insufficiency-logs", dependencies=[Depends(get_current_user)])
+async def get_case_insufficiency_logs(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    """Return all insufficiency events for a specific case."""
+    stmt = (
+        select(models.InsufficiencyLog, models.User.full_name, models.Case.case_ref_no, models.User.role, models.Role.name.label("custom_role_name"))
+        .outerjoin(models.User, models.InsufficiencyLog.user_id == models.User.id)
+        .outerjoin(models.Role, models.User.role_id == models.Role.id)
+        .outerjoin(models.Case, models.InsufficiencyLog.case_id == models.Case.id)
+        .filter(models.InsufficiencyLog.case_id == case_id)
+        .order_by(models.InsufficiencyLog.marked_at.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [
+        {
+            "id": r.id,
+            "case_id": r.case_id,
+            "case_ref_no": ref_no,
+            "user_id": r.user_id,
+            "user_name": full_name,
+            "user_role": custom_role_name if custom_role_name else str(role.value if hasattr(role, 'value') else role).replace('_', ' ').title(),
+            "from_status": r.from_status,
+            "notes": r.notes,
+            "marked_at": r.marked_at.isoformat() if r.marked_at else None,
+            "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+        }
+        for r, full_name, ref_no, role, custom_role_name in rows
+    ]
+
+@router.get("/insufficiency-logs/all", dependencies=[Depends(get_current_user)])
+async def get_all_insufficiency_logs(
+    user_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db)
+):
+    """Global insufficiency tracking: list all events with filters."""
+    stmt = (
+        select(models.InsufficiencyLog, models.User.full_name, models.Case.case_ref_no, models.User.role, models.Role.name.label("custom_role_name"), models.Customer.name.label("customer_name"))
+        .outerjoin(models.User, models.InsufficiencyLog.user_id == models.User.id)
+        .outerjoin(models.Role, models.User.role_id == models.Role.id)
+        .outerjoin(models.Case, models.InsufficiencyLog.case_id == models.Case.id)
+        .outerjoin(models.Customer, models.Case.customer_id == models.Customer.id)
+        .order_by(models.InsufficiencyLog.marked_at.desc())
+    )
+    if user_id:
+        stmt = stmt.filter(models.InsufficiencyLog.user_id == user_id)
+    if from_date:
+        try:
+            dt = datetime.fromisoformat(from_date)
+            stmt = stmt.filter(models.InsufficiencyLog.marked_at >= dt)
+        except ValueError:
+            pass
+    if to_date:
+        try:
+            dt = datetime.fromisoformat(to_date)
+            stmt = stmt.filter(models.InsufficiencyLog.marked_at <= dt)
+        except ValueError:
+            pass
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    all_logs = []
+    user_summary = {}
+
+    for r, full_name, ref_no, role, custom_role_name, customer_name in rows:
+        u_role_val = str(role.value if hasattr(role, 'value') else role).upper()
+        log = {
+            "id": r.id,
+            "case_id": r.case_id,
+            "case_ref_no": ref_no,
+            "customer_name": customer_name,
+            "user_id": r.user_id,
+            "user_name": full_name,
+            "user_role": custom_role_name if custom_role_name else u_role_val.replace('_', ' ').title(),
+            "marked_at": r.marked_at.isoformat() if r.marked_at else None,
+            "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+            "notes": r.notes,
+        }
+        all_logs.append(log)
+
+        key = r.user_id
+        if key not in user_summary:
+            user_summary[key] = {
+                "user_id": r.user_id,
+                "user_name": full_name,
+                "user_role": log["user_role"],
+                "total_marked": 0,
+                "total_resolved": 0,
+                "cases": set()
+            }
+        user_summary[key]["total_marked"] += 1
+        if r.resolved_at:
+            user_summary[key]["total_resolved"] += 1
         user_summary[key]["cases"].add(ref_no)
 
     summary = []

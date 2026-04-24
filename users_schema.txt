@@ -1,0 +1,20 @@
+CREATE TABLE "users" (
+  "id" varchar(36) NOT NULL,
+  "email" varchar(255) NOT NULL,
+  "hashed_password" varchar(255) NOT NULL,
+  "full_name" varchar(255) DEFAULT NULL,
+  "role" varchar(50) DEFAULT NULL,
+  "role_id" varchar(36) DEFAULT NULL,
+  "status" varchar(50) DEFAULT NULL,
+  "territory" varchar(255) DEFAULT NULL,
+  "business_unit" varchar(255) DEFAULT NULL,
+  "bvs_permissions" mediumtext,
+  "customer_id" varchar(36) DEFAULT NULL,
+  "created_at" datetime DEFAULT (now()),
+  PRIMARY KEY ("id"),
+  UNIQUE KEY "ix_users_email" ("email"),
+  KEY "role_id" ("role_id"),
+  KEY "fk_user_customer" ("customer_id"),
+  CONSTRAINT "fk_user_customer" FOREIGN KEY ("customer_id") REFERENCES "customers" ("id"),
+  CONSTRAINT "users_ibfk_1" FOREIGN KEY ("role_id") REFERENCES "roles" ("id")
+)

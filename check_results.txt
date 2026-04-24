@@ -1,0 +1,6 @@
+--- Checking defaultdb ---
+Cases has insufficiency_count: True
+Has insufficiency_logs table: False
+--- Checking bgvms ---
+Error checking bgvms: (pymysql.err.OperationalError) (1049, "Unknown database 'bgvms'")
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
