@@ -65,11 +65,12 @@ async def upload_file(
             
             print(f"DEBUG: Starting S3 upload to {aws_bucket}/{unique_filename}")
             await to_thread.run_sync(
-                s3_client.upload_fileobj,
-                BytesIO(file_data),
-                aws_bucket,
-                unique_filename,
-                {'ContentType': file.content_type}
+                lambda: s3_client.upload_fileobj(
+                    BytesIO(file_data),
+                    aws_bucket,
+                    unique_filename,
+                    ExtraArgs={'ContentType': file.content_type}
+                )
             )
             print(f"DEBUG: S3 upload successful: {unique_filename}")
             
@@ -86,11 +87,12 @@ async def upload_file(
 
         # Cloudinary Fallback
         upload_result = await to_thread.run_sync(
-            cloudinary.uploader.upload,
-            file_data,
-            resource_type=resource_type,
-            folder="bgv_documents",
-            public_id=f"{base_filename}_{os.urandom(2).hex()}"
+            lambda: cloudinary.uploader.upload(
+                file_data,
+                resource_type=resource_type,
+                folder="bgv_documents",
+                public_id=f"{base_filename}_{os.urandom(2).hex()}"
+            )
         )
 
         return {
@@ -134,10 +136,11 @@ async def get_signed_url(
                 params['ResponseContentDisposition'] = disposition
             
             url = await to_thread.run_sync(
-                s3_client.generate_presigned_url,
-                'get_object',
-                params,
-                3600
+                lambda: s3_client.generate_presigned_url(
+                    'get_object',
+                    Params=params,
+                    ExpiresIn=3600
+                )
             )
             return {"url": url}
 
@@ -170,31 +173,27 @@ async def proxy_media(
         is_s3 = public_id.startswith('bgv_documents/') or public_id.startswith('bqv_documents/')
         
         if s3_client and aws_bucket and is_s3:
-            # Run both get_object and read() in the thread pool to avoid blocking
-            def fetch_s3_data():
-                try:
-                    resp = s3_client.get_object(Bucket=aws_bucket, Key=public_id)
-                    return resp['Body'].read(), resp.get('ContentType', 'image/png')
-                except Exception as e:
-                    logging.error(f"S3 fetch failed for key {public_id}: {str(e)}")
-                    raise
-            
-            data, content_type = await to_thread.run_sync(fetch_s3_data)
-            
+            # Generate a short-lived presigned URL and fetch it to stream
+            url = await to_thread.run_sync(
+                lambda: s3_client.generate_presigned_url(
+                    ClientMethod='get_object',
+                    Params={'Bucket': aws_bucket, 'Key': public_id},
+                    ExpiresIn=300
+                )
+            )
+            response = await to_thread.run_sync(lambda: requests.get(url, stream=True))
             return StreamingResponse(
-                io.BytesIO(data),
-                media_type=content_type,
-                headers={
-                    "Cache-Control": "max-age=3600",
-                    "Access-Control-Allow-Origin": "*"
-                }
+                response.iter_content(chunk_size=1024),
+                media_type=response.headers.get('Content-Type', 'image/jpeg')
             )
         
-        # Fallback for Cloudinary (usually doesn't need proxying, but for consistency)
-        import requests
+        # Fallback for Cloudinary (Streaming proxy)
         url = f"https://res.cloudinary.com/dfrfq0ch8/image/upload/{public_id}"
-        resp = requests.get(url)
-        return StreamingResponse(io.BytesIO(resp.content), media_type="image/png")
+        response = await to_thread.run_sync(lambda: requests.get(url, stream=True))
+        return StreamingResponse(
+            response.iter_content(chunk_size=1024),
+            media_type=response.headers.get('Content-Type', 'image/jpeg')
+        )
 
     except Exception as e:
         logging.error(f"Proxy error: {str(e)}")

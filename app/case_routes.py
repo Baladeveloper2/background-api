@@ -15,6 +15,7 @@ import pandas as pd
 import io
 from .ocr_utils import get_scanner
 from . import notification_utils
+from .cache import delete_cache, cache_response
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 
 router = APIRouter(
@@ -82,6 +83,29 @@ async def export_mis_data(
 
         data = []
         for c in cases:
+            # Calculate In-TAT/Out-TAT
+            total_days = 0
+            if c.received_date:
+                from datetime import timezone
+                now_dt = datetime.now(timezone.utc)
+                
+                r_date = c.received_date
+                if r_date.tzinfo is None:
+                    r_date = r_date.replace(tzinfo=timezone.utc)
+                    
+                e_date = c.completed_date or now_dt
+                if e_date.tzinfo is None:
+                    e_date = e_date.replace(tzinfo=timezone.utc)
+                    
+                diff_seconds = (e_date - r_date).total_seconds()
+                # Use inclusive calendar days for TAT
+                total_days = (e_date.date() - r_date.date()).days + 1
+                total_days = max(1, total_days)
+            
+            allowed = c.tat_days or 10
+            in_tat_days = total_days if total_days <= allowed else allowed
+            out_tat_days = 0 if total_days <= allowed else total_days - allowed
+
             data.append({
                 "Case ID": c.case_ref_no,
                 "Candidate Name": c.candidate.name if c.candidate else "N/A",
@@ -90,8 +114,10 @@ async def export_mis_data(
                 "Received Date": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A",
                 "Completed Date": c.completed_date.strftime("%Y-%m-%d %H:%M") if c.completed_date else "In Progress",
                 "Assigned To": c.assigned_user.full_name if c.assigned_user else "Unallocated",
-                "TAT (Days)": c.tat_days or 10,
-                "SLA Status": "In-TAT" if c.is_in_tat == 1 else "Out-TAT"
+                "TAT (Days)": allowed,
+                "SLA Status": "In-TAT" if c.is_in_tat == 1 else "Out-TAT",
+                "In-TAT Days": in_tat_days,
+                "Out-TAT Days": out_tat_days
             })
 
         df = pd.DataFrame(data)
@@ -109,6 +135,7 @@ async def export_mis_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
+@cache_response(ttl=300, key_prefix="case_history")
 async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db)):
     stmt = select(models.AuditLog, models.User.full_name).join(models.User, models.AuditLog.user_id == models.User.id).filter(models.AuditLog.resource_id == case_id).order_by(models.AuditLog.timestamp.desc())
     res = await db.execute(stmt)
@@ -259,40 +286,53 @@ async def read_cases(
         selectinload(models.Case.checks)
     )
 
-    # 2. Role-based data isolation
+
+    # 2. Count for pagination
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    base_count_stmt = select(func.count(models.Case.id)).outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
+    
+    # Combined filtering logic
     if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
         stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+        base_count_stmt = base_count_stmt.filter(models.Case.customer_id == current_user.customer_id)
     elif user_role not in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"]:
-        # Verifier-specific filtering: only show what is assigned to them
         stmt = stmt.filter(models.Case.assigned_to == current_user.id)
+        base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == current_user.id)
     
     if status:
         stmt = stmt.filter(models.Case.status == status)
+        base_count_stmt = base_count_stmt.filter(models.Case.status == status)
     if batch_id:
         stmt = stmt.filter(models.Case.batch_id == batch_id)
+        base_count_stmt = base_count_stmt.filter(models.Case.batch_id == batch_id)
     if customer_id:
         stmt = stmt.filter(models.Case.customer_id == customer_id)
+        base_count_stmt = base_count_stmt.filter(models.Case.customer_id == customer_id)
     if customer_name:
         stmt = stmt.filter(models.Customer.name == customer_name)
+        base_count_stmt = base_count_stmt.filter(models.Customer.name == customer_name)
     if assigned_to:
         stmt = stmt.filter(models.Case.assigned_to == assigned_to)
+        base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == assigned_to)
     if search:
-        stmt = stmt.filter(or_(models.Case.case_ref_no.ilike(f"%{search}%"), models.Candidate.name.ilike(f"{search}%")))
+        f = or_(models.Case.case_ref_no.ilike(f"%{search}%"), models.Candidate.name.ilike(f"{search}%"))
+        stmt = stmt.filter(f)
+        base_count_stmt = base_count_stmt.filter(f)
     if search_name:
         stmt = stmt.filter(models.Candidate.name.ilike(f"{search_name}%"))
+        base_count_stmt = base_count_stmt.filter(models.Candidate.name.ilike(f"{search_name}%"))
     if search_ref:
         stmt = stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
+        base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
     if assigned is not None:
         if assigned:
             stmt = stmt.filter(models.Case.assigned_to != None)
+            base_count_stmt = base_count_stmt.filter(models.Case.assigned_to != None)
         else:
             stmt = stmt.filter(models.Case.assigned_to == None)
-    
-    # 2. Results
-    subq = stmt.subquery()
-    count_stmt = select(func.count(func.distinct(subq.c.id)))
-    total_count_res = await db.execute(count_stmt)
+            base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == None)
+
+    total_count_res = await db.execute(base_count_stmt)
     total_count = total_count_res.scalar() or 0
     response.headers["X-Total-Count"] = str(total_count)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
@@ -319,18 +359,27 @@ async def read_cases(
         if case.qa_user: case_data.qa_user_name = case.qa_user.full_name
         if case.qc_user: case_data.qc_user_name = case.qc_user.full_name
         
-        # Calculate Queue Age
-        if case.received_date:
-            now = datetime.now(case.received_date.tzinfo)
-            delta = now - case.received_date
-            hours = int(delta.total_seconds() // 3600)
-            if hours < 24:
-                case_data.queue_age = f"{hours}h"
-            else:
-                days = hours // 24
-                case_data.queue_age = f"{days}d {hours % 24}h"
         else:
             case_data.queue_age = "0h"
+        
+        # Calculate In-TAT/Out-TAT
+        if case.received_date:
+            from datetime import timezone
+            now_dt = datetime.now(timezone.utc)
+            
+            r_date = case.received_date
+            if r_date.tzinfo is None:
+                r_date = r_date.replace(tzinfo=timezone.utc)
+                
+            e_date = case.completed_date or now_dt
+            if e_date.tzinfo is None:
+                e_date = e_date.replace(tzinfo=timezone.utc)
+                
+            diff_seconds = (e_date - r_date).total_seconds()
+            # Use inclusive calendar days for TAT
+            total_days = (e_date.date() - r_date.date()).days + 1
+            total_days = max(1, total_days)
+            
         
         cases_read.append(case_data)
     
@@ -434,8 +483,34 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
         r_enum_val = str(db_case.assigned_user.role.value if hasattr(db_case.assigned_user.role, 'value') else db_case.assigned_user.role).upper()
         role_name = db_case.assigned_user.role_rel.name if db_case.assigned_user.role_rel else ("QC Verifier" if r_enum_val in ["QA", "QC"] else r_enum_val)
         case_data.assigned_user_role = role_name.upper()
-    if db_case.qa_user: case_data.qa_user_name = db_case.qa_user.full_name
     if db_case.qc_user: case_data.qc_user_name = db_case.qc_user.full_name
+
+    # Calculate In-TAT/Out-TAT for single view
+    if db_case.received_date:
+        from datetime import timezone
+        now_dt = datetime.now(timezone.utc)
+        
+        r_date = db_case.received_date
+        if r_date.tzinfo is None:
+            r_date = r_date.replace(tzinfo=timezone.utc)
+            
+        e_date = db_case.completed_date or now_dt
+        if e_date.tzinfo is None:
+            e_date = e_date.replace(tzinfo=timezone.utc)
+            
+        diff_seconds = (e_date - r_date).total_seconds()
+        # Use inclusive calendar days for TAT
+        total_days = (e_date.date() - r_date.date()).days + 1
+        total_days = max(1, total_days)
+        allowed = case_data.tat_days or 10
+        
+        if total_days <= allowed:
+            case_data.in_tat = total_days
+            case_data.out_tat = 0
+        else:
+            case_data.in_tat = allowed
+            case_data.out_tat = total_days - allowed
+
     return case_data
 class BulkActionRequest(schemas.BaseModel):
     case_ids: List[str]
@@ -536,6 +611,10 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
             case_obj.status = req.target_value
             if req.target_value == models.CaseStatus.COMPLETED:
                 case_obj.completed_date = datetime.utcnow()
+            else:
+                case_obj.completed_date = None
+            
+            if req.target_value == models.CaseStatus.COMPLETED:
                 # TAT Logic
                 if case_obj.batch_id:
                     res_batch = await db.execute(select(models.Batch).filter(models.Batch.id == case_obj.batch_id))
@@ -548,22 +627,28 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
 
     # Trigger Notifications for Bulk
     for cid in req.case_ids:
-        # Re-fetch for reference info
-        ref_res = await db.execute(select(models.Case).filter(models.Case.id == cid))
+        # Re-fetch for reference info with candidate
+        ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
         cbd = ref_res.scalar_one_or_none()
         if not cbd: continue
+        candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
 
         if req.action == "assign" and req.target_value:
              # Standard assignment logic...
              update_stmt = update(models.Case).where(models.Case.id == cid).values(assigned_to=req.target_value, assigned_at=datetime.utcnow() if not cbd.assigned_at else cbd.assigned_at)
              await db.execute(update_stmt)
-             await notification_utils.notify_new_assignment(db, req.target_value, cbd.case_ref_no, cid)
+             await create_audit_log(db, current_user.id, "CASE_ASSIGNMENT", f"Case bulk-assigned to verifier via system operator", resource_id=cid)
+             await notification_utils.notify_new_assignment(db, req.target_value, cbd.case_ref_no, cid, candidate_name)
         elif req.action == "status":
+            old_s = cbd.status.value if hasattr(cbd.status, 'value') else cbd.status
+            new_s = req.target_value.value if hasattr(req.target_value, 'value') else req.target_value
+            await create_audit_log(db, current_user.id, "STATUS_CHANGE", f"Case status bulk-updated from {old_s} to {new_s}", resource_id=cid)
             if req.target_value == models.CaseStatus.INSUFFICIENT:
                 await notification_utils.notify_insufficient(db, cbd.assigned_to, cbd.case_ref_no, cid)
-            elif req.target_value == models.CaseStatus.COMPLETED or req.target_value == models.CaseStatus.QC_PENDING:
-                # Notify Verifier
-                await notification_utils.notify_case_completed(db, cbd.assigned_to, cbd.case_ref_no, cid)
+            elif req.target_value == models.CaseStatus.COMPLETED:
+                await notification_utils.notify_case_closed(db, cid, cbd.case_ref_no, candidate_name)
+            elif req.target_value == models.CaseStatus.QC:
+                await notification_utils.notify_verification_completed(db, cid, cbd.case_ref_no, candidate_name, current_user.full_name)
     
     await db.commit()
     return {"msg": "Bulk action completed successfullly"}
@@ -613,20 +698,26 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
         await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "auto-assignment"})
         
         # Trigger Notification
-        ref_res = await db.execute(select(models.Case).filter(models.Case.id == cid))
+        ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
         cbd = ref_res.scalar_one()
-        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no, cid)
+        candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
+        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no, cid, candidate_name)
         
     await db.commit()
     return {"msg": f"Successfully auto-allocated {assigned_count} cases", "success": True}
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
-    stmt = select(models.Case).options(selectinload(models.Case.checks)).filter(models.Case.id == case_id)
+    stmt = select(models.Case).options(
+        selectinload(models.Case.checks),
+        joinedload(models.Case.candidate)
+    ).filter(models.Case.id == case_id)
     res = await db.execute(stmt)
     db_case = res.scalar_one_or_none()
     if db_case is None:
         raise HTTPException(status_code=404, detail="Case not found")
+    
+    old_status = db_case.status
     
     update_data = case_update.dict(exclude_unset=True)
     candidate_update_data = update_data.pop("candidate", None)
@@ -653,8 +744,8 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
             db_case.qc_id = current_user.id
         elif current_user.role == models.UserRole.QA:
             db_case.qa_id = current_user.id
-    elif update_data.get("status") == models.CaseStatus.QA_PENDING and db_case.status != models.CaseStatus.QA_PENDING:
-         if current_user.role == models.UserRole.QA:
+    elif update_data.get("status") in [models.CaseStatus.QA_PENDING, models.CaseStatus.QC_PENDING] and db_case.status not in [models.CaseStatus.QA_PENDING, models.CaseStatus.QC_PENDING]:
+         if current_user.role in [models.UserRole.QA, models.UserRole.QC]:
             db_case.qa_id = current_user.id
          # Auto-propagate to checks
          for chk in db_case.checks:
@@ -700,7 +791,9 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
         if getattr(db_case, key) != value:
             # Simple audit log for status changes
             if key == "status":
-                await create_audit_log(db, current_user.id, "STATUS_CHANGE", f"Case status updated from {db_case.status} to {value}", resource_id=case_id)
+                old_val = db_case.status.value if hasattr(db_case.status, 'value') else db_case.status
+                new_val = value.value if hasattr(value, 'value') else value
+                await create_audit_log(db, current_user.id, "STATUS_CHANGE", f"Case status updated from {old_val} to {new_val}", resource_id=case_id)
             elif key == "assigned_to":
                 await create_audit_log(db, current_user.id, "CASE_ASSIGNMENT", f"Case assigned to user ID {value}", resource_id=case_id)
         setattr(db_case, key, value)
@@ -764,15 +857,31 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
                 if chk.data is None: chk.data = {}
                 chk.data["scope_of_work"] = svc_scope
     
-    # Check for triggers before returning
-    if "status" in update_data:
-        if update_data["status"] == models.CaseStatus.INSUFFICIENT:
-            await notification_utils.notify_insufficient(db, db_case.assigned_to, db_case.case_ref_no, case_id)
-        elif update_data["status"] == models.CaseStatus.COMPLETED or update_data["status"] == models.CaseStatus.QC:
-            await notification_utils.notify_case_completed(db, db_case.assigned_to, db_case.case_ref_no, case_id)
+    # 4. Trigger Notifications (Enhanced Stakeholder Flow)
+    candidate_name = db_case.candidate.name if db_case.candidate else "Candidate"
     
+    if "status" in update_data:
+        new_status = update_data["status"]
+        
+        # Scenario 1: Verifier finishes -> Moves to QC
+        if old_status == models.CaseStatus.VERIFICATION and new_status == models.CaseStatus.QC:
+            await notification_utils.notify_verification_completed(db, case_id, db_case.case_ref_no, candidate_name, current_user.full_name)
+        
+        # Scenario 2: QC finishes -> Moves to Completed
+        elif old_status == models.CaseStatus.QC and new_status == models.CaseStatus.COMPLETED:
+            await notification_utils.notify_qc_completed(db, case_id, db_case.case_ref_no, candidate_name, current_user.full_name)
+            await notification_utils.notify_case_closed(db, case_id, db_case.case_ref_no, candidate_name)
+        
+        # Scenario 3: General Completion (In case it jumps to completed)
+        elif old_status != models.CaseStatus.COMPLETED and new_status == models.CaseStatus.COMPLETED:
+            await notification_utils.notify_case_closed(db, case_id, db_case.case_ref_no, candidate_name)
+
+        # Scenario 4: Insufficient Flags
+        elif new_status == models.CaseStatus.INSUFFICIENT:
+            await notification_utils.notify_insufficient(db, db_case.assigned_to, db_case.case_ref_no, case_id)
+
     if "assigned_to" in update_data and update_data["assigned_to"]:
-        await notification_utils.notify_new_assignment(db, update_data["assigned_to"], db_case.case_ref_no, case_id)
+        await notification_utils.notify_new_assignment(db, update_data["assigned_to"], db_case.case_ref_no, case_id, candidate_name)
 
     await db.commit()
     res = await db.execute(

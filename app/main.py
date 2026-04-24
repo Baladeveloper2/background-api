@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from . import (
     models, auth_routes, customer_routes, partner_routes, 
@@ -10,20 +10,27 @@ from .database import engine, Base, get_async_db, async_engine
 from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from slowapi.errors import RateLimitExceeded
 from .auth_routes import limiter
-import logging
-from fastapi.middleware.gzip import GZipMiddleware
+from .logging_config import setup_logging, logger, instrument_sqlalchemy
+from .cache import get_redis
 from contextlib import asynccontextmanager
+from fastapi.middleware.gzip import GZipMiddleware
 import os
+import asyncio
+
+# Initialize structured logging
+setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup logic can go here
+    # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
+    instrument_sqlalchemy(async_engine.sync_engine)
+    
     yield
-    # Shutdown logic: Dispose of the async engine to avoid event loop errors
+    # Shutdown: Dispose of the async engine to avoid event loop errors
     await async_engine.dispose()
 
 # Database tables should be managed by alembic migrations in production, not auto-generated
@@ -33,8 +40,7 @@ app = FastAPI(title="BGVMS API", lifespan=lifespan)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
-    print(f"DEBUG: Validation error on {request.url.path}")
-    print(f"DEBUG: Error details: {exc.errors()}")
+    logger.error("Validation failed", extra={"path": request.url.path, "errors": exc.errors()})
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": exc.body},
@@ -64,23 +70,40 @@ app.add_middleware(
     expose_headers=["X-Total-Count"]
 )
 
-app.include_router(auth_routes.router)
-app.include_router(customer_routes.router)
-app.include_router(partner_routes.router)
-app.include_router(user_routes.router)
-app.include_router(candidate_routes.router)
-app.include_router(batch_routes.router)
-app.include_router(case_routes.router)
-app.include_router(verification_routes.router)
-app.include_router(stats_routes.router)
-app.include_router(role_routes.router)
-app.include_router(media_routes.router)
-app.include_router(notification_routes.router)
+# Custom Security Headers Middleware
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: https://res.cloudinary.com https://*.amazonaws.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com;"
+    return response
+
+# Versioned API Router
+api_v1 = APIRouter(prefix="/api/v1")
+
+api_v1.include_router(auth_routes.router)
+api_v1.include_router(customer_routes.router)
+api_v1.include_router(partner_routes.router)
+api_v1.include_router(user_routes.router)
+api_v1.include_router(candidate_routes.router)
+api_v1.include_router(batch_routes.router)
+api_v1.include_router(case_routes.router)
+api_v1.include_router(verification_routes.router)
+api_v1.include_router(stats_routes.router)
+api_v1.include_router(role_routes.router)
+api_v1.include_router(media_routes.router)
+api_v1.include_router(notification_routes.router)
+
+app.include_router(api_v1)
 
 import json
 from .ws import manager, WebSocketDisconnect, WebSocket
+@app.websocket("/ws")
 @app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str):
+async def websocket_endpoint(websocket: WebSocket, user_id: str = "anonymous"):
     await manager.connect(websocket, user_id)
     try:
         while True:
@@ -94,7 +117,30 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             except Exception:
                 pass # Ignore malformed json
     except WebSocketDisconnect:
-        await manager.disconnect(websocket)
+        await manager.disconnect(websocket, user_id)
+
+@app.websocket("/ws/presence/{case_id}")
+async def presence_handler(websocket: WebSocket, case_id: str):
+    # Extract user_id from token if possible, or use anonymous
+    token = websocket.query_params.get("token")
+    user_id = "anonymous"
+    if token and "." in token:
+        try:
+            import base64
+            payload = json.loads(base64.b64decode(token.split(".")[1] + "==").decode())
+            user_id = payload.get("id", payload.get("sub", "anonymous"))
+        except:
+            pass
+            
+    await manager.connect(websocket, user_id)
+    await manager.join_room(user_id, case_id)
+    try:
+        while True:
+            # Keep connection alive
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await manager.leave_room(user_id, case_id)
+        await manager.disconnect(websocket, user_id)
 
 @app.get("")
 async def root():
@@ -110,12 +156,23 @@ async def health_check(db: AsyncSession = Depends(get_async_db)):
         res = await db.execute(select(models.User).limit(1))
         user = res.scalar_one_or_none()
         
+        # Test Redis Connectivity
+        redis_status = "disconnected"
+        try:
+            r = get_redis()
+            await r.ping()
+            redis_status = "connected"
+        except:
+            pass
+
         return {
             "status": "ok", 
             "database": "connected",
+            "cache": redis_status,
             "user_query": getattr(user, 'email', 'None')
         }
     except Exception as e:
         import traceback
         return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
 
+ 

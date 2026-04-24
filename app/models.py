@@ -1,6 +1,6 @@
 import uuid
 import json
-from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator, Float
+from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator, Float, Index
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -59,6 +59,12 @@ class User(Base):
     role_rel = relationship("Role", backref="users")
     customer = relationship("Customer", backref="users")
 
+    # Composite index for filtering users by customer and status
+    __table_args__ = (
+        Index("index_user_customer_status", "customer_id", "status"),
+        {'extend_existing': True}
+    )
+
 class Role(Base):
     __tablename__ = "roles"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -76,31 +82,28 @@ class Module(Base):
     description = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-
-
 class Customer(Base):
     __tablename__ = "customers"
-
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), index=True)
-    city = Column(String(100), nullable=True)  # Replaces short_code
+    city = Column(String(100), nullable=True)
     contact_person = Column(String(255))
     phone = Column(String(50))
     email = Column(String(255))
     address = Column(Text)
     report_format = Column(String(50))
     customer_agreement = Column(String(255), nullable=True)
-    active_status = Column(Integer, default=1)  # 0 for Off, 1 for On (Replaces package_enabled)
+    active_status = Column(Integer, default=1)
     status = Column(String(50), default="ACTIVE")
     created_at = Column(DateTime, default=datetime.utcnow)
-    pricing_config = Column(JSONEncodedDict) # e.g. {"employment": 100, "education": 50}
+    pricing_config = Column(JSONEncodedDict)
 
 class Partner(Base):
     __tablename__ = "partners"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String(255), nullable=False) # Organization
+    name = Column(String(255), nullable=False)
     executive_lead = Column(String(255))
-    contact_points = Column(String(255)) # Email/Phone or JSON
+    contact_points = Column(String(255))
     regional_cluster = Column(String(255))
     status = Column(String(50), default=Status.ACTIVE)
     cloud_status = Column(String(50), default="ACTIVE")
@@ -117,10 +120,8 @@ class Candidate(Base):
     address_details = Column(JSONEncodedDict)
     gender = Column(String(20), nullable=True)
     address = Column(Text, nullable=True)
-    documents = Column(JSONEncodedList) # List of Cloudinary URLs/Metadata
+    documents = Column(JSONEncodedList)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
-
 
 class Batch(Base):
     __tablename__ = "batches"
@@ -150,11 +151,16 @@ class Case(Base):
     tat_days = Column(Integer, default=0)
     verifier_revoke_count = Column(Integer, default=0)
     qc_revoke_count = Column(Integer, default=0)
-    is_in_tat = Column(Integer, default=1) # 1 for In-TAT, 0 for Out-TAT
-    ai_summary = Column(Text, nullable=True) # AI-generated executive summary
+    is_in_tat = Column(Integer, default=1)
+    ai_summary = Column(Text, nullable=True)
     file_no = Column(String(50), nullable=True, index=True)
 
-    # Relationships
+    __table_args__ = (
+        Index("index_customer_status", "customer_id", "status"),
+        Index("index_assigned_status", "assigned_to", "status"),
+        {'extend_existing': True}
+    )
+
     candidate = relationship("Candidate", backref="cases")
     customer = relationship("Customer", backref="cases")
     batch = relationship("Batch", backref="cases")
@@ -168,10 +174,10 @@ class VerificationCheck(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
     case = relationship("Case", back_populates="checks")
-    check_type = Column(String(100), index=True) # Education, Employment, etc.
+    check_type = Column(String(100), index=True)
     status = Column(String(50), default=CheckStatus.VERIFICATION, index=True)
-    data = Column(JSONEncodedDict) # Verification details
-    digital_token = Column(String(100), unique=True, nullable=True) # For candidate link
+    data = Column(JSONEncodedDict)
+    digital_token = Column(String(100), unique=True, nullable=True)
     verifier_remarks = Column(Text)
     verified_date = Column(DateTime(timezone=True), nullable=True, index=True)
     rate = Column(Float, default=0.0)
@@ -181,9 +187,10 @@ class AuditLog(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"))
     action = Column(String(255), index=True)
-    resource_id = Column(String(100), index=True, nullable=True) # ID of Case, Batch, etc.
+    resource_id = Column(String(100), index=True, nullable=True)
     details = Column(Text)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
 class CaseComment(Base):
     __tablename__ = "case_comments"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -191,8 +198,6 @@ class CaseComment(Base):
     user_id = Column(String(36), ForeignKey("users.id"), index=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
-    # Relationships
     user = relationship("User")
     case = relationship("Case", backref="comments")
 
@@ -204,11 +209,15 @@ class Notification(Base):
     message = Column(Text)
     category = Column(Enum(NotificationCategory), default=NotificationCategory.SYSTEM_ALERT)
     channel = Column(Enum(NotificationChannel), default=NotificationChannel.SYSTEM)
-    is_read = Column(Integer, default=0, index=True) # 0 for unread, 1 for read
+    is_read = Column(Integer, default=0, index=True)
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
-    # Relationships
+    __table_args__ = (
+        Index("index_user_unread", "user_id", "is_read"),
+        {'extend_existing': True}
+    )
+
     user = relationship("User", backref="notifications")
     case_item = relationship("Case")
 
@@ -217,12 +226,10 @@ class RevokeLog(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
     user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
-    revoke_type = Column(String(50), nullable=False)  # 'VERIFIER' or 'QC'
+    revoke_type = Column(String(50), nullable=False)
     from_status = Column(String(50), nullable=False)
     to_status = Column(String(50), nullable=False)
     notes = Column(Text, nullable=True)
     revoked_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
-    # Relationships
     user = relationship("User")
     case = relationship("Case", backref="revoke_logs")

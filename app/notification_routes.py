@@ -13,13 +13,37 @@ async def get_notifications(
 ):
     """Fetch unread/recent notifications for the current user."""
     stmt = (
-        select(models.Notification)
+        select(
+            models.Notification,
+            models.Case.case_ref_no,
+            models.Case.status.label("case_status"),
+            models.Candidate.name.label("case_name")
+        )
+        .outerjoin(models.Case, models.Notification.case_id == models.Case.id)
+        .outerjoin(models.Candidate, models.Case.candidate_id == models.Candidate.id)
         .filter(models.Notification.user_id == current_user.id)
-        .order_by(desc(models.Notification.is_read), desc(models.Notification.created_at))
+        .order_by(models.Notification.is_read.asc(), desc(models.Notification.created_at))
         .limit(50)
     )
     res = await db.execute(stmt)
-    return res.scalars().all()
+    
+    results = []
+    for row in res:
+        n = row.Notification
+        results.append({
+            "id": n.id,
+            "title": n.title,
+            "message": n.message,
+            "category": n.category,
+            "channel": n.channel,
+            "is_read": n.is_read,
+            "case_id": n.case_id,
+            "case_name": row.case_name,
+            "case_ref": row.case_ref_no,
+            "case_status": row.case_status,
+            "created_at": n.created_at
+        })
+    return results
 
 @router.patch("/mark-read")
 async def mark_notifications_read(

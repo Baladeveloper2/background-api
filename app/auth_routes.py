@@ -9,6 +9,7 @@ from jose import JWTError, jwt
 from . import models, schemas, auth, database
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from .cache import delete_cache
 import re
 
 limiter = Limiter(key_func=get_remote_address)
@@ -39,6 +40,11 @@ async def create_audit_log(db: AsyncSession, user_id: str, action: str, details:
     log = models.AuditLog(user_id=user_id, action=action, details=details, resource_id=resource_id)
     db.add(log)
     await db.flush()
+    if resource_id:
+        # Invalidate the history cache for this case
+        # Note: We use the same key pattern as in case_routes.py
+        cache_key = f"case_history:get_case_history:case_id:{resource_id}"
+        await delete_cache(cache_key)
 
 def check_permissions(role: models.UserRole):
     async def role_checker(current_user: models.User = Depends(get_current_user)):

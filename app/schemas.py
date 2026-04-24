@@ -317,6 +317,8 @@ class CaseRead(Case):
     qa_user_name: Optional[str] = None
     qc_user_name: Optional[str] = None
     queue_age: Optional[str] = None
+    in_tat: Optional[int] = 0
+    out_tat: Optional[int] = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -513,6 +515,9 @@ class NotificationRead(BaseModel):
     channel: NotificationChannel
     is_read: int
     case_id: Optional[str] = None
+    case_name: Optional[str] = None
+    case_ref: Optional[str] = None
+    case_status: Optional[str] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

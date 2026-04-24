@@ -1,65 +1,63 @@
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import List, Dict, Set
 import json
+import asyncio
 
 class ConnectionManager:
     def __init__(self):
-        # Maps user_id to their active websocket
-        self.user_sockets: Dict[str, WebSocket] = {}
+        # Maps user_id to their active websocket (local to this node)
+        self.active_connections: Dict[str, WebSocket] = {}
         # Maps case_id to a set of user_ids currently viewing it
         self.rooms: Dict[str, Set[str]] = {}
-        # Maps websocket to user_id for cleanup
-        self.socket_to_user: Dict[WebSocket, str] = {}
+        # Channel for cross-node communication
+        self.pubsub_channel = "bgvms_presence"
 
     async def connect(self, websocket: WebSocket, user_id: str):
         await websocket.accept()
-        self.user_sockets[user_id] = websocket
-        self.socket_to_user[websocket] = user_id
+        self.active_connections[user_id] = websocket
 
-    async def disconnect(self, websocket: WebSocket):
-        user_id = self.socket_to_user.get(websocket)
-        if user_id:
-            # Remove from all rooms
-            for room_id in list(self.rooms.keys()):
-                if user_id in self.rooms[room_id]:
-                    self.rooms[room_id].remove(user_id)
-                    await self.broadcast_room_update(room_id)
-            
-            if user_id in self.user_sockets:
-                del self.user_sockets[user_id]
-            if websocket in self.socket_to_user:
-                del self.socket_to_user[websocket]
+    async def disconnect(self, websocket: WebSocket, user_id: str):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+        
+        # Remove from all rooms
+        for room_id in list(self.rooms.keys()):
+            if user_id in self.rooms[room_id]:
+                self.rooms[room_id].remove(user_id)
+                await self.publish_presence(room_id)
 
     async def join_room(self, user_id: str, case_id: str):
         if case_id not in self.rooms:
             self.rooms[case_id] = set()
         self.rooms[case_id].add(user_id)
-        await self.broadcast_room_update(case_id)
+        await self.publish_presence(case_id)
 
     async def leave_room(self, user_id: str, case_id: str):
         if case_id in self.rooms and user_id in self.rooms[case_id]:
             self.rooms[case_id].remove(user_id)
-            await self.broadcast_room_update(case_id)
+            await self.publish_presence(case_id)
 
-    async def broadcast_room_update(self, case_id: str):
+    async def publish_presence(self, case_id: str):
+        """Broadcast room update to local connections."""
         viewers = list(self.rooms.get(case_id, []))
         message = {
             "type": "PRESENCE_UPDATE",
             "case_id": case_id,
-            "viewers": viewers # List of user IDs
+            "viewers": viewers
         }
-        await self.broadcast(message)
+        await self.broadcast_local(message)
 
-    async def broadcast(self, message: dict):
-        # Global broadcast for simple compatibility or specific updates
-        dead_sockets = []
-        for user_id, socket in self.user_sockets.items():
+    async def broadcast_local(self, message: dict):
+        """Broadcast to all connections on THIS server node."""
+        msg_str = json.dumps(message)
+        dead_users = []
+        for user_id, socket in self.active_connections.items():
             try:
-                await socket.send_text(json.dumps(message))
+                await socket.send_text(msg_str)
             except Exception:
-                dead_sockets.append(socket)
+                dead_users.append((user_id, socket))
         
-        for s in dead_sockets:
-            await self.disconnect(s)
+        for uid, s in dead_users:
+            await self.disconnect(s, uid)
 
 manager = ConnectionManager()

@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from . import models, schemas
 from .database import get_async_db
 from .auth_routes import check_module_permission, limiter
+from .cache import cache_response
 from datetime import datetime
 
 router = APIRouter(
@@ -17,22 +18,19 @@ router = APIRouter(
 async def get_next_batch_number(db: AsyncSession):
     year = datetime.now().year
     prefix = f"Batch_{year}_"
-    # Find all batches for this year to determine the next sequence
-    stmt = select(models.Batch.batch_no).filter(models.Batch.batch_no.like(f"{prefix}%"))
+    # Efficiently find the max sequence using SQL
+    stmt = select(func.max(models.Batch.batch_no)).filter(models.Batch.batch_no.like(f"{prefix}%"))
     res = await db.execute(stmt)
-    batch_nos = res.scalars().all()
+    max_bn = res.scalar()
     
     max_seq = 0
-    for bn in batch_nos:
+    if max_bn:
         try:
-            # Expected format: Batch_YEAR_SEQ (e.g., Batch_2026_001)
-            parts = bn.split('_')
+            parts = max_bn.split('_')
             if len(parts) >= 3:
-                seq = int(parts[2])
-                if seq > max_seq:
-                    max_seq = seq
+                max_seq = int(parts[2])
         except (ValueError, IndexError):
-            continue
+            pass
             
     return f"{prefix}{max_seq + 1:03d}"
 
@@ -54,6 +52,7 @@ async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSe
     return db_batch
 
 @router.get("/summary", response_model=List[schemas.BatchSummary])
+@cache_response(ttl=120, key_prefix="batches")
 async def read_batches_summary(
     response: Response,
     skip: int = 0,
