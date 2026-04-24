@@ -380,6 +380,14 @@ async def read_cases(
             total_days = (e_date.date() - r_date.date()).days + 1
             total_days = max(1, total_days)
             
+            allowed = case_data.tat_days or 10
+            if total_days <= allowed:
+                case_data.in_tat = total_days
+                case_data.out_tat = 0
+            else:
+                case_data.in_tat = allowed
+                case_data.out_tat = total_days - allowed
+            
         
         cases_read.append(case_data)
     
