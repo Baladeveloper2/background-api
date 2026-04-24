@@ -12,6 +12,23 @@ async def get_notifications(
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
     """Fetch unread/recent notifications for the current user."""
+    # DEBUG: Check columns and DB URL
+    import os
+    from sqlalchemy import text
+    try:
+        # Check connection details
+        bind_url = db.get_bind().url
+        host = bind_url.host
+        database = bind_url.database
+        print(f"[DEBUG] LIVE DB: host={host}, database={database}")
+        print(f"[DEBUG] ENV DATABASE_URL matches: {os.getenv('DATABASE_URL') == str(bind_url)}")
+        
+        debug_res = await db.execute(text("DESCRIBE notifications"))
+        cols = [r[0] for r in debug_res.fetchall()]
+        print(f"[DEBUG] notifications columns in LIVE DB: {cols}")
+    except Exception as de:
+        print(f"[DEBUG] Could not describe notifications: {de}")
+
     stmt = (
         select(
             models.Notification,

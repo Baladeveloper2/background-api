@@ -318,6 +318,8 @@ class CaseRead(Case):
     qa_user_name: Optional[str] = None
     qc_user_name: Optional[str] = None
     queue_age: Optional[str] = None
+    predicted_tat: Optional[int] = None
+    is_at_risk: Optional[bool] = False
     in_tat: Optional[int] = 0
     out_tat: Optional[int] = 0
 
@@ -434,6 +436,7 @@ class DashboardStats(BaseModel):
     total_revenue: float = 0.0
     entry_pending_count: int = 0
     verification_pending_count: int = 0
+    at_risk_count: int = 0
     case_analysis: List[CaseAnalysisPoint] = []
     verification_pending: List[VerificationPendingItem] = []
     today_data_entry: List[DataEntryItem] = []

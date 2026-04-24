@@ -38,23 +38,31 @@ async def create_notification(
         
         logger.info(f"Notification created in DB: id={notif.id} for user_id={user_id}")
 
+        msg_payload = {
+            "type": "NEW_NOTIFICATION",
+            "data": {
+                "id": notif.id,
+                "title": notif.title,
+                "message": notif.message,
+                "category": category.value if hasattr(category, 'value') else category,
+                "case_id": case_id,
+                "case_ref": notif.case_ref, # Assuming relationship or loaded
+                "extra_data": extra_data,
+                "is_read": 0,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        }
+
         # Real-time WebSocket Broadcast (Direct to User)
         try:
-            # We don't await this to keep the API response snappy
-            import asyncio
-            asyncio.create_task(manager.send_personal_message(str(user_id), {
-                "type": "NEW_NOTIFICATION",
-                "data": {
-                    "id": notif.id,
-                    "title": notif.title,
-                    "message": notif.message,
-                    "category": category.value if hasattr(category, 'value') else category,
-                    "case_id": case_id,
-                    "extra_data": extra_data,
-                    "created_at": datetime.utcnow().isoformat()
-                }
-            }))
-            logger.info(f"WebSocket broadcast task scheduled for user_id={user_id}")
+            if background_tasks:
+                background_tasks.add_task(manager.send_personal_message, str(user_id), msg_payload)
+                logger.info(f"WebSocket broadcast deferred to BackgroundTasks for user_id={user_id}")
+            else:
+                # Fallback for sync/legacy routes
+                import asyncio
+                asyncio.create_task(manager.send_personal_message(str(user_id), msg_payload))
+                logger.info(f"WebSocket broadcast task scheduled (Immediate) for user_id={user_id}")
         except Exception as ws_err:
             logger.error(f"WebSocket notification push failed: {str(ws_err)}")
 
@@ -71,24 +79,26 @@ async def get_users_by_role(db: AsyncSession, roles: list[enums.UserRole]):
     res = await db.execute(stmt)
     return res.scalars().all()
 
-async def notify_new_assignment(db: AsyncSession, user_id: str, case_ref: str, case_id: str, candidate_name: str):
+async def notify_new_assignment(db: AsyncSession, user_id: str, case_ref: str, case_id: str, candidate_name: str, background_tasks: Optional[Any] = None):
     """Triggered when Super Admin assigns a case to a verifier."""
     await create_notification(
         db, user_id, 
         "New Case Assigned", 
         f"Case {case_ref} for {candidate_name} has been assigned to your queue for verification.",
         enums.NotificationCategory.CASE_ASSIGNED,
-        case_id=case_id
+        case_id=case_id,
+        background_tasks=background_tasks
     )
 
-async def notify_allocation_to_admin(db: AsyncSession, admin_id: str, verifier_name: str, case_ref: str, case_id: str, candidate_name: str):
+async def notify_allocation_to_admin(db: AsyncSession, admin_id: str, verifier_name: str, case_ref: str, case_id: str, candidate_name: str, background_tasks: Optional[Any] = None):
     """Notify the admin that an allocation they initiated was successful."""
     await create_notification(
         db, admin_id,
         "Allocation Confirmed",
         f"Protocol {case_ref} ({candidate_name}) successfully deployed to {verifier_name}.",
         enums.NotificationCategory.SYSTEM_ALERT,
-        case_id=case_id
+        case_id=case_id,
+        background_tasks=background_tasks
     )
 
 async def notify_verification_completed(db: AsyncSession, case_id: str, case_ref: str, candidate_name: str, verifier_name: str):
@@ -150,3 +160,25 @@ async def notify_form_submitted(db: AsyncSession, admin_ids: list, candidate_nam
             enums.NotificationCategory.FORM_SUBMITTED,
             case_id=case_id
         )
+
+async def notify_at_risk(db: AsyncSession, user_id: str, case_ref: str, case_id: str, tat_days: int, background_tasks: Optional[Any] = None):
+    """Triggered when a case crosses the 70% TAT risk threshold."""
+    await create_notification(
+        db, user_id,
+        "⚠️ SLA Risk Alert",
+        f"Critical Update: Case {case_ref} is now 'AT RISK'. Current timeline exceeds 70% of the {tat_days}-day protocol. Immediate action required.",
+        enums.NotificationCategory.INSUFFICIENT_DOCS, # Reusing critical icon
+        case_id=case_id,
+        background_tasks=background_tasks
+    )
+
+async def notify_ping(db: AsyncSession, user_id: str, case_ref: str, case_id: str, manager_name: str, background_tasks: Optional[Any] = None):
+    """Manual ping from a manager to a verifier."""
+    await create_notification(
+        db, user_id,
+        "🚨 URGENT PING",
+        f"Manager {manager_name} is requesting an immediate status update on Case {case_ref}. Prioritize this mission.",
+        enums.NotificationCategory.URGENT_PING,
+        case_id=case_id,
+        background_tasks=background_tasks
+    )

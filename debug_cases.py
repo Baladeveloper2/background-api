@@ -1,40 +1,21 @@
-from app.database import SessionLocal
-from app import models
-from datetime import datetime, timezone
+
 import asyncio
+from backend.app import models
+from backend.app.database import SessionLocal
+from sqlalchemy import select
 
-async def debug_cases():
+async def check():
     db = SessionLocal()
-    from sqlalchemy import select
-    # Target cases from screenshot: KARTHIKA (BSS002), RAJESWARI (TAT002), BALAMURUGAN (TAT001)
-    refs = ["BSS002", "TAT002", "TAT001", "IBM002", "IBM003"]
-    res = db.execute(select(models.Case).filter(models.Case.case_ref_no.in_(refs)))
-    cases = res.scalars().all()
-    
-    now_dt = datetime.now(timezone.utc)
-    print(f"Server Now (UTC): {now_dt}")
-    
-    for c in cases:
-        print("-" * 40)
-        print(f"Ref: {c.case_ref_no} | Status: {c.status}")
-        print(f"Received: {c.received_date}")
-        print(f"Completed: {c.completed_date}")
-        
-        r_date = c.received_date
-        if r_date and r_date.tzinfo is None:
-            r_date = r_date.replace(tzinfo=timezone.utc)
-            
-        e_date = c.completed_date or now_dt
-        if e_date and e_date.tzinfo is None:
-            e_date = e_date.replace(tzinfo=timezone.utc)
-            
-        if r_date and e_date:
-            diff = e_date - r_date
-            print(f"Diff Seconds: {diff.total_seconds()}")
-            print(f"Diff Days (floor): {int(diff.total_seconds() / 86400)}")
-
-    db.close()
+    try:
+        stmt = select(models.Case).filter(models.Case.assigned_to != None)
+        res = await db.execute(stmt)
+        cases = res.scalars().all()
+        print(f"Total Assigned Cases: {len(cases)}")
+        for i, c in enumerate(cases):
+            print(f"Index {i}: Ref={c.case_ref_no}, Status='{c.status}'")
+            if i > 100: break
+    finally:
+        await db.close()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(debug_cases())
+    asyncio.run(check())

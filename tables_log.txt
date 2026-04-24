@@ -1,0 +1,27 @@
+Checking all tables...
+Course
+Enrollment
+User
+alembic_version
+audit_logs
+batches
+candidates
+case_comments
+cases
+customers
+insufficiency_logs
+modules
+notifications
+partners
+revoke_logs
+roles
+users
+verification_checks
+Exception ignored in: <function Connection.__del__ at 0x000002161C7EC900>
+Traceback (most recent call last):
+  File "C:\Program Files\Python313\Lib\site-packages\aiomysql\connection.py", line 1131, in __del__
+  File "C:\Program Files\Python313\Lib\site-packages\aiomysql\connection.py", line 339, in close
+  File "C:\Program Files\Python313\Lib\asyncio\proactor_events.py", line 109, in close
+  File "C:\Program Files\Python313\Lib\asyncio\base_events.py", line 833, in call_soon
+  File "C:\Program Files\Python313\Lib\asyncio\base_events.py", line 556, in _check_closed
+RuntimeError: Event loop is closed

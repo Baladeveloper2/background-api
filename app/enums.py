@@ -47,3 +47,4 @@ class NotificationCategory(str, enum.Enum):
     SYSTEM_ALERT = "SYSTEM_ALERT"
     QC_REPORT_READY = "QC_REPORT_READY"
     QA_REPORT_READY = "QA_REPORT_READY"
+    URGENT_PING = "URGENT_PING"

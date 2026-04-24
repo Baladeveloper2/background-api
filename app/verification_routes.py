@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
 from sqlalchemy.orm import selectinload
@@ -102,7 +102,7 @@ async def get_public_verification(token: str, db: AsyncSession = Depends(get_asy
     }
 
 @router.post("/public/{token}")
-async def submit_public_verification(token: str, submission: Dict[str, Any], db: AsyncSession = Depends(get_async_db)):
+async def submit_public_verification(token: str, submission: Dict[str, Any], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
     stmt = select(models.VerificationCheck).filter(models.VerificationCheck.digital_token == token)
     res = await db.execute(stmt)
     db_check = res.scalar_one_or_none()
@@ -127,7 +127,8 @@ async def submit_public_verification(token: str, submission: Dict[str, Any], db:
             "Form Submitted",
             f"Candidate has submitted form for Case {db_check.case.case_ref_no}.",
             models.NotificationCategory.FORM_SUBMITTED,
-            case_id=db_check.case_id
+            case_id=db_check.case_id,
+            background_tasks=background_tasks
         )
     
     return {"message": "Verification data submitted successfully"}

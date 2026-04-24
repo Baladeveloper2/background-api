@@ -14,8 +14,14 @@ async def check():
         stmt = select(models.Case).filter(models.Case.case_ref_no.ilike('TAT%'))
         res = await db.execute(stmt)
         cases = res.scalars().all()
+        print(f"Found {len(cases)} TAT cases")
         for c in cases:
-            print(f"Ref={c.case_ref_no}, Candidate={c.candidate_id}, Status={c.status}")
+            print(f"Ref={c.case_ref_no}, Status={c.status}")
 
 if __name__ == "__main__":
-    asyncio.run(check())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(check())
+    finally:
+        loop.close()

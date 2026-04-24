@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 from . import models, schemas, enums
 from .database import get_async_db, SessionLocal
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi.responses import StreamingResponse
 import requests
 from pypdf import PdfWriter, PdfReader
@@ -18,11 +18,61 @@ from . import notification_utils
 from .ws import manager
 from .cache import delete_cache, cache_response
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
+from . import tat_utils
 
 router = APIRouter(
     prefix="/cases",
     tags=["cases"]
 )
+
+@router.post("/bulk-mark-insufficient")
+async def bulk_mark_insufficient(data: dict[str, Any], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    case_ids = data.get("case_ids", [])
+    reason = data.get("reason", "Incomplete documentation")
+    
+    if not case_ids:
+        raise HTTPException(status_code=400, detail="No cases selected")
+
+    # Update cases
+    await db.execute(
+        update(models.Case)
+        .where(models.Case.id.in_(case_ids))
+        .values(status=enums.CaseStatus.INSUFFICIENT, comments=reason)
+    )
+
+    # Fetch assigned users to notify them their work is on hold
+    stmt = select(models.Case).filter(models.Case.id.in_(case_ids))
+    res = await db.execute(stmt)
+    cases = res.scalars().all()
+
+    notified_users = set()
+    for c in cases:
+        if c.assigned_to:
+            notified_users.add(c.assigned_to)
+            await notification_utils.create_notification(
+                db, c.assigned_to,
+                "Case Marked Insufficient",
+                f"Protocol {c.case_ref_no} has been moved to Insufficiency: {reason}",
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=c.id,
+                background_tasks=background_tasks
+            )
+        
+        # Audit Log
+        log = models.AuditLog(
+            user_id=current_user.id,
+            action="BULK_INSUFFICIENT",
+            details=f"Case {c.case_ref_no} flagged as insufficient: {reason}",
+            resource_id=c.id
+        )
+        db.add(log)
+
+    await db.commit()
+    
+    # Global workforce update signal
+    await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "bulk_insufficient"})
+    
+    return {"message": f"Successfully moved {len(case_ids)} cases to Insufficiency.", "notified_user_count": len(notified_users)}
 
 @router.get("/export")
 async def export_mis_data(
@@ -259,6 +309,112 @@ async def get_allocation_stats(db: AsyncSession = Depends(get_async_db)):
         "allocated": allocated_res.scalar() or 0
     }
 
+@router.get("/recommend-allocation")
+async def recommend_allocation(db: AsyncSession = Depends(get_async_db)):
+    """
+    Analyzes workforce capacity and suggests the best verifiers for new assignments
+    based on current load and completion trends.
+    """
+    # 1. Fetch all Verifiers
+    stmt = select(models.User).filter(models.User.role == enums.UserRole.VERIFIER)
+    res = await db.execute(stmt)
+    verifiers = res.scalars().all()
+    
+    recommendations = []
+    for v in verifiers:
+        # Get active load
+        load_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.assigned_to == v.id, models.Case.status.in_([enums.CaseStatus.VERIFICATION])))
+        active_load = load_res.scalar() or 0
+        
+        # Get recent completions (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        comp_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.assigned_to == v.id, models.Case.completed_date >= seven_days_ago))
+        velocity = comp_res.scalar() or 0
+        
+        # Calculate Score (Lower is better for assignment)
+        # Score = Active Load / (Velocity + 1)
+        score = active_load / (velocity + 1)
+        
+        recommendations.append({
+            "user_id": v.id,
+            "full_name": v.full_name,
+            "active_load": active_load,
+            "velocity_7d": velocity,
+            "efficiency_score": round(score, 2),
+            "recommend_rank": 0 # Placeholder
+        })
+        
+    # Sort by score ascending
+    recommendations.sort(key=lambda x: x["efficiency_score"])
+    for i, rec in enumerate(recommendations):
+        rec["recommend_rank"] = i + 1
+        
+    return recommendations
+
+@router.post("/scan-escalations")
+async def scan_escalations(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
+    """
+    Scans for cases that have crossed the Risk threshold and dispatches alerts.
+    """
+    # 1. Fetch all cases in transition (Verification or QC)
+    stmt = select(models.Case).options(selectinload(models.Case.checks)).filter(models.Case.status.in_([enums.CaseStatus.VERIFICATION, enums.CaseStatus.QC]))
+    res = await db.execute(stmt)
+    cases = res.scalars().all()
+    
+    escalation_count = 0
+    assigned_user_ids = set()
+    
+    for c in cases:
+        if not c.received_date or not c.assigned_to:
+            continue
+            
+        # Calculate Predictive TAT
+        check_types = [chk.check_type for chk in c.checks]
+        p_tat = tat_utils.calculate_predictive_tat(check_types)
+        
+        # Check if At Risk
+        if tat_utils.check_is_at_risk(c.received_date, p_tat):
+            # Dispatch Alert
+            await notification_utils.notify_at_risk(
+                db, c.assigned_to, 
+                c.case_ref_no, 
+                c.id, 
+                p_tat,
+                background_tasks=background_tasks
+            )
+            escalation_count += 1
+            assigned_user_ids.add(c.assigned_to)
+            
+    await db.commit()
+    return {"message": f"Scan complete. Dispatched {escalation_count} risk alerts to {len(assigned_user_ids)} team members."}
+
+@router.post("/case/ping/{case_id}")
+async def ping_case(case_id: str, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    """
+    Manually ping a verifier for a specific case.
+    """
+    stmt = select(models.Case).filter(models.Case.id == case_id)
+    res = await db.execute(stmt)
+    case_obj = res.scalar_one_or_none()
+    
+    if not case_obj:
+        raise HTTPException(404, detail="Case not found")
+    
+    if not case_obj.assigned_to:
+        raise HTTPException(400, detail="Case is not assigned to any verifier")
+        
+    await notification_utils.notify_ping(
+        db, 
+        case_obj.assigned_to, 
+        case_obj.case_ref_no, 
+        case_obj.id, 
+        current_user.full_name or current_user.email,
+        background_tasks=background_tasks
+    )
+    
+    await db.commit()
+    return {"message": f"Urgent ping dispatched to verifier for Case {case_obj.case_ref_no}"}
+
 @router.get("", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def read_cases(
     response: Response,
@@ -327,11 +483,18 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
     if assigned is not None:
         if assigned:
-            stmt = stmt.filter(models.Case.assigned_to != None)
-            base_count_stmt = base_count_stmt.filter(models.Case.assigned_to != None)
+            # Active allocations only - strictly exclude archived cases using multiple safety layers
+            active_filter = [models.Case.assigned_to != None, models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
+            stmt = stmt.filter(*active_filter)
+            base_count_stmt = base_count_stmt.filter(*active_filter)
         else:
             stmt = stmt.filter(models.Case.assigned_to == None)
             base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == None)
+    
+    # GLOBAL SAFEGUARD: If no specific status or search is requested, exclude archived cases
+    if not status and not search and not search_name and not search_ref:
+        stmt = stmt.filter(models.Case.status.notin_(['COMPLETED', 'completed', 'Completed']))
+        base_count_stmt = base_count_stmt.filter(models.Case.status.notin_(['COMPLETED', 'completed', 'Completed']))
 
     total_count_res = await db.execute(base_count_stmt)
     total_count = total_count_res.scalar() or 0
@@ -388,6 +551,16 @@ async def read_cases(
             else:
                 case_data.in_tat = allowed
                 case_data.out_tat = total_days - allowed
+            
+            # Predictive TAT Analysis
+            check_types = [c.check_type for c in case.checks]
+            p_tat = tat_utils.calculate_predictive_tat(check_types)
+            case_data.predicted_tat = p_tat
+            # Suppress risk alerts for archived protocols
+            if str(case.status).upper() == "COMPLETED":
+                case_data.is_at_risk = False
+            else:
+                case_data.is_at_risk = tat_utils.check_is_at_risk(case.received_date, p_tat)
             
         
         cases_read.append(case_data)
@@ -701,7 +874,11 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
         )
     
     await db.commit()
-    return {"msg": "Bulk action completed successfullly"}
+    
+    # Trigger Real-time Workforce Update
+    await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "bulk_allocation"})
+    
+    return {"message": "Bulk allocation successful"}
     
     # Audit log and broadcast
 @router.post("/auto-allocate")
@@ -1071,7 +1248,7 @@ async def merge_pdfs(case_id: str, request: Request, background_tasks: Backgroun
     return {"message": "PDF merge queued"}
 
 @router.post("/bulk-allocate")
-async def bulk_allocate(data: dict[str, Any], db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+async def bulk_allocate(data: dict[str, Any], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     case_ids = data.get("case_ids", [])
     user_id = data.get("user_id")
     import logging
@@ -1105,7 +1282,7 @@ async def bulk_allocate(data: dict[str, Any], db: AsyncSession = Depends(get_asy
             
             candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
             bulk_info.append({"id": cid, "ref": cbd.case_ref_no, "candidate": candidate_name})
-            await notification_utils.notify_new_assignment(db, user_id, cbd.case_ref_no, cid, candidate_name)
+            await notification_utils.notify_new_assignment(db, user_id, cbd.case_ref_no, cid, candidate_name, background_tasks=background_tasks)
             await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "allocation"})
 
         # Notify Admin ONE summary
@@ -1118,6 +1295,7 @@ async def bulk_allocate(data: dict[str, Any], db: AsyncSession = Depends(get_asy
         )
 
     await db.commit()
+    await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "bulk_allocation"})
     return {"message": "Success"}
 
 @router.post("/ocr-extract")

@@ -11,11 +11,13 @@ from sqlalchemy import select
 
 async def check():
     async with AsyncSessionLocal() as db:
-        stmt = select(models.Case).filter(models.Case.case_ref_no.ilike('TAT%'))
+        stmt = select(models.Case).filter(models.Case.case_ref_no == 'IBM002')
         res = await db.execute(stmt)
-        cases = res.scalars().all()
-        for c in cases:
-            print(f"Ref={c.case_ref_no}, Candidate={c.candidate_id}, Status={c.status}")
+        case = res.scalar()
+        if case:
+            print(f"CASE IBM002: Status='{case.status}'")
+        else:
+            print("CASE IBM002 not found")
 
 if __name__ == "__main__":
     asyncio.run(check())
