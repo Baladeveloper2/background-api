@@ -163,7 +163,7 @@ async def get_dashboard_stats(
         if filter_verifier: risk_stmt = risk_stmt.filter(models.Case.assigned_to == current_user.id)
         
         risk_res = await db.execute(risk_stmt)
-        at_risk_count = 0
+        at_risk_count: int = 0
         # For each case, we need its checks to calculate predictive TAT
         # This is the last intensive part.
         case_ids = [r[0] for r in risk_res.all()]

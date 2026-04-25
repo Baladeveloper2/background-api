@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import json
 
 # Add current directory to path
 sys.path.append(os.getcwd())
@@ -17,16 +18,19 @@ async def check_case():
             print('Case TAT003 not found')
             return
         
-        from app.models import Candidate
-        res = await db.execute(select(Candidate).filter(Candidate.id == case.candidate_id))
-        candidate = res.scalar_one_or_none()
-        print(f'Candidate Name: {candidate.name if candidate else "Not Found"}')
-        print(f'Candidate Address Details: {candidate.address_details if candidate else "N/A"}')
-        
         res = await db.execute(select(VerificationCheck).filter(VerificationCheck.case_id == case.id))
         checks = res.scalars().all()
+        
+        results = []
         for c in checks:
-            print(f'Check: {c.check_type}, Status: {c.status}, Data: {c.data}')
+            results.append({
+                "check_type": c.check_type,
+                "status": c.status,
+                "data": c.data
+            })
+            
+        with open("db_dump.json", "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=4)
 
 if __name__ == "__main__":
     asyncio.run(check_case())

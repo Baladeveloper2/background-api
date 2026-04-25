@@ -400,7 +400,7 @@ async def scan_escalations(background_tasks: BackgroundTasks, db: AsyncSession =
                 p_tat,
                 background_tasks=background_tasks
             )
-            escalation_count = (escalation_count or 0) + 1
+            escalation_count += 1
             assigned_user_ids.add(c.assigned_to)
             
     await db.commit()
@@ -451,8 +451,6 @@ async def read_cases(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    logger.info(f"READ CASES: user={current_user.email}, assigned_to={assigned_to}, status={status}")
-    print(f"DEBUG: READ CASES hits. assigned_to={assigned_to}")
     # 1. Base query for cases with their relationships - Standardized Loading for Async
     stmt = select(models.Case).options(
         selectinload(models.Case.candidate),
@@ -554,7 +552,6 @@ async def read_cases(
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
 
     stmt = stmt.order_by(models.Case.received_date.desc()).offset(skip).limit(limit)
-    logger.info(f"READ CASES QUERY: {str(stmt)}")
     res = await db.execute(stmt)
     cases_models = res.unique().scalars().all()
     

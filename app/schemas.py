@@ -90,6 +90,13 @@ class CandidateBase(BaseModel):
     gender: Optional[str] = None
     address: Optional[str] = None
     documents: Optional[List[Dict[str, Any]]] = None
+    pan_no: Optional[str] = None
+    passport_no: Optional[str] = None
+    nationality: Optional[str] = None
+    identity_type: Optional[str] = None
+    db_candidate_name: Optional[str] = None
+    db_dob: Optional[date] = None
+    database_scope: Optional[str] = None
 
     @field_validator('documents', mode='before')
     @classmethod
@@ -116,6 +123,13 @@ class CandidateUpdate(BaseModel):
     gender: Optional[str] = None
     address: Optional[str] = None
     documents: Optional[List[Dict[str, Any]]] = None
+    pan_no: Optional[str] = None
+    passport_no: Optional[str] = None
+    nationality: Optional[str] = None
+    identity_type: Optional[str] = None
+    db_candidate_name: Optional[str] = None
+    db_dob: Optional[date] = None
+    database_scope: Optional[str] = None
 
 class Candidate(CandidateBase):
     id: str

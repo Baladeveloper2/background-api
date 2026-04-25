@@ -121,6 +121,16 @@ class Candidate(Base):
     gender = Column(String(20), nullable=True)
     address = Column(Text, nullable=True)
     documents = Column(JSONEncodedList)
+    
+    # Global Database / Identity specialized fields
+    pan_no = Column(String(50), nullable=True)
+    passport_no = Column(String(50), nullable=True)
+    nationality = Column(String(100), nullable=True)
+    identity_type = Column(String(100), nullable=True)
+    db_candidate_name = Column(String(255), nullable=True)
+    db_dob = Column(Date, nullable=True)
+    database_scope = Column(String(255), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 class Batch(Base):

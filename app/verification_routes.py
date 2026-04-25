@@ -15,13 +15,44 @@ router = APIRouter(
     tags=["verifications"]
 )
 
+def enrich_check(check: models.VerificationCheck) -> models.VerificationCheck:
+    """Populates virtual fields for response schemas."""
+    case_obj = check.case
+    if case_obj:
+        check.case_ref = case_obj.case_ref_no
+        if case_obj.candidate:
+            check.candidate_name = case_obj.candidate.name
+            # Handle given_address enrichment
+            addr_data = ""
+            if case_obj.candidate.address_details:
+                # Common pattern in this DB
+                if "address" in case_obj.candidate.address_details:
+                    addr_data = str(case_obj.candidate.address_details["address"])
+                elif "addresses" in case_obj.candidate.address_details and case_obj.candidate.address_details["addresses"]:
+                    first = case_obj.candidate.address_details["addresses"][0]
+                    addr_data = str(first.get("address", first))
+            check.given_address = addr_data or (case_obj.candidate.address or "")
+            
+        if case_obj.customer:
+            check.customer_name = case_obj.customer.name
+    return check
+
 @router.post("/checks", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def create_verification_check(check: schemas.VerificationCheckCreate, db: AsyncSession = Depends(get_async_db)):
     db_check = models.VerificationCheck(**check.dict())
     db.add(db_check)
     await db.commit()
     await db.refresh(db_check)
-    return db_check
+    
+    # Reload with relations for enrichment
+    stmt = select(models.VerificationCheck).options(
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate),
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.customer)
+    ).filter(models.VerificationCheck.id == db_check.id)
+    res = await db.execute(stmt)
+    db_check = res.scalar_one()
+    
+    return enrich_check(db_check)
 
 @router.get("/checks", response_model=List[schemas.VerificationCheck], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def read_verification_checks(case_id: Optional[str] = None, type: Optional[str] = None, db: AsyncSession = Depends(get_async_db)):
@@ -37,22 +68,14 @@ async def read_verification_checks(case_id: Optional[str] = None, type: Optional
     res = await db.execute(stmt)
     results = res.scalars().all()
     
-    # Enrichment
-    for check in results:
-        case_obj = check.case
-        if case_obj:
-            check.case_ref = case_obj.case_ref_no
-            if case_obj.candidate:
-                check.candidate_name = case_obj.candidate.name
-                check.given_address = case_obj.candidate.address_details.get("address", "") if case_obj.candidate.address_details else (case_obj.candidate.address or "")
-            if case_obj.customer:
-                check.customer_name = case_obj.customer.name
-                
-    return results
+    return [enrich_check(c) for c in results]
 
 @router.patch("/checks/{check_id}", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def update_verification_check(check_id: str, check_update: schemas.VerificationCheckUpdate, db: AsyncSession = Depends(get_async_db)):
-    stmt = select(models.VerificationCheck).options(selectinload(models.VerificationCheck.case)).filter(models.VerificationCheck.id == check_id)
+    stmt = select(models.VerificationCheck).options(
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate),
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.customer)
+    ).filter(models.VerificationCheck.id == check_id)
     res = await db.execute(stmt)
     db_check = res.scalar_one_or_none()
     
@@ -64,12 +87,23 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
         setattr(db_check, key, value)
     
     await db.commit()
-    await db.refresh(db_check)
-    return db_check
+    
+    # Reload with relations for enrichment (avoids MissingGreenlet after refresh)
+    stmt = select(models.VerificationCheck).options(
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate),
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.customer)
+    ).filter(models.VerificationCheck.id == check_id)
+    res = await db.execute(stmt)
+    db_check = res.scalar_one()
+    
+    return enrich_check(db_check)
 
 @router.patch("/checks/{check_id}/generate-link", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def generate_verification_link(check_id: str, db: AsyncSession = Depends(get_async_db)):
-    stmt = select(models.VerificationCheck).filter(models.VerificationCheck.id == check_id)
+    stmt = select(models.VerificationCheck).options(
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate),
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.customer)
+    ).filter(models.VerificationCheck.id == check_id)
     res = await db.execute(stmt)
     db_check = res.scalar_one_or_none()
     
@@ -78,8 +112,16 @@ async def generate_verification_link(check_id: str, db: AsyncSession = Depends(g
     
     db_check.digital_token = str(uuid.uuid4())
     await db.commit()
-    await db.refresh(db_check)
-    return db_check
+    
+    # Reload with relations for enrichment
+    stmt = select(models.VerificationCheck).options(
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate),
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.customer)
+    ).filter(models.VerificationCheck.id == check_id)
+    res = await db.execute(stmt)
+    db_check = res.scalar_one()
+    
+    return enrich_check(db_check)
 
 @router.get("/public/{token}", response_model=Dict[str, Any])
 async def get_public_verification(token: str, db: AsyncSession = Depends(get_async_db)):
@@ -94,11 +136,26 @@ async def get_public_verification(token: str, db: AsyncSession = Depends(get_asy
     
     case_obj = db_check.case
     candidate = case_obj.candidate
+    
+    # Resolve given address with fallbacks
+    given_addr = {}
+    if candidate.address_details:
+        if "address" in candidate.address_details:
+            given_addr = candidate.address_details["address"]
+        elif "addresses" in candidate.address_details and candidate.address_details["addresses"]:
+            # Often stored as a list, take the first/primary
+            first = candidate.address_details["addresses"][0]
+            given_addr = first.get("address", first) # handle nested address object or flat member
+    
+    # Format fallback if still empty but flat address string exists
+    if not given_addr and candidate.address:
+        given_addr = {"line1": candidate.address}
+
     return {
         "check_id": db_check.id,
         "candidate_name": candidate.name,
         "check_type": db_check.check_type,
-        "given_address": candidate.address_details.get("address", {}) if candidate.address_details else {}
+        "given_address": given_addr
     }
 
 @router.post("/public/{token}")
