@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 from . import models, schemas, enums
 from .database import get_async_db, SessionLocal
 import uuid
+import asyncio
 from datetime import datetime, timedelta
 from fastapi.responses import StreamingResponse
 import requests
@@ -759,14 +760,17 @@ async def face_match(req: dict, current_user: models.User = Depends(get_current_
         return {"success": False, "message": "Missing URLs"}
         
     try:
-        import requests
+        import httpx
         from .ocr_utils import get_scanner
         
         scanner = get_scanner()
         
-        # Download images
-        r1 = requests.get(url1)
-        r2 = requests.get(url2)
+        # Download images asynchronously
+        async with httpx.AsyncClient() as client:
+            r1, r2 = await asyncio.gather(
+                client.get(url1, timeout=10.0),
+                client.get(url2, timeout=10.0)
+            )
         
         if r1.status_code != 200 or r2.status_code != 200:
             return {"success": False, "message": "Failed to download images"}

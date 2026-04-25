@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, case, extract
+from sqlalchemy import select, func, and_, or_, case, extract, desc
 from sqlalchemy.orm import selectinload
+import asyncio
 from datetime import datetime, timedelta
 from .logging_config import logger
 from . import models, schemas, database, auth_routes
@@ -58,28 +59,38 @@ async def get_dashboard_stats(
             except: pass
 
         # 2. Optimized Combined Queries
-        # We'll use a single pass for most counts
-        
-        # Status Counts Stmt
+        # We'll use a single pass for status counts and date-based counts
         status_stmt = select(models.Case.status, func.count(models.Case.id)).group_by(models.Case.status)
         if filter_verifier: status_stmt = status_stmt.filter(models.Case.assigned_to == current_user.id)
         if filter_customer: status_stmt = status_stmt.filter(models.Case.customer_id == current_user.customer_id)
         if filter_start: status_stmt = status_stmt.filter(models.Case.received_date >= filter_start)
         if filter_end: status_stmt = status_stmt.filter(models.Case.received_date < filter_end)
 
-        # Date-based counts (This Month, Today, Completed Today)
         month_start_date = today.replace(day=1)
         date_counts_stmt = select(
-            func.count(case((models.Case.received_date >= month_start_date, models.Case.id))).label("this_month"),
-            func.count(case((models.Case.received_date >= today, models.Case.id))).label("today_entry"),
+            func.count(case(((models.Case.received_date >= month_start_date), models.Case.id))).label("this_month"),
+            func.count(case(((models.Case.received_date >= today), models.Case.id))).label("today_entry"),
             func.count(case(((models.Case.status == models.CaseStatus.COMPLETED.value) & (models.Case.completed_date >= today), models.Case.id))).label("comp_today")
         )
         if filter_verifier: date_counts_stmt = date_counts_stmt.filter(models.Case.assigned_to == current_user.id)
         if filter_customer: date_counts_stmt = date_counts_stmt.filter(models.Case.customer_id == current_user.customer_id)
 
-        # Execution (Sequential to avoid SQLAlchemy session concurrency issues)
-        status_res = await db.execute(status_stmt)
-        date_res = await db.execute(date_counts_stmt)
+        # Revenue and Customer counts can also be combined
+        rev_cust_stmt = select(
+            func.count(models.Customer.id).label("total_customers"),
+            func.sum(case(((models.Case.status == models.CaseStatus.COMPLETED.value), models.VerificationCheck.rate), else_=0)).label("total_revenue")
+        ).select_from(models.Customer).outerjoin(models.Case, models.Case.customer_id == models.Customer.id).outerjoin(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)
+        
+        if filter_customer: rev_cust_stmt = rev_cust_stmt.filter(models.Customer.id == current_user.customer_id)
+        if filter_start: rev_cust_stmt = rev_cust_stmt.filter(models.Case.completed_date >= filter_start)
+        if filter_end: rev_cust_stmt = rev_cust_stmt.filter(models.Case.completed_date < filter_end)
+
+        # Execution (Run some in parallel using different sessions? No, just optimize into fewer roundtrips)
+        status_res, date_res, rev_cust_res = await asyncio.gather(
+            db.execute(status_stmt),
+            db.execute(date_counts_stmt),
+            db.execute(rev_cust_stmt)
+        )
         
         status_rows = status_res.all()
         status_counts = {str(row[0].value if hasattr(row[0], "value") else row[0]): int(row[1] or 0) for row in status_rows}
@@ -91,6 +102,10 @@ async def get_dashboard_stats(
         current_month = date_row.this_month or 0
         today_entry = date_row.today_entry or 0
         completed_today = date_row.comp_today or 0
+        
+        rev_cust_row = rev_cust_res.one()
+        total_customers = rev_cust_row.total_customers or 0
+        total_revenue = rev_cust_row.total_revenue or 0.0
         
         # 3. Geo and Activity (Parallel)
         geo_stmt = select(models.Customer.city, func.count(models.Case.id)).join(models.Case).group_by(models.Customer.city)
@@ -172,22 +187,7 @@ async def get_dashboard_stats(
                 if tat_utils.check_is_at_risk(r_date, p_tat):
                     at_risk_count = (at_risk_count or 0) + 1
 
-        # 6. Final Enrichment (Revenue & Clients)
-        customers_count_stmt = select(func.count(models.Customer.id))
-        rev_stmt = (
-            select(func.sum(models.VerificationCheck.rate))
-            .select_from(models.Case)
-            .join(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)
-            .filter(models.Case.status == models.CaseStatus.COMPLETED.value)
-        )
-        if filter_customer: rev_stmt = rev_stmt.filter(models.Case.customer_id == current_user.customer_id)
-        if filter_start: rev_stmt = rev_stmt.filter(models.Case.completed_date >= filter_start)
-        if filter_end: rev_stmt = rev_stmt.filter(models.Case.completed_date < filter_end)
-        
-        cust_res = await db.execute(customers_count_stmt)
-        rev_res = await db.execute(rev_stmt)
-        total_customers = cust_res.scalar() or 0
-        total_revenue = rev_res.scalar() or 0.0
+        # 6. Customers and Revenue already fetched in Step 2.
 
         res_data = {
             "total_candidates": int(total_candidates),
