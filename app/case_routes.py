@@ -451,16 +451,19 @@ async def read_cases(
 ):
     logger.info(f"READ CASES: user={current_user.email}, assigned_to={assigned_to}, status={status}")
     print(f"DEBUG: READ CASES hits. assigned_to={assigned_to}")
-    # 1. Base query for cases with their relationships - Optimized Listing (Omitted heavy checks/AI summary)
-    stmt = select(models.Case).outerjoin(models.Case.candidate).outerjoin(models.Case.customer).options(
-        contains_eager(models.Case.candidate),
-        contains_eager(models.Case.customer),
-        joinedload(models.Case.batch),
-        joinedload(models.Case.assigned_user).joinedload(models.User.role_rel),
-        joinedload(models.Case.qa_user),
-        joinedload(models.Case.qc_user),
+    # 1. Base query for cases with their relationships - Standardized Loading for Async
+    stmt = select(models.Case).options(
+        selectinload(models.Case.candidate),
+        selectinload(models.Case.customer),
+        selectinload(models.Case.batch),
+        selectinload(models.Case.assigned_user).joinedload(models.User.role_rel),
+        selectinload(models.Case.qa_user),
+        selectinload(models.Case.qc_user),
         selectinload(models.Case.checks)
     )
+
+    # Apply joins for filtering/sorting if needed (using selectinload for data, join for query)
+    stmt = stmt.outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
 
 
     # 2. Count for pagination - Optimized to avoid unnecessary joins
