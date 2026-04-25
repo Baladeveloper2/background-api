@@ -7,11 +7,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Get the base URL from environment (we'll swap drivers as needed)
+# Primary URLs
 RAW_URL = os.getenv("DATABASE_URL", "mysql://root:password@localhost/bgv_db")
+# Potential Read-Replica URL (falls back to primary)
+READ_RAW_URL = os.getenv("DATABASE_READ_URL", RAW_URL)
 
-# Ensure the Raw URL doesn't have a protocol prefix that includes a driver yet
-# or handle it if it does
+# Driver formatting
 def get_url_with_driver(url, driver):
     if "://" in url:
         base = url.split("://")[1]
@@ -20,38 +21,39 @@ def get_url_with_driver(url, driver):
 
 ASYNC_URL = get_url_with_driver(RAW_URL, "aiomysql")
 SYNC_URL = get_url_with_driver(RAW_URL, "pymysql")
+READ_ASYNC_URL = get_url_with_driver(READ_RAW_URL, "aiomysql")
 
-# Async Engine and Session
+# Primary Async Engine
 async_engine = create_async_engine(
     ASYNC_URL,
-    pool_size=20,
-    max_overflow=30,
-    pool_recycle=3600,
-    pool_pre_ping=True
+    pool_size=20, max_overflow=30, pool_recycle=3600, pool_pre_ping=True
 )
-AsyncSessionLocal = async_sessionmaker(
-    bind=async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autoflush=False
-)
+# Read-Only Async Engine (Clustered Support)
+read_engine = create_async_engine(
+    READ_ASYNC_URL,
+    pool_size=40, max_overflow=60, pool_recycle=3600, pool_pre_ping=True
+) if READ_ASYNC_URL != ASYNC_URL else async_engine
+
+AsyncSessionLocal = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+ReadSessionLocal = async_sessionmaker(bind=read_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
 # Sync Engine and Session (Legacy)
-sync_engine = create_engine(
-    SYNC_URL,
-    pool_pre_ping=True
-)
+sync_engine = create_engine(SYNC_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
 
 Base = declarative_base()
 
-# Async Dependency
+# Async Dependency (Primary/Write)
 async def get_async_db():
     async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+        try: yield session
+        finally: await session.close()
+
+# Async Dependency (Read-Only/Reporting)
+async def get_read_db():
+    async with ReadSessionLocal() as session:
+        try: yield session
+        finally: await session.close()
 
 # Sync Dependency
 def get_db():

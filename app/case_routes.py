@@ -131,26 +131,33 @@ async def export_mis_data(
 
         stmt = stmt.order_by(models.Case.received_date.desc())
         res = await db.execute(stmt)
-        cases = res.unique().scalars().all()
+        # Using yield_per for memory efficiency if the driver supports it
+        cases_gen = res.unique().scalars()
 
-        data = []
-        for c in cases:
+        output = io.BytesIO()
+        import xlsxwriter
+        workbook = xlsxwriter.Workbook(output, {'constant_memory': True, 'in_memory': True})
+        worksheet = workbook.add_worksheet('Case MIS')
+        
+        # Headers
+        headers = ["Case ID", "Candidate Name", "Client Name", "Status", "Received Date", "Completed Date", "Assigned To", "TAT (Days)", "SLA Status", "In-TAT Days", "Out-TAT Days"]
+        for col, header in enumerate(headers):
+            worksheet.write(0, col, header)
+
+        row_idx = 1
+        from datetime import timezone
+        now_dt = datetime.now(timezone.utc)
+
+        for c in cases_gen:
             # Calculate In-TAT/Out-TAT
             total_days = 0
             if c.received_date:
-                from datetime import timezone
-                now_dt = datetime.now(timezone.utc)
-                
                 r_date = c.received_date
-                if r_date.tzinfo is None:
-                    r_date = r_date.replace(tzinfo=timezone.utc)
+                if r_date.tzinfo is None: r_date = r_date.replace(tzinfo=timezone.utc)
                     
                 e_date = c.completed_date or now_dt
-                if e_date.tzinfo is None:
-                    e_date = e_date.replace(tzinfo=timezone.utc)
+                if e_date.tzinfo is None: e_date = e_date.replace(tzinfo=timezone.utc)
                     
-                diff_seconds = (e_date - r_date).total_seconds()
-                # Use inclusive calendar days for TAT
                 total_days = (e_date.date() - r_date.date()).days + 1
                 total_days = max(1, total_days)
             
@@ -158,29 +165,28 @@ async def export_mis_data(
             in_tat_days = total_days if total_days <= allowed else allowed
             out_tat_days = 0 if total_days <= allowed else total_days - allowed
 
-            data.append({
-                "Case ID": c.case_ref_no,
-                "Candidate Name": c.candidate.name if c.candidate else "N/A",
-                "Client Name": c.customer.name if c.customer else "N/A",
-                "Status": c.status,
-                "Received Date": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A",
-                "Completed Date": c.completed_date.strftime("%Y-%m-%d %H:%M") if c.completed_date else "In Progress",
-                "Assigned To": c.assigned_user.full_name if c.assigned_user else "Unallocated",
-                "TAT (Days)": allowed,
-                "SLA Status": "In-TAT" if c.is_in_tat == 1 else "Out-TAT",
-                "In-TAT Days": in_tat_days,
-                "Out-TAT Days": out_tat_days
-            })
+            worksheet.write(row_idx, 0, c.case_ref_no)
+            worksheet.write(row_idx, 1, c.candidate.name if c.candidate else "N/A")
+            worksheet.write(row_idx, 2, c.customer.name if c.customer else "N/A")
+            worksheet.write(row_idx, 3, c.status)
+            worksheet.write(row_idx, 4, c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A")
+            worksheet.write(row_idx, 5, c.completed_date.strftime("%Y-%m-%d %H:%M") if c.completed_date else "In Progress")
+            worksheet.write(row_idx, 6, c.assigned_user.full_name if c.assigned_user else "Unallocated")
+            worksheet.write(row_idx, 7, allowed)
+            worksheet.write(row_idx, 8, "In-TAT" if c.is_in_tat == 1 else "Out-TAT")
+            worksheet.write(row_idx, 9, in_tat_days)
+            worksheet.write(row_idx, 10, out_tat_days)
+            row_idx += 1
 
-        df = pd.DataFrame(data)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Case MIS')
-        
+        workbook.close()
         output.seek(0)
+        
         filename = f"MIS_Export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-        return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        return StreamingResponse(
+            output, 
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'}, 
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
     except Exception as e:
         logger.error(f"Error exporting MIS data: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -202,7 +208,7 @@ async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db
     return history
 
 @router.post("", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     if not case.case_ref_no:
         customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case.customer_id))
         customer = customer_res.scalar_one_or_none()
@@ -229,11 +235,15 @@ async def create_case(case: schemas.CaseCreate, db: AsyncSession = Depends(get_a
         ).filter(models.Case.id == db_case.id)
     )
     db_case = res.unique().scalar_one()
+    
+    # Trigger Background Summary Refresh
+    from .stats_service import refresh_dashboard_summary
+    background_tasks.add_task(refresh_dashboard_summary, db, db_case.customer_id)
 
     return db_case
 
 @router.post("/create-full", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+async def create_case_full(case_data: schemas.CaseCreateExtended, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     # 1. Create/Get Candidate
     candidate_dict = case_data.candidate.dict()
     db_candidate = models.Candidate(**candidate_dict)
@@ -294,7 +304,13 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, db: AsyncSessi
         selectinload(models.Case.checks)
     ).filter(models.Case.id == db_case.id)
     res = await db.execute(stmt)
-    return res.unique().scalar_one()
+    db_case = res.unique().scalar_one()
+
+    # Trigger Background Summary Refresh
+    from .stats_service import refresh_dashboard_summary
+    background_tasks.add_task(refresh_dashboard_summary, db, db_case.customer_id)
+
+    return db_case
 
 @router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def get_allocation_stats(db: AsyncSession = Depends(get_async_db)):
@@ -340,7 +356,7 @@ async def recommend_allocation(db: AsyncSession = Depends(get_async_db)):
             "full_name": v.full_name,
             "active_load": active_load,
             "velocity_7d": velocity,
-            "efficiency_score": round(score, 2),
+            "efficiency_score": round(float(score), 2),
             "recommend_rank": 0 # Placeholder
         })
         
@@ -382,7 +398,7 @@ async def scan_escalations(background_tasks: BackgroundTasks, db: AsyncSession =
                 p_tat,
                 background_tasks=background_tasks
             )
-            escalation_count += 1
+            escalation_count = (escalation_count or 0) + 1
             assigned_user_ids.add(c.assigned_to)
             
     await db.commit()
@@ -435,7 +451,7 @@ async def read_cases(
 ):
     logger.info(f"READ CASES: user={current_user.email}, assigned_to={assigned_to}, status={status}")
     print(f"DEBUG: READ CASES hits. assigned_to={assigned_to}")
-    # 1. Base query for cases with their relationships
+    # 1. Base query for cases with their relationships - Optimized Listing (Omitted heavy checks/AI summary)
     stmt = select(models.Case).outerjoin(models.Case.candidate).outerjoin(models.Case.customer).options(
         contains_eager(models.Case.candidate),
         contains_eager(models.Case.customer),
@@ -447,8 +463,11 @@ async def read_cases(
     )
 
 
-    # 2. Count for pagination
-    base_count_stmt = select(func.count(models.Case.id)).outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
+    # 2. Count for pagination - Optimized to avoid unnecessary joins
+    base_count_stmt = select(func.count(models.Case.id))
+    # Only join if we are filtering by fields in those tables
+    if search or search_name or customer_name:
+        base_count_stmt = base_count_stmt.outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
 
     # Determine permission profile
     user_role_raw = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
@@ -627,7 +646,7 @@ async def get_report_stats(customer_id: Optional[str] = None, db: AsyncSession =
         "pie_data": pie_data,
         "total_cases": total,
         "completion_rate": float(round(float(completed / total * 100), 1)) if total > 0 else 0.0,
-        "avg_tat": float(round(float(avg_tat), 1))
+        "avg_tat": float(round(float(avg_tat or 0), 1))
     }
 
 @router.get("/{case_id}", response_model=schemas.CaseRead, dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
@@ -978,7 +997,7 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
     return {"msg": f"Successfully auto-allocated {assigned_count} cases", "success": True}
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     stmt = select(models.Case).options(
         selectinload(models.Case.checks),
         joinedload(models.Case.candidate)
@@ -1190,6 +1209,10 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     )
     db_case = res.unique().scalar_one()
 
+    # Trigger Background Summary Refresh
+    from .stats_service import refresh_dashboard_summary
+    background_tasks.add_task(refresh_dashboard_summary, db, db_case.customer_id)
+    
     return db_case
 
 @router.get("/{resource_id}/verification-logs", response_model=List[schemas.AuditLogRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
@@ -1311,7 +1334,6 @@ async def bulk_allocate(data: dict[str, Any], background_tasks: BackgroundTasks,
 
         bulk_info = []
         for cid in case_ids:
-            # Re-fetch for notification context
             ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
             cbd = ref_res.scalar_one_or_none()
             if not cbd: continue
@@ -1335,18 +1357,19 @@ async def bulk_allocate(data: dict[str, Any], background_tasks: BackgroundTasks,
     return {"message": "Success"}
 
 @router.post("/ocr-extract")
-async def ocr_extract(data: Dict[str, str], db: AsyncSession = Depends(get_async_db)):
+async def ocr_extract(data: Dict[str, str], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
     url = data.get("url")
-    if not url:
-        raise HTTPException(status_code=400, detail="Document URL required")
+    if not url: raise HTTPException(status_code=400, detail="Document URL required")
     
     try:
-        # Fetch the document
+        import requests
+        import logging
+        logger = logging.getLogger(__name__)
         response = requests.get(url, timeout=10)
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to fetch document")
-        
-        # OCR Processing
+            
+        from .ocr_utils import get_scanner
         scanner = get_scanner()
         text = scanner.reader.readtext(response.content, detail=0)
         full_text = " ".join(text)
@@ -1357,7 +1380,7 @@ async def ocr_extract(data: Dict[str, str], db: AsyncSession = Depends(get_async
         return {
             "success": True,
             "extracted_data": extracted,
-            "raw_text_debug": str(full_text)[:500] # for debugging
+            "raw_text_debug": str(full_text)[:500] 
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

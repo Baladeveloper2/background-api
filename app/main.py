@@ -17,7 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from .auth_routes import limiter
 from .logging_config import setup_logging, logger, instrument_sqlalchemy
-from .cache import get_redis
+from .cache import get_redis_client
 from contextlib import asynccontextmanager
 from fastapi.middleware.gzip import GZipMiddleware
 import os
@@ -162,19 +162,10 @@ async def health_check(db: AsyncSession = Depends(get_async_db)):
         res = await db.execute(select(models.User).limit(1))
         user = res.scalar_one_or_none()
         
-        # Test Redis Connectivity
-        redis_status = "disconnected"
-        try:
-            r = get_redis()
-            await r.ping()
-            redis_status = "connected"
-        except:
-            pass
-
         return {
             "status": "ok", 
             "database": "connected",
-            "cache": redis_status,
+            "cache": "local-memory",
             "user_query": getattr(user, 'email', 'None')
         }
     except Exception as e:

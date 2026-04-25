@@ -192,6 +192,11 @@ class AuditLog(Base):
     details = Column(Text)
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
+    __table_args__ = (
+        Index("index_audit_resource_time", "resource_id", "timestamp"),
+        {'extend_existing': True}
+    )
+
 class CaseComment(Base):
     __tablename__ = "case_comments"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -248,3 +253,17 @@ class InsufficiencyLog(Base):
     
     user = relationship("User")
     case = relationship("Case", backref="insufficiency_logs")
+
+class DashboardSummary(Base):
+    __tablename__ = "dashboard_summaries"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    customer_id = Column(String(36), ForeignKey("customers.id"), index=True, nullable=True)
+    summary_date = Column(Date, index=True)
+    total_received = Column(Integer, default=0)
+    total_completed = Column(Integer, default=0)
+    total_pending = Column(Integer, default=0)
+    total_at_risk = Column(Integer, default=0)
+    average_velocity = Column(Float, default=0.0)
+    last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    customer = relationship("Customer")

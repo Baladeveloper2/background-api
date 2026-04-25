@@ -1,66 +1,77 @@
 import os
-import redis.asyncio as redis
 import json
 import functools
+import logging
 from typing import Any, Optional
-from datetime import timedelta
+from datetime import datetime, timedelta, date
 
-# Get Redis configuration from environment
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+logger = logging.getLogger(__name__)
 
-# Global Redis client
-_redis_client: Optional[redis.Redis] = None
+# System-wide in-memory cache fallback (No Redis)
+_local_cache = {}
+_cache_expiry = {}
 
-def get_redis():
-    """Redis deactivated by user request."""
+async def get_redis_client():
+    """Stub for compatibility - Always returns None to force local cache path."""
     return None
 
+class CacheEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super().default(obj)
+
 async def set_cache(key: str, value: Any, ttl: int = 300):
-    return # No-op
+    try:
+        json_val = json.dumps(value, cls=CacheEncoder)
+        _local_cache[key] = json_val
+        _cache_expiry[key] = datetime.now() + timedelta(seconds=ttl)
+    except Exception as e:
+        logger.error(f"Local cache set error: {e}")
 
 async def get_cache(key: str) -> Optional[Any]:
-    return None # Always miss
+    try:
+        if key in _local_cache:
+            if datetime.now() < _cache_expiry.get(key, datetime.now()):
+                return json.loads(_local_cache[key])
+            else:
+                # Expired
+                _local_cache.pop(key, None)
+                _cache_expiry.pop(key, None)
+        return None
+    except Exception as e:
+        logger.error(f"Local cache get error: {e}")
+        return None
 
 async def delete_cache(key: str):
-    pass
+    _local_cache.pop(key, None)
+    _cache_expiry.pop(key, None)
 
 async def clear_cache(pattern: str = "*"):
-    pass
+    _local_cache.clear()
+    _cache_expiry.clear()
 
 def cache_response(ttl: int = 300, key_prefix: str = "cache"):
-    """Decorator to cache function results in Redis."""
+    """Decorator to cache function results in local memory."""
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            # Generate a unique key based on arguments
-            # Note: This is a simple implementation. In a real app, 
-            # you'd want to handle complex objects or specific arguments.
-            # Here we skip 'db' and 'current_user' usually.
-            
-            # Extract key-influencing parameters
-            # For simplicity, we just use kwargs for now
             cache_key_parts = [key_prefix, func.__name__]
             for k, v in sorted(kwargs.items()):
                 if k not in ['db', 'current_user', 'response']:
                     cache_key_parts.append(f"{k}:{v}")
             
-            # Add user ID if present to ensure user-isolated caching
             if 'current_user' in kwargs and hasattr(kwargs['current_user'], 'id'):
                 cache_key_parts.append(f"user:{kwargs['current_user'].id}")
             
             cache_key = ":".join(cache_key_parts)
             
-            # Try to get from cache
             cached_value = await get_cache(cache_key)
             if cached_value is not None:
                 return cached_value
             
-            # Execute function
             result = await func(*args, **kwargs)
-            
-            # Save to cache
             await set_cache(cache_key, result, ttl=ttl)
-            
             return result
         return wrapper
     return decorator
