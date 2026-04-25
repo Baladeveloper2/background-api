@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
-import traceback
+from .logging_config import logger
 from . import models, schemas, auth, database
 from .auth_routes import get_current_user, check_module_permission
 
@@ -43,7 +43,7 @@ async def create_user(
     except HTTPException:
         raise
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error creating user: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("", response_model=List[schemas.User])

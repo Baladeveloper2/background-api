@@ -17,18 +17,24 @@ router = APIRouter(
 
 async def get_next_batch_number(db: AsyncSession):
     year = datetime.now().year
+    # Use a more descriptive prefix
     prefix = f"Batch_{year}_"
-    # Efficiently find the max sequence using SQL
+    
+    # Extract only the sequence part using SQL if possible, or just fetch max
     stmt = select(func.max(models.Batch.batch_no)).filter(models.Batch.batch_no.like(f"{prefix}%"))
     res = await db.execute(stmt)
     max_bn = res.scalar()
     
     max_seq = 0
-    if max_bn:
+    if max_bn and '_' in max_bn:
         try:
             parts = max_bn.split('_')
+            # The sequence is expected at the end: Batch_YYYY_SEQ
             if len(parts) >= 3:
-                max_seq = int(parts[2])
+                # Ensure we handle non-numeric parts gracefully
+                seq_str = parts[-1]
+                if seq_str.isdigit():
+                    max_seq = int(seq_str)
         except (ValueError, IndexError):
             pass
             
@@ -138,7 +144,11 @@ async def read_batches_summary(
             total_value = r.case_rate * r.cases_count
 
         # Operational Status Hierarchy Logic
-        if (r.total_pending_count or 0) == 0 and (r.actual_case_count or 0) >= (r.cases_count or 0):
+        actual_count = int(r.actual_case_count or 0)
+        intended_count = int(r.cases_count or 0)
+        pending_total = int(r.total_pending_count or 0)
+
+        if pending_total == 0 and actual_count > 0 and actual_count >= intended_count:
             batch_status = "Finalized"
         elif (r.qa_pending_count or 0) > 0:
             batch_status = "QA Pending"
@@ -146,12 +156,12 @@ async def read_batches_summary(
             batch_status = "QC Pending"
         elif (r.verification_active_count or 0) > 0:
             batch_status = "In Verification"
-        elif (r.actual_case_count or 0) < (r.cases_count or 0):
-            batch_status = "Finalized"
+        elif actual_count < intended_count:
+            batch_status = "Entry Pending"
         elif (r.pending_arrival_count or 0) > 0:
             batch_status = "Ready for Verification"
         else:
-            batch_status = "Entry Pending"
+            batch_status = "Active"
 
         summaries.append({
             "id": r.id,

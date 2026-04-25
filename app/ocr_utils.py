@@ -121,8 +121,7 @@ class OCRScanner:
             x, y, w, h = faces[0]
             face_crop = img[y:y+h, x:x+w]
             return face_crop
-        except Exception as e:
-            print(f"Face Detection Error: {e}")
+        except Exception:
             return None
 
     def match_faces(self, face1, face2) -> float:
@@ -141,8 +140,7 @@ class OCRScanner:
             
             score = self.cv2.compareHist(h1, h2, self.cv2.HISTCMP_CORREL)
             return max(0, score * 100)
-        except Exception as e:
-            print(f"Face Matching Error: {e}")
+        except Exception:
             return 0.0
 
 # Global instance

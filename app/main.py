@@ -4,8 +4,10 @@ from . import (
     models, auth_routes, customer_routes, partner_routes, 
     user_routes, candidate_routes, batch_routes, case_routes, 
     verification_routes, stats_routes, role_routes, media_routes,
-    notification_routes
+    notification_routes, ai_routes, billing_routes
 )
+
+
 from .database import engine, Base, get_async_db, async_engine
 from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +29,7 @@ setup_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
-    instrument_sqlalchemy(async_engine.sync_engine)
+    # instrument_sqlalchemy(async_engine.sync_engine)
     
     yield
     # Shutdown: Dispose of the async engine to avoid event loop errors
@@ -96,6 +98,10 @@ api_v1.include_router(stats_routes.router)
 api_v1.include_router(role_routes.router)
 api_v1.include_router(media_routes.router)
 api_v1.include_router(notification_routes.router)
+api_v1.include_router(ai_routes.router)
+api_v1.include_router(billing_routes.router)
+
+
 
 app.include_router(api_v1)
 

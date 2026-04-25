@@ -19,6 +19,7 @@ from .ws import manager
 from .cache import delete_cache, cache_response
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 from . import tat_utils
+from .logging_config import logger
 
 router = APIRouter(
     prefix="/cases",
@@ -181,8 +182,7 @@ async def export_mis_data(
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
         return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error exporting MIS data: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
@@ -427,11 +427,14 @@ async def read_cases(
     search_ref: Optional[str] = None,
     assigned: Optional[bool] = None,
     assigned_to: Optional[str] = None,
+    exclude_completed: Optional[bool] = None,
     skip: int = 0, 
     limit: int = 200, 
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    logger.info(f"READ CASES: user={current_user.email}, assigned_to={assigned_to}, status={status}")
+    print(f"DEBUG: READ CASES hits. assigned_to={assigned_to}")
     # 1. Base query for cases with their relationships
     stmt = select(models.Case).outerjoin(models.Case.candidate).outerjoin(models.Case.customer).options(
         contains_eager(models.Case.candidate),
@@ -445,16 +448,34 @@ async def read_cases(
 
 
     # 2. Count for pagination
-    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
     base_count_stmt = select(func.count(models.Case.id)).outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
+
+    # Determine permission profile
+    user_role_raw = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    # Normalize: strip enum class name if present (e.g., 'USERROLE.QA' -> 'QA')
+    user_role_clean = user_role_raw.split('.')[-1]
     
+    role_rel_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+    
+    oversight_keywords = ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC", "SUPER ADMIN", "QC VERIFIER"]
+    is_oversight = any(k in user_role_clean for k in oversight_keywords) or \
+                   any(k in role_rel_name for k in oversight_keywords)
+    
+    is_customer = "CUSTOMER" in user_role_clean or "CUSTOMER" in role_rel_name
+
     # Combined filtering logic
-    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+    if is_customer:
         stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
         base_count_stmt = base_count_stmt.filter(models.Case.customer_id == current_user.customer_id)
-    elif user_role not in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"]:
-        stmt = stmt.filter(models.Case.assigned_to == current_user.id)
-        base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == current_user.id)
+    elif not is_oversight:
+        # For restricted users (Verifiers), show cases where they are involved in ANY capacity
+        personal_filter = or_(
+            models.Case.assigned_to == current_user.id,
+            models.Case.qa_id == current_user.id,
+            models.Case.qc_id == current_user.id
+        )
+        stmt = stmt.filter(personal_filter)
+        base_count_stmt = base_count_stmt.filter(personal_filter)
     
     if status:
         stmt = stmt.filter(models.Case.status == status)
@@ -469,8 +490,13 @@ async def read_cases(
         stmt = stmt.filter(models.Customer.name == customer_name)
         base_count_stmt = base_count_stmt.filter(models.Customer.name == customer_name)
     if assigned_to:
-        stmt = stmt.filter(models.Case.assigned_to == assigned_to)
-        base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == assigned_to)
+        involvement_filter = or_(
+            models.Case.assigned_to == assigned_to,
+            models.Case.qa_id == assigned_to,
+            models.Case.qc_id == assigned_to
+        )
+        stmt = stmt.filter(involvement_filter)
+        base_count_stmt = base_count_stmt.filter(involvement_filter)
     if search:
         f = or_(models.Case.case_ref_no.ilike(f"%{search}%"), models.Candidate.name.ilike(f"{search}%"))
         stmt = stmt.filter(f)
@@ -483,18 +509,20 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
     if assigned is not None:
         if assigned:
-            # Active allocations only - strictly exclude archived cases using multiple safety layers
             active_filter = [models.Case.assigned_to != None, models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
             stmt = stmt.filter(*active_filter)
             base_count_stmt = base_count_stmt.filter(*active_filter)
         else:
-            stmt = stmt.filter(models.Case.assigned_to == None)
-            base_count_stmt = base_count_stmt.filter(models.Case.assigned_to == None)
+            unassigned_filter = [models.Case.assigned_to == None, models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
+            stmt = stmt.filter(*unassigned_filter)
+            base_count_stmt = base_count_stmt.filter(*unassigned_filter)
     
-    # GLOBAL SAFEGUARD: If no specific status or search is requested, exclude archived cases
-    if not status and not search and not search_name and not search_ref:
-        stmt = stmt.filter(models.Case.status.notin_(['COMPLETED', 'completed', 'Completed']))
-        base_count_stmt = base_count_stmt.filter(models.Case.status.notin_(['COMPLETED', 'completed', 'Completed']))
+    if exclude_completed:
+        comp_filter = [models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
+        stmt = stmt.filter(*comp_filter)
+        base_count_stmt = base_count_stmt.filter(*comp_filter)
+    
+
 
     total_count_res = await db.execute(base_count_stmt)
     total_count = total_count_res.scalar() or 0
@@ -502,6 +530,7 @@ async def read_cases(
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
 
     stmt = stmt.order_by(models.Case.received_date.desc()).offset(skip).limit(limit)
+    logger.info(f"READ CASES QUERY: {str(stmt)}")
     res = await db.execute(stmt)
     cases_models = res.unique().scalars().all()
     
@@ -1124,6 +1153,13 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, db: AsyncSe
     if "status" in update_data:
         new_status = update_data["status"]
         
+        # Auto-set completion metadata
+        if new_status == models.CaseStatus.COMPLETED:
+            if not db_case.completed_date:
+                db_case.completed_date = datetime.utcnow()
+            if not db_case.qc_id:
+                db_case.qc_id = current_user.id
+        
         # Scenario 1: Verifier finishes -> Moves to QC
         if old_status == models.CaseStatus.VERIFICATION and new_status == models.CaseStatus.QC:
             await notification_utils.notify_verification_completed(db, case_id, db_case.case_ref_no, candidate_name, current_user.full_name)
@@ -1648,9 +1684,9 @@ async def get_all_insufficiency_logs(
                 "total_resolved": 0,
                 "cases": set()
             }
-        user_summary[key]["total_marked"] += 1
+        user_summary[key]["total_marked"] = int(user_summary[key].get("total_marked", 0)) + 1
         if r.resolved_at:
-            user_summary[key]["total_resolved"] += 1
+            user_summary[key]["total_resolved"] = int(user_summary[key].get("total_resolved", 0)) + 1
         user_summary[key]["cases"].add(ref_no)
 
     summary = []

@@ -4,10 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case, extract
 from sqlalchemy.orm import selectinload
 from datetime import datetime, timedelta
-import traceback
-from . import models, schemas
-from .database import get_async_db
+from .logging_config import logger
+from . import models, schemas, database, auth_routes
 from .auth_routes import check_module_permission, get_current_user
+from .database import get_async_db
 from . import tat_utils
 
 router = APIRouter(prefix="/stats", tags=["stats"])
@@ -92,7 +92,12 @@ async def get_dashboard_stats(
             results.append(await db.execute(stmt))
         
         status_rows = results[0].all()
-        status_counts = {str(row[0].value if hasattr(row[0], "value") else row[0]): int(row[1] or 0) for row in status_rows} if status_rows else {}
+        status_counts = {}
+        for row in status_rows:
+            if len(row) >= 2:
+                s_key = str(row[0].value if hasattr(row[0], "value") else row[0])
+                status_counts[s_key] = int(row[1] or 0)
+        
         total_candidates = sum(status_counts.values())
         total_completed = status_counts.get(models.CaseStatus.COMPLETED.value, 0)
 
@@ -214,11 +219,12 @@ async def get_dashboard_stats(
         
         activity_log = []
         for idx, l_row in enumerate(final_results[2].all()):
-            log_obj = l_row[0]
-            email_str = l_row[1]
-            activity_log.append({
-                "id": idx, "icon": "⚡", "action": log_obj.action, "time": log_obj.timestamp.strftime("%H:%M"), "user": email_str
-            })
+            if len(l_row) >= 2:
+                log_obj = l_row[0]
+                email_str = l_row[1]
+                activity_log.append({
+                    "id": idx, "icon": "⚡", "action": log_obj.action, "time": log_obj.timestamp.strftime("%H:%M"), "user": email_str
+                })
         
         res_data = {
             "total_candidates": int(total_candidates),
@@ -249,7 +255,7 @@ async def get_dashboard_stats(
         await set_cache(cache_key, res_data, ttl=CACHE_TTL)
         return res_data
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting dashboard stats: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 @router.get("/summary", dependencies=[Depends(get_current_user)])
@@ -276,7 +282,7 @@ async def get_dashboard_summary(
             "server_time": datetime.now().isoformat()
         }
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting dashboard summary: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 
@@ -420,7 +426,7 @@ async def get_verifier_daily(
 
         return {"date": from_date or datetime.now().strftime("%Y-%m-%d"), "verifiers": verifiers}
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting verifier daily stats: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 
@@ -476,7 +482,7 @@ async def get_today_records(
         }
         return {"date": today.strftime("%Y-%m-%d"), "records": records, "totals": totals}
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting today records: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 
@@ -537,7 +543,7 @@ async def get_throughput_heatmap(
             
         return {"date": today.strftime("%Y-%m-%d"), "data": heatmap_data}
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting throughput heatmap: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 @router.get("/export")
@@ -610,7 +616,7 @@ async def export_dashboard_data(
         return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error exporting dashboard data: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 @router.get("/cumulative", response_model=schemas.TodayRecordsResponse)
@@ -692,7 +698,7 @@ async def get_cumulative_stats(
         }
         return {"date": "ALL TIME", "records": records, "totals": totals}
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting cumulative stats: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 @router.get("/governance")
@@ -808,7 +814,7 @@ async def get_governance_stats(db: AsyncSession = Depends(get_async_db), current
             "globalLoad": global_load
         }
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error getting governance stats: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 @router.get("/verifier-daily/export")
@@ -848,6 +854,6 @@ async def export_executive_data(
         headers = {'Content-Disposition': f'attachment; filename="Executive_MIS_{datetime.now().strftime("%Y%m%d")}.xlsx"'}
         return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
-        traceback.print_exc()
+        logger.error(f"Error exporting executive data: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 

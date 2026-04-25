@@ -18,10 +18,10 @@ from dotenv import load_dotenv
 from fastapi import Request
 from .auth_routes import limiter
 from anyio import to_thread
+from functools import partial
 from .ocr_utils import get_scanner
 
 router = APIRouter(prefix="/media", tags=["media"])
-print("--- MEDIA ROUTES RELOADED (ASYNC VERSION) ---")
 
 load_dotenv(override=True)
 
@@ -63,16 +63,15 @@ async def upload_file(
             unique_filename = f"bgv_documents/{uuid.uuid4()}_{file.filename}"
             from io import BytesIO
             
-            print(f"DEBUG: Starting S3 upload to {aws_bucket}/{unique_filename}")
             await to_thread.run_sync(
-                lambda: s3_client.upload_fileobj(
+                partial(
+                    s3_client.upload_fileobj,
                     BytesIO(file_data),
                     aws_bucket,
                     unique_filename,
                     ExtraArgs={'ContentType': file.content_type}
                 )
             )
-            print(f"DEBUG: S3 upload successful: {unique_filename}")
             
             return {
                 "url": f"https://{aws_bucket}.s3.{aws_region}.amazonaws.com/{unique_filename}",
@@ -87,7 +86,8 @@ async def upload_file(
 
         # Cloudinary Fallback
         upload_result = await to_thread.run_sync(
-            lambda: cloudinary.uploader.upload(
+            partial(
+                cloudinary.uploader.upload,
                 file_data,
                 resource_type=resource_type,
                 folder="bgv_documents",
@@ -136,7 +136,8 @@ async def get_signed_url(
                 params['ResponseContentDisposition'] = disposition
             
             url = await to_thread.run_sync(
-                lambda: s3_client.generate_presigned_url(
+                partial(
+                    s3_client.generate_presigned_url,
                     'get_object',
                     Params=params,
                     ExpiresIn=3600
@@ -173,25 +174,29 @@ async def proxy_media(
         is_s3 = public_id.startswith('bgv_documents/') or public_id.startswith('bqv_documents/')
         
         if s3_client and aws_bucket and is_s3:
-            # Generate a short-lived presigned URL and fetch it to stream
             url = await to_thread.run_sync(
-                lambda: s3_client.generate_presigned_url(
+                partial(
+                    s3_client.generate_presigned_url,
                     ClientMethod='get_object',
                     Params={'Bucket': aws_bucket, 'Key': public_id},
                     ExpiresIn=300
                 )
             )
-            response = await to_thread.run_sync(lambda: requests.get(url, stream=True))
-            return StreamingResponse(
-                response.iter_content(chunk_size=1024),
-                media_type=response.headers.get('Content-Type', 'image/jpeg')
-            )
+        else:
+            url = f"https://res.cloudinary.com/dfrfq0ch8/image/upload/{public_id}"
+
+        response = await to_thread.run_sync(partial(requests.get, url, stream=True))
         
-        # Fallback for Cloudinary (Streaming proxy)
-        url = f"https://res.cloudinary.com/dfrfq0ch8/image/upload/{public_id}"
-        response = await to_thread.run_sync(lambda: requests.get(url, stream=True))
+        async def stream_response(resp):
+            try:
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if chunk:
+                        yield chunk
+            finally:
+                resp.close()
+
         return StreamingResponse(
-            response.iter_content(chunk_size=1024),
+            stream_response(response),
             media_type=response.headers.get('Content-Type', 'image/jpeg')
         )
 
