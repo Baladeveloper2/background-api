@@ -10,6 +10,7 @@ import asyncio
 from datetime import datetime, timedelta
 from fastapi.responses import StreamingResponse
 import requests
+import httpx
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
 import pandas as pd
@@ -760,7 +761,6 @@ async def face_match(req: dict, current_user: models.User = Depends(get_current_
         return {"success": False, "message": "Missing URLs"}
         
     try:
-        import httpx
         from .ocr_utils import get_scanner
         
         scanner = get_scanner()

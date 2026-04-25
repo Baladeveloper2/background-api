@@ -15,10 +15,14 @@ async def get_redis_client():
     """Stub for compatibility - Always returns None to force local cache path."""
     return None
 
+from decimal import Decimal
+
 class CacheEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (datetime, date)):
             return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
         return super().default(obj)
 
 async def set_cache(key: str, value: Any, ttl: int = 300):

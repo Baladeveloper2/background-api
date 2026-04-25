@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, case, extract, desc
+from sqlalchemy import select, func, and_, or_, case, extract, desc, distinct
 from sqlalchemy.orm import selectinload
 import asyncio
 from datetime import datetime, timedelta
@@ -75,9 +75,8 @@ async def get_dashboard_stats(
         if filter_verifier: date_counts_stmt = date_counts_stmt.filter(models.Case.assigned_to == current_user.id)
         if filter_customer: date_counts_stmt = date_counts_stmt.filter(models.Case.customer_id == current_user.customer_id)
 
-        # Revenue and Customer counts can also be combined
         rev_cust_stmt = select(
-            func.count(models.Customer.id).label("total_customers"),
+            func.count(distinct(models.Customer.id)).label("total_customers"),
             func.sum(case(((models.Case.status == models.CaseStatus.COMPLETED.value), models.VerificationCheck.rate), else_=0)).label("total_revenue")
         ).select_from(models.Customer).outerjoin(models.Case, models.Case.customer_id == models.Customer.id).outerjoin(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)
         
@@ -85,12 +84,10 @@ async def get_dashboard_stats(
         if filter_start: rev_cust_stmt = rev_cust_stmt.filter(models.Case.completed_date >= filter_start)
         if filter_end: rev_cust_stmt = rev_cust_stmt.filter(models.Case.completed_date < filter_end)
 
-        # Execution (Run some in parallel using different sessions? No, just optimize into fewer roundtrips)
-        status_res, date_res, rev_cust_res = await asyncio.gather(
-            db.execute(status_stmt),
-            db.execute(date_counts_stmt),
-            db.execute(rev_cust_stmt)
-        )
+        # Execution (Run sequentially on the same session to avoid concurrency errors)
+        status_res = await db.execute(status_stmt)
+        date_res = await db.execute(date_counts_stmt)
+        rev_cust_res = await db.execute(rev_cust_stmt)
         
         status_rows = status_res.all()
         status_counts = {str(row[0].value if hasattr(row[0], "value") else row[0]): int(row[1] or 0) for row in status_rows}
@@ -185,7 +182,7 @@ async def get_dashboard_stats(
                 if not r_date: continue
                 p_tat = tat_utils.calculate_predictive_tat(case_checks.get(cid, []))
                 if tat_utils.check_is_at_risk(r_date, p_tat):
-                    at_risk_count = (at_risk_count or 0) + 1
+                    at_risk_count += 1
 
         # 6. Customers and Revenue already fetched in Step 2.
 
