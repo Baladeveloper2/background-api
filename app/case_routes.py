@@ -252,15 +252,25 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     db.add(db_candidate)
     await db.flush() # Get candidate ID
 
-    # 2. Create Case
+    # 2. Create Case with Collision-Aware Reference Generation
     if not case_data.case_ref_no:
         customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case_data.customer_id))
         customer = customer_res.scalar_one_or_none()
         customer_name = customer.name if customer and customer.name else "BGV"
         prefix = customer_name[:3].upper()
+        
+        # Get the current total count to start with
         count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.customer_id == case_data.customer_id))
         count = count_res.scalar() or 0
-        case_ref = f"{prefix}{str(count + 1).zfill(3)}"
+        
+        # Collision loop: Ensure unique reference number
+        suffix_num = count + 1
+        while True:
+            case_ref = f"{prefix}{str(suffix_num).zfill(3)}"
+            exists_res = await db.execute(select(models.Case.id).filter(models.Case.case_ref_no == case_ref))
+            if not exists_res.scalar_one_or_none():
+                break
+            suffix_num += 1
     else:
         case_ref = case_data.case_ref_no
 
@@ -379,7 +389,7 @@ async def scan_escalations(background_tasks: BackgroundTasks, db: AsyncSession =
     res = await db.execute(stmt)
     cases = res.scalars().all()
     
-    escalation_count = 0
+    escalation_count: int = 0
     assigned_user_ids = set()
     
     for c in cases:
@@ -400,7 +410,7 @@ async def scan_escalations(background_tasks: BackgroundTasks, db: AsyncSession =
                 p_tat,
                 background_tasks=background_tasks
             )
-            escalation_count += 1
+            escalation_count = escalation_count + 1
             assigned_user_ids.add(c.assigned_to)
             
     await db.commit()
@@ -448,6 +458,8 @@ async def read_cases(
     exclude_completed: Optional[bool] = None,
     skip: int = 0, 
     limit: int = 200, 
+    sort: str = "received_date",
+    order: str = "desc",
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -551,7 +563,17 @@ async def read_cases(
     response.headers["X-Total-Count"] = str(total_count)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
 
-    stmt = stmt.order_by(models.Case.received_date.desc()).offset(skip).limit(limit)
+    # 4. Sorting logic
+    sort_attr = getattr(models.Case, sort, None)
+    if sort_attr is None:
+        sort_attr = models.Case.received_date
+        
+    if order == "desc":
+        stmt = stmt.order_by(sort_attr.desc())
+    else:
+        stmt = stmt.order_by(sort_attr.asc())
+        
+    stmt = stmt.offset(skip).limit(limit)
     res = await db.execute(stmt)
     cases_models = res.unique().scalars().all()
     
@@ -1144,8 +1166,9 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
                 existing_checks[svc].rate = rate
                 # Also update scope_of_work if provided (either per-check or global)
                 if svc_scope is not None:
-                    if existing_checks[svc].data is None: existing_checks[svc].data = {}
-                    existing_checks[svc].data["scope_of_work"] = svc_scope
+                    updated_data = dict(existing_checks[svc].data or {})
+                    updated_data["scope_of_work"] = svc_scope
+                    existing_checks[svc].data = updated_data
             else:
                 # Create new
                 new_check = models.VerificationCheck(
