@@ -326,15 +326,19 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
 
 @router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def get_allocation_stats(db: AsyncSession = Depends(get_async_db)):
-    unallocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to == None)
-    allocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to != None)
+    unallocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to == None, models.Case.status != models.CaseStatus.COMPLETED)
+    allocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to != None, models.Case.status != models.CaseStatus.COMPLETED)
+    completed_stmt = select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED)
     
     unallocated_res = await db.execute(unallocated_stmt)
     allocated_res = await db.execute(allocated_stmt)
+    completed_res = await db.execute(completed_stmt)
     
     return {
         "unallocated": unallocated_res.scalar() or 0,
-        "allocated": allocated_res.scalar() or 0
+        "allocated": allocated_res.scalar() or 0,
+        "completed": completed_res.scalar() or 0,
+        "active_verifiers": 0 # Will be calculated by frontend workers or separate query if needed
     }
 
 @router.get("/recommend-allocation")
@@ -697,9 +701,12 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
     if current_user.role == models.UserRole.VERIFIER and db_case.assigned_to != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
-    # Dynamic fix for media visibility: Populate candidate.documents from address_details if empty
-    if db_case.candidate and (not db_case.candidate.documents) and db_case.candidate.address_details:
-        all_docs = []
+    # Aggregated document collection from address_details and direct uploads
+    if db_case.candidate and db_case.candidate.address_details:
+        current_docs = db_case.candidate.documents or []
+        existing_urls = {d.get('url') for d in current_docs if isinstance(d, dict) and d.get('url')}
+        
+        all_docs = list(current_docs)
         doc_mapping = {
             'addresses': 'Address',
             'employments': 'Employment',
@@ -720,9 +727,12 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
                     if isinstance(item, dict) and 'files' in item and isinstance(item['files'], list):
                         for f in item['files']:
                             if isinstance(f, dict):
-                                doc_item = f.copy()
-                                doc_item['check_type'] = check_label
-                                all_docs.append(doc_item)
+                                url = f.get('url')
+                                if url and url not in existing_urls:
+                                    doc_item = f.copy()
+                                    doc_item['check_type'] = check_label
+                                    all_docs.append(doc_item)
+                                    existing_urls.add(url)
         
         db_case.candidate.documents = all_docs
 
@@ -732,12 +742,20 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
     if db_case.batch:
         case_data.batch_no = db_case.batch.batch_no
         case_data.batch_date = db_case.batch.upload_date
+        if not case_data.tat_days:
+            case_data.tat_days = db_case.batch.tat_days
     if db_case.assigned_user: 
         case_data.assigned_user_name = db_case.assigned_user.full_name
         r_enum_val = str(db_case.assigned_user.role.value if hasattr(db_case.assigned_user.role, 'value') else db_case.assigned_user.role).upper()
         role_name = db_case.assigned_user.role_rel.name if db_case.assigned_user.role_rel else ("QC Verifier" if r_enum_val in ["QA", "QC"] else r_enum_val)
         case_data.assigned_user_role = role_name.upper()
     if db_case.qc_user: case_data.qc_user_name = db_case.qc_user.full_name
+    
+    # Predict TAT if not provided
+    check_types = [chk.check_type for chk in db_case.checks]
+    case_data.predicted_tat = tat_utils.calculate_predictive_tat(check_types)
+    if not case_data.tat_days:
+        case_data.tat_days = case_data.predicted_tat or 10
 
     # Calculate In-TAT/Out-TAT for single view
     if db_case.received_date:
@@ -986,7 +1004,8 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
         await db.execute(
             update(models.Case).where(models.Case.id == cid).values(
                 assigned_to=target_v_id,
-                assigned_at=datetime.utcnow()
+                assigned_at=datetime.utcnow(),
+                status=models.CaseStatus.VERIFICATION
             )
         )
         

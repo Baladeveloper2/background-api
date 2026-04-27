@@ -21,6 +21,7 @@ class CaseStatus(str, enum.Enum):
     QC = "QC"
     QA_PENDING = "QA_PENDING"
     QC_PENDING = "QC_PENDING"
+    QC_VERIFIED = "QC_VERIFIED"
     COMPLETED = "COMPLETED"
     INSUFFICIENT = "INSUFFICIENT"
 
@@ -32,6 +33,8 @@ class CheckStatus(str, enum.Enum):
     VERIFICATION = "VERIFICATION"
     STOP = "STOP"
     QC_PENDING = "QC_PENDING"
+    QC_VERIFIED = "QC_VERIFIED"
+    COMPLETED = "COMPLETED"
 
 class NotificationChannel(str, enum.Enum):
     SYSTEM = "SYSTEM"
