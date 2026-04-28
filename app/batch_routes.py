@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from . import models, schemas
 from .database import get_async_db
 from .auth_routes import check_module_permission, limiter
-from .cache import cache_response
+from .cache import cache_response, clear_cache
 from datetime import datetime
 
 router = APIRouter(
@@ -55,6 +55,8 @@ async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSe
     db.add(db_batch)
     await db.commit()
     await db.refresh(db_batch)
+    # Bust summary cache so new batch appears immediately
+    await clear_cache("batches")
     return db_batch
 
 @router.get("/summary", response_model=List[schemas.BatchSummary])
@@ -131,7 +133,7 @@ async def read_batches_summary(
     response.headers["X-Total-Count"] = str(total)
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
 
-    stmt = stmt.order_by(models.Batch.upload_date.desc()).offset(skip).limit(limit)
+    stmt = stmt.order_by(models.Batch.upload_date.desc(), models.Batch.batch_no.desc()).offset(skip).limit(limit)
     res = await db.execute(stmt)
     results = res.all()
 
@@ -188,9 +190,9 @@ async def read_batches_summary(
 
 @router.get("/clients", response_model=List[str], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
 async def read_batch_clients(db: AsyncSession = Depends(get_async_db)):
-    stmt = select(models.Customer.name).distinct().join(models.Batch)
+    stmt = select(models.Customer.name).distinct()
     res = await db.execute(stmt)
-    return [r for r in res.scalars().all() if r]
+    return sorted([r for r in res.scalars().all() if r])
 
 @router.get("", response_model=List[schemas.Batch], dependencies=[Depends(check_module_permission("bvs", "batch", action="read"))])
 async def read_batches(response: Response, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="read"))):
@@ -225,6 +227,7 @@ async def update_batch(batch_id: str, batch_update: schemas.BatchUpdate, db: Asy
     for k, v in batch_update.dict(exclude_unset=True).items(): setattr(db_batch, k, v)
     await db.commit()
     await db.refresh(db_batch)
+    await clear_cache("batches")
     return db_batch
 
 @router.delete("/{batch_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(check_module_permission("bvs", "batch", action="write"))])
@@ -242,4 +245,5 @@ async def delete_batch(batch_id: str, db: AsyncSession = Depends(get_async_db)):
     
     await db.delete(db_batch)
     await db.commit()
+    await clear_cache("batches")
     return None
