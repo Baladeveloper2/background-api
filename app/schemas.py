@@ -249,6 +249,7 @@ class CustomerCreate(CustomerBase):
 class Customer(CustomerBase):
     id: str
     created_at: datetime
+    batches_count: Optional[int] = 0
 
     model_config = ConfigDict(from_attributes=True)
 

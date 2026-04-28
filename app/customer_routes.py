@@ -59,15 +59,36 @@ def list_customers(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer", action="read"))
 ):
-
     user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
     role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
     is_customer = "CUSTOMER" in user_role_str or "CUSTOMER" in role_name
 
-    if is_customer and current_user.customer_id:
-        return db.query(models.Customer).filter(models.Customer.id == current_user.customer_id).all()
+    from sqlalchemy import func
     
-    return db.query(models.Customer).all()
+    # Subquery to count batches per customer
+    batch_counts_subq = db.query(
+        models.Batch.customer_id, 
+        func.count(models.Batch.id).label("total_batches")
+    ).group_by(models.Batch.customer_id).subquery()
+
+    # Optimized joined query
+    query = db.query(
+        models.Customer, 
+        batch_counts_subq.c.total_batches
+    ).outerjoin(batch_counts_subq, models.Customer.id == batch_counts_subq.c.customer_id)
+    
+    if is_customer and current_user.customer_id:
+        query = query.filter(models.Customer.id == current_user.customer_id)
+    
+    res = query.all()
+    
+    # Map results and attach counts
+    results = []
+    for customer, count in res:
+        customer.batches_count = int(count or 0)
+        results.append(customer)
+        
+    return results
 
 @router.get("/{customer_id}", response_model=schemas.Customer)
 def get_customer(
@@ -78,6 +99,12 @@ def get_customer(
     db_customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
     if not db_customer:
         raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Add count
+    from sqlalchemy import func
+    count = db.query(func.count(models.Batch.id)).filter(models.Batch.customer_id == customer_id).scalar()
+    db_customer.batches_count = count
+    
     return db_customer
 
 @router.patch("/{customer_id}", response_model=schemas.Customer)
