@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 # System-wide in-memory cache fallback (No Redis)
 _local_cache = {}
 _cache_expiry = {}
+MAX_CACHE_SIZE = 500  # Prevent unbounded memory growth
 
 async def get_redis_client():
     """Stub for compatibility - Always returns None to force local cache path."""
@@ -27,6 +28,21 @@ class CacheEncoder(json.JSONEncoder):
 
 async def set_cache(key: str, value: Any, ttl: int = 300):
     try:
+        # Evict oldest entries if cache is too large
+        if len(_local_cache) >= MAX_CACHE_SIZE:
+            now = datetime.now()
+            # First remove expired entries
+            expired = [k for k, exp in _cache_expiry.items() if now >= exp]
+            for k in expired:
+                _local_cache.pop(k, None)
+                _cache_expiry.pop(k, None)
+            # If still too large, remove oldest 100 entries
+            if len(_local_cache) >= MAX_CACHE_SIZE:
+                oldest = sorted(_cache_expiry.items(), key=lambda x: x[1])[:100]
+                for k, _ in oldest:
+                    _local_cache.pop(k, None)
+                    _cache_expiry.pop(k, None)
+
         json_val = json.dumps(value, cls=CacheEncoder)
         _local_cache[key] = json_val
         _cache_expiry[key] = datetime.now() + timedelta(seconds=ttl)
@@ -50,6 +66,19 @@ async def get_cache(key: str) -> Optional[Any]:
 async def delete_cache(key: str):
     _local_cache.pop(key, None)
     _cache_expiry.pop(key, None)
+
+async def delete_cache_pattern(prefix: str):
+    """Delete all cache keys matching a prefix pattern."""
+    keys_to_delete = [k for k in _local_cache if k.startswith(prefix)]
+    for k in keys_to_delete:
+        _local_cache.pop(k, None)
+        _cache_expiry.pop(k, None)
+
+async def invalidate_dashboard_cache():
+    """Invalidate all dashboard/stats caches when case data changes."""
+    await delete_cache_pattern("cache:get_dashboard_summary")
+    await delete_cache_pattern("stats:")
+    await delete_cache_pattern("dashboard:")
 
 async def clear_cache(pattern: str = "*"):
     _local_cache.clear()

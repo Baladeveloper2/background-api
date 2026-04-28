@@ -4,7 +4,7 @@ from . import (
     models, auth_routes, customer_routes, partner_routes, 
     user_routes, candidate_routes, batch_routes, case_routes, 
     verification_routes, stats_routes, role_routes, media_routes,
-    notification_routes, ai_routes, billing_routes
+    notification_routes, ai_routes, billing_routes, client_doc_routes
 )
 
 
@@ -43,9 +43,22 @@ app = FastAPI(title="BGVMS API", lifespan=lifespan)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     logger.error("Validation failed", extra={"path": request.url.path, "errors": exc.errors()})
+    
+    # Sanitize body for JSON serialization (specifically handle starlette FormData)
+    body_serialized = None
+    try:
+        from starlette.datastructures import FormData
+        if isinstance(exc.body, FormData):
+            # Convert FormData to a flat dict, excluding file objects which are non-serializable
+            body_serialized = {k: v for k, v in exc.body.items() if not hasattr(v, 'file')}
+        else:
+            body_serialized = exc.body
+    except Exception:
+        body_serialized = "Unserializable Body Content"
+
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "body": exc.body},
+        content={"detail": exc.errors(), "body": body_serialized},
     )
 
 app.state.limiter = limiter
@@ -100,6 +113,7 @@ api_v1.include_router(media_routes.router)
 api_v1.include_router(notification_routes.router)
 api_v1.include_router(ai_routes.router)
 api_v1.include_router(billing_routes.router)
+api_v1.include_router(client_doc_routes.router)
 
 
 

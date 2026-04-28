@@ -26,19 +26,19 @@ READ_ASYNC_URL = get_url_with_driver(READ_RAW_URL, "aiomysql")
 # Primary Async Engine
 async_engine = create_async_engine(
     ASYNC_URL,
-    pool_size=20, max_overflow=30, pool_recycle=300, pool_pre_ping=True, pool_timeout=30
+    pool_size=20, max_overflow=30, pool_recycle=1800, pool_pre_ping=True, pool_timeout=30
 )
 # Read-Only Async Engine (Clustered Support)
 read_engine = create_async_engine(
     READ_ASYNC_URL,
-    pool_size=40, max_overflow=60, pool_recycle=300, pool_pre_ping=True, pool_timeout=30
+    pool_size=40, max_overflow=60, pool_recycle=1800, pool_pre_ping=True, pool_timeout=30
 ) if READ_ASYNC_URL != ASYNC_URL else async_engine
 
 AsyncSessionLocal = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 ReadSessionLocal = async_sessionmaker(bind=read_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
 # Sync Engine and Session (Legacy)
-sync_engine = create_engine(SYNC_URL, pool_pre_ping=True, pool_recycle=300)
+sync_engine = create_engine(SYNC_URL, pool_pre_ping=True, pool_recycle=1800)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
 
 Base = declarative_base()

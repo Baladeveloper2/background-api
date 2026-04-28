@@ -18,7 +18,7 @@ import io
 from .ocr_utils import get_scanner
 from . import notification_utils
 from .ws import manager
-from .cache import delete_cache, cache_response
+from .cache import delete_cache, cache_response, invalidate_dashboard_cache
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 from . import tat_utils
 from .logging_config import logger
@@ -71,6 +71,7 @@ async def bulk_mark_insufficient(data: dict[str, Any], background_tasks: Backgro
         db.add(log)
 
     await db.commit()
+    await invalidate_dashboard_cache()
     
     # Global workforce update signal
     await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "bulk_insufficient"})
@@ -346,41 +347,61 @@ async def recommend_allocation(db: AsyncSession = Depends(get_async_db)):
     """
     Analyzes workforce capacity and suggests the best verifiers for new assignments
     based on current load and completion trends.
+    Optimized: Uses 3 aggregate queries instead of 2N individual queries.
     """
-    # 1. Fetch all Verifiers
-    stmt = select(models.User).filter(models.User.role == enums.UserRole.VERIFIER)
-    res = await db.execute(stmt)
-    verifiers = res.scalars().all()
-    
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    # 1. Fetch all active verifiers
+    v_stmt = select(models.User.id, models.User.full_name).filter(
+        models.User.role == enums.UserRole.VERIFIER,
+        models.User.status == enums.Status.ACTIVE
+    )
+    v_res = await db.execute(v_stmt)
+    verifiers = v_res.all()
+
+    # 2. Aggregate active load per verifier (single query)
+    load_stmt = select(
+        models.Case.assigned_to,
+        func.count(models.Case.id)
+    ).filter(
+        models.Case.status.in_([enums.CaseStatus.VERIFICATION]),
+        models.Case.assigned_to.isnot(None)
+    ).group_by(models.Case.assigned_to)
+    load_res = await db.execute(load_stmt)
+    load_map = {row[0]: row[1] for row in load_res.all()}
+
+    # 3. Aggregate 7-day velocity per verifier (single query)
+    vel_stmt = select(
+        models.Case.assigned_to,
+        func.count(models.Case.id)
+    ).filter(
+        models.Case.completed_date >= seven_days_ago,
+        models.Case.assigned_to.isnot(None)
+    ).group_by(models.Case.assigned_to)
+    vel_res = await db.execute(vel_stmt)
+    vel_map = {row[0]: row[1] for row in vel_res.all()}
+
+    # 4. Build recommendations from pre-fetched data
     recommendations = []
-    for v in verifiers:
-        # Get active load
-        load_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.assigned_to == v.id, models.Case.status.in_([enums.CaseStatus.VERIFICATION])))
-        active_load = load_res.scalar() or 0
-        
-        # Get recent completions (last 7 days)
-        seven_days_ago = datetime.utcnow() - timedelta(days=7)
-        comp_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.assigned_to == v.id, models.Case.completed_date >= seven_days_ago))
-        velocity = comp_res.scalar() or 0
-        
-        # Calculate Score (Lower is better for assignment)
-        # Score = Active Load / (Velocity + 1)
+    for v_id, full_name in verifiers:
+        active_load = load_map.get(v_id, 0)
+        velocity = vel_map.get(v_id, 0)
         score = active_load / (velocity + 1)
-        
+
         recommendations.append({
-            "user_id": v.id,
-            "full_name": v.full_name,
+            "user_id": v_id,
+            "full_name": full_name,
             "active_load": active_load,
             "velocity_7d": velocity,
             "efficiency_score": round(float(score), 2),
-            "recommend_rank": 0 # Placeholder
+            "recommend_rank": 0
         })
-        
-    # Sort by score ascending
+
+    # Sort by score ascending (lowest = best candidate for assignment)
     recommendations.sort(key=lambda x: x["efficiency_score"])
     for i, rec in enumerate(recommendations):
         rec["recommend_rank"] = i + 1
-        
+
     return recommendations
 
 @router.post("/scan-escalations")
@@ -966,6 +987,7 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
         )
     
     await db.commit()
+    await invalidate_dashboard_cache()
     
     # Trigger Real-time Workforce Update
     await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "bulk_allocation"})
@@ -985,14 +1007,28 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
     if not verifiers:
         return {"msg": "No active verifiers found", "success": False}
         
-    # 2. Get current workloads
-    # This counts cases with status PENDING or VERIFICATION assigned to each verifier
-    workloads = {}
-    for v in verifiers:
-        count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.assigned_to == v.id, models.Case.status != models.CaseStatus.COMPLETED))
-        workloads[v.id] = count_res.scalar() or 0
-        
-    # 3. Assign cases greedily to verifier with least cases
+    # 2. Get current workloads — ONE aggregate query instead of N
+    load_stmt = select(
+        models.Case.assigned_to,
+        func.count(models.Case.id)
+    ).filter(
+        models.Case.status != models.CaseStatus.COMPLETED,
+        models.Case.assigned_to.isnot(None)
+    ).group_by(models.Case.assigned_to)
+    load_res = await db.execute(load_stmt)
+    load_map = {row[0]: row[1] for row in load_res.all()}
+    
+    workloads = {v.id: load_map.get(v.id, 0) for v in verifiers}
+    v_name_map = {v.id: v.full_name for v in verifiers}
+
+    # 3. Pre-fetch all case data in ONE query instead of per-case
+    cases_stmt = select(models.Case).options(
+        joinedload(models.Case.candidate)
+    ).filter(models.Case.id.in_(req.case_ids))
+    cases_res = await db.execute(cases_stmt)
+    cases_map = {c.id: c for c in cases_res.scalars().unique().all()}
+
+    # 4. Assign cases greedily to verifier with least cases
     assigned_count = 0
     auto_assigned_info = []
     
@@ -1017,17 +1053,13 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
         await create_audit_log(db, current_user.id, "AUTO_ALLOCATION", f"Case automatically assigned to verifier", resource_id=cid)
         await manager.broadcast({"type": "CASE_UPDATED", "case_id": cid, "action": "auto-assignment"})
         
-        # Trigger Notification
-        ref_res = await db.execute(select(models.Case).options(joinedload(models.Case.candidate)).filter(models.Case.id == cid))
-        cbd = ref_res.scalar_one()
-        candidate_name = cbd.candidate.name if cbd.candidate else "Candidate"
-        
-        v_name = "Verifier"
-        v_obj = next((u for u in verifiers if u.id == target_v_id), None)
-        if v_obj: v_name = v_obj.full_name
+        # Use pre-fetched case data for notification
+        cbd = cases_map.get(cid)
+        candidate_name = cbd.candidate.name if cbd and cbd.candidate else "Candidate"
+        v_name = v_name_map.get(target_v_id, "Verifier")
             
-        auto_assigned_info.append({"id": cid, "ref": cbd.case_ref_no, "candidate": candidate_name, "verifier": v_name})
-        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no, cid, candidate_name)
+        auto_assigned_info.append({"id": cid, "ref": cbd.case_ref_no if cbd else cid, "candidate": candidate_name, "verifier": v_name})
+        await notification_utils.notify_new_assignment(db, target_v_id, cbd.case_ref_no if cbd else cid, cid, candidate_name)
 
     # Notify Admin ONE summary
     await notification_utils.create_notification(
@@ -1039,6 +1071,7 @@ async def auto_allocate(req: schemas.BulkActionRequest, db: AsyncSession = Depen
     )
     
     await db.commit()
+    await invalidate_dashboard_cache()
     return {"msg": f"Successfully auto-allocated {assigned_count} cases", "success": True}
 
 @router.patch("/{case_id}", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
@@ -1399,6 +1432,7 @@ async def bulk_allocate(data: dict[str, Any], background_tasks: BackgroundTasks,
         )
 
     await db.commit()
+    await invalidate_dashboard_cache()
     await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "bulk_allocation"})
     return {"message": "Success"}
 

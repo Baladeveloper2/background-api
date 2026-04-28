@@ -225,22 +225,28 @@ async def get_dashboard_summary(
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Unified endpoint for dashboard stats with optimized fetching."""
+    """Unified endpoint for dashboard stats with optimized fetching and caching."""
+    # Cache the combined summary for 60s per user
+    cache_key = f"stats:summary:{current_user.id}:{from_date}:{to_date}"
+    cached = await get_cache(cache_key)
+    if cached:
+        return cached
+
     try:
-        # Since we use a single DB session, we must run sequentially to avoid state errors,
-        # but we can optimize the internal functions to be faster.
         res_stats = await get_dashboard_stats(from_date, to_date, db, current_user)
         res_verifier = await get_verifier_daily(from_date, to_date, db, current_user)
         res_records = await get_today_records(db, current_user)
         res_throughput = await get_throughput_heatmap(db, current_user)
         
-        return {
+        result = {
             "stats": res_stats,
             "verifier_daily": res_verifier,
             "today_records": res_records,
             "throughput": res_throughput,
             "server_time": datetime.now().isoformat()
         }
+        await set_cache(cache_key, result, ttl=60)
+        return result
     except Exception as e:
         logger.error(f"Error getting dashboard summary: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))

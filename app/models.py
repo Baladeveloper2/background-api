@@ -1,6 +1,6 @@
 import uuid
 import json
-from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator, Float, Index
+from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Date, Integer, Text, TypeDecorator, Float, Index, Boolean
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -97,6 +97,23 @@ class Customer(Base):
     status = Column(String(50), default="ACTIVE")
     created_at = Column(DateTime, default=datetime.utcnow)
     pricing_config = Column(JSONEncodedDict)
+    documents = Column(JSONEncodedList)
+
+class ClientDocument(Base):
+    __tablename__ = "client_documents"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    customer_id = Column(String(36), ForeignKey("customers.id"), nullable=False)
+    name = Column(String(255), nullable=False) # File or Folder name
+    is_folder = Column(Boolean, default=False)
+    parent_id = Column(String(36), ForeignKey("client_documents.id"), nullable=True)
+    file_path = Column(String(500), nullable=True)
+    file_type = Column(String(100), nullable=True)
+    uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    customer = relationship("Customer", backref="client_docs")
+    uploader = relationship("User", backref="uploaded_client_docs")
 
 class Partner(Base):
     __tablename__ = "partners"
@@ -169,6 +186,8 @@ class Case(Base):
     __table_args__ = (
         Index("index_customer_status", "customer_id", "status"),
         Index("index_assigned_status", "assigned_to", "status"),
+        Index("index_status_received", "status", "received_date"),
+        Index("index_assigned_status_date", "assigned_to", "status", "received_date"),
         {'extend_existing': True}
     )
 

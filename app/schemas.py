@@ -234,6 +234,7 @@ class CustomerBase(BaseModel):
     status: Status = Status.ACTIVE
     pricing_config: Optional[Dict[str, float]] = None
     customer_agreement: Optional[str] = None
+    documents: Optional[List[Dict[str, Any]]] = None
     
     @field_validator('status', mode='before')
     @classmethod

@@ -86,6 +86,14 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
                 elif rp is True and action == "read": has_access = True
 
         if not has_access:
+            # Check if it's a customer user accessing their permitted modules
+            user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+            role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+            is_customer = "CUSTOMER" in user_role_str or "CUSTOMER" in role_name
+            
+            if is_customer and action == "read" and module in ["bms", "bvs"]:
+                return current_user
+
             # Grant systemic write access to specific oversight roles for the verification module
             oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN]
             oversight_names = ["Super Admin", "QC Verifier"]
@@ -118,6 +126,7 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
             "id": user.id, 
             "role": user.role_rel.name if user.role_id and user.role_rel else ("Super Admin" if user.role == models.UserRole.SUPER_ADMIN else user.role), 
             "full_name": user.full_name, 
+            "customer_id": user.customer_id,
             "permissions": perms
         },
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)

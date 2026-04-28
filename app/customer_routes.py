@@ -7,6 +7,7 @@ import uuid
 import io
 from .aws_utils import s3_client, aws_bucket, aws_region
 from anyio import to_thread
+from datetime import datetime
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -59,6 +60,13 @@ def list_customers(
     current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer", action="read"))
 ):
 
+    user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+    is_customer = "CUSTOMER" in user_role_str or "CUSTOMER" in role_name
+
+    if is_customer and current_user.customer_id:
+        return db.query(models.Customer).filter(models.Customer.id == current_user.customer_id).all()
+    
     return db.query(models.Customer).all()
 
 @router.get("/{customer_id}", response_model=schemas.Customer)
@@ -115,6 +123,57 @@ async def update_customer(
     db.commit()
     db.refresh(db_customer)
     return db_customer
+
+@router.post("/{customer_id}/documents", response_model=schemas.Customer)
+async def upload_customer_document(
+    customer_id: str,
+    file: UploadFile = File(...),
+    folder: str = "General",
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    # Check if user belongs to this customer or is admin
+    if current_user.role != models.UserRole.SUPER_ADMIN and current_user.customer_id != customer_id:
+        raise HTTPException(status_code=403, detail="Not authorized to upload for this client")
+
+    db_customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+    if not db_customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    if not s3_client or not aws_bucket:
+        raise HTTPException(status_code=500, detail="S3 storage is not configured. Please check your AWS credentials.")
+
+    try:
+        file_ext = os.path.splitext(file.filename)[1]
+        file_key = f"bgv_documents/{uuid.uuid4()}{file_ext}"
+        file_data = await file.read()
+        
+        await to_thread.run_sync(
+            s3_client.upload_fileobj,
+            io.BytesIO(file_data),
+            aws_bucket,
+            file_key,
+            {'ContentType': file.content_type}
+        )
+        file_info = {
+            "url": f"https://{aws_bucket}.s3.{aws_region}.amazonaws.com/{file_key}",
+            "path": file_key,
+            "original_filename": file.filename,
+            "uploaded_at": datetime.utcnow().isoformat(),
+            "uploaded_by": current_user.full_name,
+            "folder": folder
+        }
+        
+        docs = list(db_customer.documents or [])
+        docs.append(file_info)
+        db_customer.documents = docs
+        db.commit()
+        db.refresh(db_customer)
+        return db_customer
+
+    except Exception as e:
+        print(f"S3 Upload Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload to S3: {str(e)}")
 
 from fastapi.responses import RedirectResponse
 @router.get("/{customer_id}/agreement")
