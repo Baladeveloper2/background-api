@@ -29,12 +29,6 @@ async def get_dashboard_stats(
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    # Check cache
-    cache_key = f"stats:dashboard:{current_user.id}:{from_date}:{to_date}"
-    cached_data = await get_cache(cache_key)
-    if cached_data:
-        return cached_data
-
     try:
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         
@@ -118,25 +112,33 @@ async def get_dashboard_stats(
         geo_data = [{"name": str(r[0] or "REMOTE"), "value": int(r[1]), "color": "#3b82f6"} for r in geo_res.all()]
         activity_log = [{"id": i, "icon": "⚡", "action": r[0].action, "time": r[0].timestamp.strftime("%H:%M"), "user": r[1]} for i, r in enumerate(log_res.all())]
 
-        # 4. Monthly Analysis (Optimized to 2 queries total)
-        six_months_ago = today.replace(day=1) - timedelta(days=150) # Approx 6 months
-        six_months_ago = six_months_ago.replace(day=1)
+        # 4. Monthly Analysis (Dynamic based on selected range)
+        if filter_start and filter_end:
+            chart_start = filter_start.replace(day=1)
+            chart_end = filter_end
+        else:
+            chart_start = (today.replace(day=1) - timedelta(days=150)).replace(day=1)
+            chart_end = today + timedelta(days=32)
 
         t_months_stmt = select(
             extract('year', models.Case.received_date).label('y'),
             extract('month', models.Case.received_date).label('m'),
             func.count(models.Case.id)
-        ).filter(models.Case.received_date >= six_months_ago).group_by('y', 'm')
+        ).filter(models.Case.received_date >= chart_start, models.Case.received_date < chart_end).group_by('y', 'm')
         
         c_months_stmt = select(
             extract('year', models.Case.completed_date).label('y'),
             extract('month', models.Case.completed_date).label('m'),
             func.count(models.Case.id)
-        ).filter(models.Case.completed_date >= six_months_ago, models.Case.status == models.CaseStatus.COMPLETED.value).group_by('y', 'm')
+        ).filter(models.Case.completed_date >= chart_start, models.Case.completed_date < chart_end, models.Case.status == models.CaseStatus.COMPLETED.value).group_by('y', 'm')
 
         if filter_verifier:
             t_months_stmt = t_months_stmt.filter(models.Case.assigned_to == current_user.id)
             c_months_stmt = c_months_stmt.filter(models.Case.assigned_to == current_user.id)
+        
+        if filter_customer:
+            t_months_stmt = t_months_stmt.filter(models.Case.customer_id == current_user.customer_id)
+            c_months_stmt = c_months_stmt.filter(models.Case.customer_id == current_user.customer_id)
 
         t_m_res = await db.execute(t_months_stmt)
         c_m_res = await db.execute(c_months_stmt)
@@ -144,15 +146,23 @@ async def get_dashboard_stats(
         c_dict = {(int(r[0]), int(r[1])): r[2] for r in c_m_res.all()}
 
         analysis_data = []
-        for i in range(5, -1, -1):
-            target_date = today - timedelta(days=i*30)
-            y, m = target_date.year, target_date.month
+        curr_m = chart_start
+        # Prevent infinite loop if something goes wrong with dates
+        max_iter = 24
+        while curr_m < chart_end and max_iter > 0:
+            y, m = curr_m.year, curr_m.month
             analysis_data.append({
-                "name": target_date.strftime("%b %y"),
+                "name": curr_m.strftime("%b %y"),
                 "total": int(t_dict.get((y, m), 0)),
                 "completed": int(c_dict.get((y, m), 0)),
                 "pending": max(0, int(t_dict.get((y, m), 0)) - int(c_dict.get((y, m), 0)))
             })
+            # Advance to next month
+            if curr_m.month == 12:
+                curr_m = curr_m.replace(year=curr_m.year + 1, month=1)
+            else:
+                curr_m = curr_m.replace(month=curr_m.month + 1)
+            max_iter -= 1
 
         # 5. At Risk Count (Optimized: No full object fetch)
         # Instead of fetching full models, we fetch IDs and count.
@@ -184,6 +194,28 @@ async def get_dashboard_stats(
                 if tat_utils.check_is_at_risk(r_date, p_tat):
                     at_risk_count += 1
 
+        # 7. Specific Result Counts (Positive, Negative, Amber, Stop)
+        # We calculate these based on VerificationCheck statuses
+        check_counts_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).group_by(models.VerificationCheck.status)
+        if filter_customer:
+            check_counts_stmt = check_counts_stmt.join(models.Case).filter(models.Case.customer_id == current_user.customer_id)
+        elif filter_verifier:
+            check_counts_stmt = check_counts_stmt.join(models.Case).filter(models.Case.assigned_to == current_user.id)
+        
+        if filter_start: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date < filter_end)
+            
+        check_res = await db.execute(check_counts_stmt)
+        check_counts = {str(row[0].value if hasattr(row[0], "value") else row[0]): int(row[1] or 0) for row in check_res.all()}
+        
+        # Total Assigned Cases
+        assigned_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to.isnot(None))
+        if filter_customer: assigned_stmt = assigned_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        if filter_start: assigned_stmt = assigned_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end: assigned_stmt = assigned_stmt.filter(models.Case.received_date < filter_end)
+        assigned_res = await db.execute(assigned_stmt)
+        total_assigned = assigned_res.scalar() or 0
+
         # 6. Customers and Revenue already fetched in Step 2.
 
         res_data = {
@@ -203,6 +235,11 @@ async def get_dashboard_stats(
             "entry_pending_count": int(status_counts.get(models.CaseStatus.PENDING.value, 0)),
             "verification_pending_count": int(status_counts.get(models.CaseStatus.VERIFICATION.value, 0)),
             "at_risk_count": int(at_risk_count),
+            "positive_count": int(check_counts.get(models.CheckStatus.GREEN.value, 0)),
+            "negative_count": int(check_counts.get(models.CheckStatus.RED.value, 0)),
+            "amber_count": int(check_counts.get(models.CheckStatus.AMBER.value, 0)),
+            "stop_count": int(check_counts.get(models.CheckStatus.STOP.value, 0)),
+            "total_assigned": int(total_assigned),
             "case_analysis": analysis_data,
             "verification_pending": [],
             "today_data_entry": [],
@@ -212,7 +249,6 @@ async def get_dashboard_stats(
             "execution_stats": [],
             "activity_log": activity_log
         }
-        await set_cache(cache_key, res_data, ttl=CACHE_TTL)
         return res_data
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {str(e)}", exc_info=True)
@@ -226,16 +262,10 @@ async def get_dashboard_summary(
     current_user: models.User = Depends(get_current_user)
 ):
     """Unified endpoint for dashboard stats with optimized fetching and caching."""
-    # Cache the combined summary for 60s per user
-    cache_key = f"stats:summary:{current_user.id}:{from_date}:{to_date}"
-    cached = await get_cache(cache_key)
-    if cached:
-        return cached
-
     try:
         res_stats = await get_dashboard_stats(from_date, to_date, db, current_user)
         res_verifier = await get_verifier_daily(from_date, to_date, db, current_user)
-        res_records = await get_today_records(db, current_user)
+        res_records = await get_today_records(from_date, to_date, db, current_user)
         res_throughput = await get_throughput_heatmap(db, current_user)
         
         result = {
@@ -245,7 +275,6 @@ async def get_dashboard_summary(
             "throughput": res_throughput,
             "server_time": datetime.now().isoformat()
         }
-        await set_cache(cache_key, result, ttl=60)
         return result
     except Exception as e:
         logger.error(f"Error getting dashboard summary: {str(e)}", exc_info=True)
@@ -398,12 +427,21 @@ async def get_verifier_daily(
 
 @router.get("/today-records", response_model=schemas.TodayRecordsResponse)
 async def get_today_records(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Returns today's received / completed / pending / insufficient per client."""
+    """Returns received / completed / pending / insufficient per client, filtered by date."""
     try:
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        filter_start = None
+        filter_end = None
+        if from_date:
+            try: filter_start = datetime.strptime(from_date, "%Y-%m-%d")
+            except: pass
+        if to_date:
+            try: filter_end = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            except: pass
 
         stmt = (
             select(
@@ -413,8 +451,17 @@ async def get_today_records(
                 func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT.value, 1), else_=0)).label("insufficient"),
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
-            .filter(models.Case.received_date >= today)
         )
+        
+        if filter_start:
+            stmt = stmt.filter(models.Case.received_date >= filter_start)
+        else:
+            # If truly "All Time", we still might want to default to today for the SUMMARY table 
+            # UNLESS the user explicitly wants All Time. 
+            # For now, let's allow All Time if filter_start is None.
+            pass
+        if filter_end:
+            stmt = stmt.filter(models.Case.received_date < filter_end)
         
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
@@ -446,7 +493,12 @@ async def get_today_records(
             "pending": sum(r["pending"] for r in records),
             "insufficient": sum(r["insufficient"] for r in records),
         }
-        return {"date": today.strftime("%Y-%m-%d"), "records": records, "totals": totals}
+        if filter_start:
+            display_date = filter_start.strftime("%Y-%m-%d")
+        else:
+            display_date = "All Time"
+
+        return {"date": display_date, "records": records, "totals": totals}
     except Exception as e:
         logger.error(f"Error getting today records: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
@@ -821,5 +873,128 @@ async def export_executive_data(
         return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
         logger.error(f"Error exporting executive data: {str(e)}", exc_info=True)
+        raise HTTPException(500, detail=str(e))
+
+@router.get("/dashboard/export")
+async def export_dashboard_report(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Generates Excel export matching the user's requirements for month-wise stats."""
+    try:
+        # 1. Date Filtering
+        filter_start = None
+        filter_end = None
+        if from_date:
+            try: filter_start = datetime.strptime(from_date, "%Y-%m-%d")
+            except: pass
+        if to_date:
+            try: filter_end = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+            except: pass
+            
+        if not filter_start:
+            filter_start = datetime.now().replace(day=1, month=4) # Default to start of current Indian FY
+            if datetime.now().month < 4:
+                filter_start = filter_start.replace(year=filter_start.year - 1)
+        if not filter_end:
+            filter_end = datetime.now() + timedelta(days=1)
+
+        # 2. Identify Role
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        
+        # 3. Monthly Iteration
+        data = []
+        curr = filter_start.replace(day=1)
+        s_no = 1
+        
+        while curr < filter_end:
+            month_end = (curr + timedelta(days=32)).replace(day=1)
+            
+            if curr.month >= 4:
+                fy_str = f"{curr.year} - {curr.year + 1}"
+            else:
+                fy_str = f"{curr.year - 1} - {curr.year}"
+                
+            month_str = curr.strftime("%b-%y")
+            
+            # Base queries
+            assigned_stmt = select(func.count(models.Case.id)).filter(models.Case.received_date >= curr, models.Case.received_date < month_end)
+            wip_stmt = select(func.count(models.Case.id)).filter(
+                models.Case.received_date >= curr, 
+                models.Case.received_date < month_end,
+                models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, "QC_PENDING", "QA_PENDING"])
+            )
+            check_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).join(models.Case).filter(
+                models.Case.received_date >= curr,
+                models.Case.received_date < month_end
+            ).group_by(models.VerificationCheck.status)
+            insuff_stmt = select(func.count(models.Case.id)).filter(
+                models.Case.received_date >= curr,
+                models.Case.received_date < month_end,
+                models.Case.status == models.CaseStatus.INSUFFICIENT.value
+            )
+            
+            if is_customer:
+                assigned_stmt = assigned_stmt.filter(models.Case.customer_id == current_user.customer_id)
+                wip_stmt = wip_stmt.filter(models.Case.customer_id == current_user.customer_id)
+                check_stmt = check_stmt.filter(models.Case.customer_id == current_user.customer_id)
+                insuff_stmt = insuff_stmt.filter(models.Case.customer_id == current_user.customer_id)
+                
+            res_a = await db.execute(assigned_stmt)
+            res_w = await db.execute(wip_stmt)
+            res_c = await db.execute(check_stmt)
+            res_i = await db.execute(insuff_stmt)
+            
+            check_counts = {str(r[0].value if hasattr(r[0], 'value') else r[0]): int(r[1]) for r in res_c.all()}
+            
+            data.append({
+                "S No": s_no,
+                "FY Year": fy_str,
+                "Month": month_str,
+                "Overall Assigned cases": res_a.scalar() or 0,
+                "In Progress (WIP)": res_w.scalar() or 0,
+                "Positive": check_counts.get(models.CheckStatus.GREEN.value, 0),
+                "Negative": check_counts.get(models.CheckStatus.RED.value, 0),
+                "Amber": check_counts.get(models.CheckStatus.AMBER.value, 0),
+                "Stop Check": check_counts.get(models.CheckStatus.STOP.value, 0),
+                "Insufficiency": res_i.scalar() or 0
+            })
+            
+            s_no += 1
+            curr = month_end
+            
+        df = pd.DataFrame(data)
+        
+        # Add Total row
+        if not df.empty:
+            totals = {
+                "S No": "",
+                "FY Year": "",
+                "Month": "TOTAL",
+                "Overall Assigned cases": df["Overall Assigned cases"].sum(),
+                "In Progress (WIP)": df["In Progress (WIP)"].sum(),
+                "Positive": df["Positive"].sum(),
+                "Negative": df["Negative"].sum(),
+                "Amber": df["Amber"].sum(),
+                "Stop Check": df["Stop Check"].sum(),
+                "Insufficiency": df["Insufficiency"].sum()
+            }
+            df = pd.concat([df, pd.DataFrame([totals])], ignore_index=True)
+            
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Dashboard MIS')
+            
+        output.seek(0)
+        filename = f"Dashboard_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    except Exception as e:
+        logger.error(f"Error exporting dashboard report: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 

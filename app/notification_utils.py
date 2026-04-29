@@ -182,3 +182,41 @@ async def notify_ping(db: AsyncSession, user_id: str, case_ref: str, case_id: st
         case_id=case_id,
         background_tasks=background_tasks
     )
+
+async def notify_documents_submitted(
+    db: AsyncSession,
+    case_id: str,
+    case_ref: str,
+    candidate_name: str,
+    customer_user_id: Optional[str] = None,
+    background_tasks: Optional[Any] = None
+):
+    """
+    Fired when a candidate submits their BGV form documents.
+    Notifies:
+      - The client (customer user) who owns the case
+      - All internal SUPER_ADMIN / MANAGER / ADMIN users
+    """
+    title = "📋 Documents Submitted"
+    message = f"Candidate {candidate_name} has submitted all required documents for Case {case_ref}. Please review and proceed with verification."
+
+    # 1. Notify the client contact
+    if customer_user_id:
+        await create_notification(
+            db, customer_user_id, title, message,
+            enums.NotificationCategory.FORM_SUBMITTED,
+            case_id=case_id,
+            background_tasks=background_tasks
+        )
+
+    # 2. Notify internal team (Super Admins + Managers + Admins)
+    internal_users = await get_users_by_role(
+        db, [enums.UserRole.SUPER_ADMIN, enums.UserRole.ADMIN, enums.UserRole.MANAGER]
+    )
+    for user in internal_users:
+        await create_notification(
+            db, user.id, title, message,
+            enums.NotificationCategory.FORM_SUBMITTED,
+            case_id=case_id,
+            background_tasks=background_tasks
+        )

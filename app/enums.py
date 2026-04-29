@@ -24,6 +24,8 @@ class CaseStatus(str, enum.Enum):
     QC_VERIFIED = "QC_VERIFIED"
     COMPLETED = "COMPLETED"
     INSUFFICIENT = "INSUFFICIENT"
+    LINK_SHARED = "LINK_SHARED"
+    DOCUMENTS_SUBMITTED = "DOCUMENTS_SUBMITTED"
 
 class CheckStatus(str, enum.Enum):
     GREEN = "GREEN"

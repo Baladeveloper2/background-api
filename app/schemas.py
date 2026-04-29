@@ -453,6 +453,11 @@ class DashboardStats(BaseModel):
     entry_pending_count: int = 0
     verification_pending_count: int = 0
     at_risk_count: int = 0
+    positive_count: int = 0
+    negative_count: int = 0
+    amber_count: int = 0
+    stop_count: int = 0
+    total_assigned: int = 0
     case_analysis: List[CaseAnalysisPoint] = []
     verification_pending: List[VerificationPendingItem] = []
     today_data_entry: List[DataEntryItem] = []

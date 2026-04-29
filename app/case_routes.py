@@ -28,6 +28,259 @@ router = APIRouter(
     tags=["cases"]
 )
 
+@router.get("/insufficient")
+async def get_insufficient_cases(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Fetch cases marked as insufficient for the current customer."""
+    stmt = select(models.Case).filter(
+        models.Case.status == enums.CaseStatus.INSUFFICIENT
+    ).options(
+        joinedload(models.Case.candidate),
+        joinedload(models.Case.customer),
+        selectinload(models.Case.insufficiency_logs).options(joinedload(models.InsufficiencyLog.user))
+    )
+    
+    if current_user.role == enums.UserRole.CUSTOMER:
+        stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+        
+    res = await db.execute(stmt)
+    cases = res.unique().scalars().all()
+    
+    return [
+        {
+            "id": c.id,
+            "case_ref_no": c.case_ref_no,
+            "candidate_name": c.candidate.name if c.candidate else "N/A",
+            "customer_name": c.customer.name if c.customer else "N/A",
+            "marked_at": c.insufficiency_logs[-1].marked_at.strftime("%Y-%m-%d %H:%M") if c.insufficiency_logs else c.received_date.strftime("%Y-%m-%d %H:%M"),
+            "remarks": c.insufficiency_logs[-1].notes if c.insufficiency_logs else "No remarks found",
+            "marked_by": c.insufficiency_logs[-1].user.full_name if c.insufficiency_logs and c.insufficiency_logs[-1].user else "System"
+        }
+        for c in cases
+    ]
+
+@router.post("/{case_id}/resolve-insufficiency")
+async def resolve_insufficiency(
+    case_id: str,
+    data: dict,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Resolve an insufficiency by providing remarks and documents."""
+    stmt = select(models.Case).filter(models.Case.id == case_id).options(joinedload(models.Case.candidate))
+    res = await db.execute(stmt)
+    case = res.scalar_one_or_none()
+    
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    
+    remarks = data.get("remarks")
+    if not remarks:
+        raise HTTPException(status_code=400, detail="Remarks are mandatory for clearing insufficiency")
+    
+    # Update Case status back to VERIFICATION
+    case.status = enums.CaseStatus.VERIFICATION
+    
+    # Add comment
+    comment = models.CaseComment(
+        case_id=case.id,
+        user_id=current_user.id,
+        content=f"INSUFFICIENCY CLEARED: {remarks}"
+    )
+    db.add(comment)
+    
+    # Update latest insufficiency log
+    log_stmt = select(models.InsufficiencyLog).filter(
+        models.InsufficiencyLog.case_id == case_id,
+        models.InsufficiencyLog.resolved_at == None
+    ).order_by(models.InsufficiencyLog.marked_at.desc()).limit(1)
+    
+    log_res = await db.execute(log_stmt)
+    log = log_res.scalar_one_or_none()
+    if log:
+        log.resolved_at = datetime.utcnow()
+    
+    # Notify internal team
+    if case.assigned_to:
+        await notification_utils.create_notification(
+            db, case.assigned_to,
+            "Insufficiency Cleared",
+            f"Candidate {case.candidate.name} has cleared insufficiency. Remarks: {remarks}",
+            enums.NotificationCategory.INSUFFICIENT_DOCS,
+            case_id=case.id,
+            background_tasks=background_tasks
+        )
+    
+    await db.commit()
+    await manager.broadcast({"type": "CASE_STATUS_UPDATE", "case_id": case.id, "status": case.status})
+    
+    return {"message": "Insufficiency response submitted successfully"}
+
+@router.get("/invitations")
+async def get_candidate_invitations(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Fetch candidates in the invitation/self-service flow."""
+    stmt = select(models.Case).filter(
+        models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
+    ).options(
+        joinedload(models.Case.candidate),
+        joinedload(models.Case.customer)
+    )
+    
+    if current_user.role == enums.UserRole.CUSTOMER:
+        stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+        
+    res = await db.execute(stmt)
+    cases = res.unique().scalars().all()
+    
+    return [
+        {
+            "id": c.id,
+            "candidate_name": c.candidate.name if c.candidate else "N/A",
+            "email": c.candidate.email if c.candidate else "N/A",
+            "phone": c.candidate.phone if c.candidate else "N/A",
+            "emp_id": c.candidate.client_emp_code if c.candidate else "N/A",
+            "status": c.status,
+            "created_at": c.received_date.strftime("%Y-%m-%d %H:%M")
+        }
+        for c in cases
+    ]
+
+@router.post("/invite-candidate")
+async def invite_candidate(
+    data: dict,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Create a new candidate and case in PENDING status for invitation."""
+    # Create Candidate
+    candidate = models.Candidate(
+        name=data.get("name"),
+        email=data.get("email"),
+        phone=data.get("phone"),
+        client_emp_code=data.get("emp_id")
+    )
+    db.add(candidate)
+    await db.flush()
+    
+    # Create Case
+    new_case = models.Case(
+        case_ref_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
+        customer_id=current_user.customer_id if current_user.role == enums.UserRole.CUSTOMER else data.get("customer_id"),
+        candidate_id=candidate.id,
+        status=enums.CaseStatus.PENDING
+    )
+    db.add(new_case)
+    await db.commit()
+    
+    return {"message": "Candidate added to invitation list", "case_id": new_case.id}
+
+@router.post("/{case_id}/send-bgv-link")
+async def send_bgv_link(
+    case_id: str,
+    data: dict,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Update case status to LINK_SHARED and trigger BGV form email."""
+    stmt = select(models.Case).filter(models.Case.id == case_id).options(joinedload(models.Case.candidate))
+    res = await db.execute(stmt)
+    case = res.scalar_one_or_none()
+    
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    
+    checks = data.get("checks", [])
+    # In a real app, you'd create VerificationCheck records here for selected types
+    for check_type in checks:
+        new_check = models.VerificationCheck(
+            case_id=case.id,
+            check_type=check_type,
+            status=enums.CheckStatus.VERIFICATION
+        )
+        db.add(new_check)
+    
+    case.status = enums.CaseStatus.LINK_SHARED
+    
+    # Trigger email (Mocking notification for now)
+    await notification_utils.create_notification(
+        db, current_user.id, # Internal notification
+        "BGV Link Shared",
+        f"BGV Link has been shared with {case.candidate.name} ({case.candidate.email})",
+        enums.NotificationCategory.INSUFFICIENT_DOCS,
+        case_id=case.id,
+        background_tasks=background_tasks
+    )
+    
+    await db.commit()
+    return {"message": "BGV Link shared successfully"}
+
+@router.post("/{case_id}/submit-documents")
+async def submit_candidate_documents(
+    case_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Called when a candidate finishes submitting their documents via the BGV form.
+    - Transitions status: LINK_SHARED → DOCUMENTS_SUBMITTED
+    - Sends notifications to the client contact and the internal team.
+    """
+    stmt = (
+        select(models.Case)
+        .filter(models.Case.id == case_id)
+        .options(
+            joinedload(models.Case.candidate),
+            joinedload(models.Case.customer)
+        )
+    )
+    res = await db.execute(stmt)
+    case = res.scalar_one_or_none()
+
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Mark as documents submitted
+    case.status = enums.CaseStatus.DOCUMENTS_SUBMITTED
+
+    # Find the customer's primary user account to notify
+    customer_user = None
+    if case.customer_id:
+        cu_stmt = select(models.User).filter(
+            models.User.customer_id == case.customer_id,
+            models.User.role == enums.UserRole.CUSTOMER
+        ).limit(1)
+        cu_res = await db.execute(cu_stmt)
+        customer_user = cu_res.scalar_one_or_none()
+
+    # Fire dual notifications (client + internal team)
+    await notification_utils.notify_documents_submitted(
+        db=db,
+        case_id=case.id,
+        case_ref=case.case_ref_no or case.id,
+        candidate_name=case.candidate.name if case.candidate else "Candidate",
+        customer_user_id=customer_user.id if customer_user else None,
+        background_tasks=background_tasks
+    )
+
+    await db.commit()
+
+    # WebSocket broadcast for real-time listing update
+    await manager.broadcast({
+        "type": "CASE_STATUS_UPDATE",
+        "case_id": case.id,
+        "status": enums.CaseStatus.DOCUMENTS_SUBMITTED
+    })
+
+    return {"message": "Documents submitted successfully. Notifications sent to the client and internal team."}
+
 @router.post("/bulk-mark-insufficient")
 async def bulk_mark_insufficient(data: dict[str, Any], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     case_ids = data.get("case_ids", [])
@@ -188,10 +441,95 @@ async def export_mis_data(
         return StreamingResponse(
             output, 
             headers={'Content-Disposition': f'attachment; filename="{filename}"'}, 
-            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            media_type='application/vnd.officedocument.spreadsheetml.sheet'
         )
     except Exception as e:
         logger.error(f"Error exporting MIS data: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/strategic-mis")
+async def get_strategic_mis(
+    customer_id: Optional[str] = None,
+    customer_name: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns detailed candidate list with check-wise status for Strategic MIS."""
+    try:
+        stmt = select(models.Case).options(
+            selectinload(models.Case.candidate),
+            selectinload(models.Case.customer),
+            selectinload(models.Case.checks)
+        )
+
+        # RBAC Isolation
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        if "CUSTOMER" in user_role or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+        elif customer_id:
+            stmt = stmt.filter(models.Case.customer_id == customer_id)
+        elif customer_name:
+            stmt = stmt.join(models.Customer).filter(models.Customer.name == customer_name)
+
+        if from_date:
+            stmt = stmt.filter(models.Case.received_date >= datetime.strptime(from_date, "%Y-%m-%d"))
+        if to_date:
+            stmt = stmt.filter(models.Case.received_date <= datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59))
+
+        stmt = stmt.order_by(models.Case.received_date.desc())
+        res = await db.execute(stmt)
+        cases = res.unique().scalars().all()
+
+        report_keys = ['identity', 'resident', 'education', 'employment', 'criminal', 'reference', 'drug', 'credit', 'global', 'social']
+
+        report = []
+        for c in cases:
+            # Map check statuses with technical-to-report translation
+            check_map = {k: "NA" for k in report_keys}
+
+            for chk in c.checks:
+                status_label = "In Progress"
+                s = str(chk.status).upper()
+                if s == "GREEN": status_label = "Positive"
+                elif s == "RED": status_label = "Negative"
+                elif s == "AMBER": status_label = "Amber"
+                elif s == "INTERIM": status_label = "Interim"
+                elif s in ["COMPLETED", "VERIFIED", "QC_VERIFIED"]: status_label = "Positive"
+                
+                # Normalize technical type to report key
+                tech_type = chk.check_type.lower()
+                report_key = tech_type # Default
+                
+                if "address" in tech_type or "resident" in tech_type: report_key = "resident"
+                elif "identity" in tech_type: report_key = "identity"
+                elif "education" in tech_type or "academic" in tech_type: report_key = "education"
+                elif "employment" in tech_type: report_key = "employment"
+                elif "criminal" in tech_type: report_key = "criminal"
+                elif "reference" in tech_type: report_key = "reference"
+                elif "drug" in tech_type: report_key = "drug"
+                elif "cibil" in tech_type or "credit" in tech_type: report_key = "credit"
+                elif "global" in tech_type: report_key = "global"
+                elif "social" in tech_type: report_key = "social"
+                
+                if report_key in report_keys:
+                    check_map[report_key] = status_label
+
+            report.append({
+                "id": c.id,
+                "case_ref_no": c.case_ref_no,
+                "emp_code": c.candidate.client_emp_code if c.candidate else "N/A",
+                "candidate_name": c.candidate.name if c.candidate else "N/A",
+                "received_date": c.received_date.strftime("%Y-%m-%d") if c.received_date else "N/A",
+                "completed_date": c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "N/A",
+                "customer_name": c.customer.name if c.customer else "N/A",
+                "status": c.status,
+                "checks": check_map
+            })
+        return report
+    except Exception as e:
+        logger.error(f"Error generating strategic MIS: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
@@ -471,7 +809,7 @@ async def ping_case(case_id: str, background_tasks: BackgroundTasks, db: AsyncSe
 @router.get("", response_model=List[schemas.CaseRead], dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def read_cases(
     response: Response,
-    status: Optional[models.CaseStatus] = None, 
+    status: Optional[str] = None, 
     batch_id: Optional[str] = None,
     customer_id: Optional[str] = None,
     customer_name: Optional[str] = None,
@@ -485,6 +823,8 @@ async def read_cases(
     limit: int = 200, 
     sort: str = "received_date",
     order: str = "desc",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -524,8 +864,14 @@ async def read_cases(
 
     # Combined filtering logic
     if is_customer:
-        stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
-        base_count_stmt = base_count_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        c_id = str(current_user.customer_id) if current_user.customer_id else None
+        if c_id:
+            stmt = stmt.filter(models.Case.customer_id == c_id)
+            base_count_stmt = base_count_stmt.filter(models.Case.customer_id == c_id)
+        else:
+            # If a customer user has no associated customer_id, they should see no data
+            stmt = stmt.filter(models.Case.id == "RESTRICTED")
+            base_count_stmt = base_count_stmt.filter(models.Case.id == "RESTRICTED")
     elif not is_oversight:
         # For restricted users (Verifiers), show cases where they are involved in ANY capacity
         personal_filter = or_(
@@ -536,9 +882,19 @@ async def read_cases(
         stmt = stmt.filter(personal_filter)
         base_count_stmt = base_count_stmt.filter(personal_filter)
     
-    if status:
-        stmt = stmt.filter(models.Case.status == status)
-        base_count_stmt = base_count_stmt.filter(models.Case.status == status)
+    # 3. Dynamic Filtering
+    if status and str(status).strip().upper() not in ['ALL', '']:
+        if status == 'VERIFICATION':
+            # 'Processing' includes initial intake and active verification stages
+            s_filter = models.Case.status.in_(['PENDING', 'VERIFICATION'])
+        elif status == 'QC':
+            # 'Quality Check' includes all audit and quality assurance stages
+            s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QC_VERIFIED', 'QA_PENDING'])
+        else:
+            s_filter = models.Case.status == status
+            
+        stmt = stmt.filter(s_filter)
+        base_count_stmt = base_count_stmt.filter(s_filter)
     if batch_id:
         stmt = stmt.filter(models.Case.batch_id == batch_id)
         base_count_stmt = base_count_stmt.filter(models.Case.batch_id == batch_id)
@@ -580,6 +936,19 @@ async def read_cases(
         comp_filter = [models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
         stmt = stmt.filter(*comp_filter)
         base_count_stmt = base_count_stmt.filter(*comp_filter)
+
+    if from_date:
+        try:
+            f_date = datetime.strptime(from_date, "%Y-%m-%d")
+            stmt = stmt.filter(models.Case.received_date >= f_date)
+            base_count_stmt = base_count_stmt.filter(models.Case.received_date >= f_date)
+        except: pass
+    if to_date:
+        try:
+            t_date = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            stmt = stmt.filter(models.Case.received_date <= t_date)
+            base_count_stmt = base_count_stmt.filter(models.Case.received_date <= t_date)
+        except: pass
     
 
 
