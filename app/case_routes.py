@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Response, BackgroundTasks, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, update, delete
-from sqlalchemy.orm import contains_eager, joinedload, selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from typing import List, Optional, Dict, Any
 from . import models, schemas, enums
 from .database import get_async_db, SessionLocal
@@ -13,12 +13,12 @@ import requests
 import httpx
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
-import pandas as pd
 import io
 from .ocr_utils import get_scanner
 from . import notification_utils
+from . import email_utils
 from .ws import manager
-from .cache import delete_cache, cache_response, invalidate_dashboard_cache
+from .cache import delete_cache, get_cache, set_cache, invalidate_dashboard_cache
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
 from . import tat_utils
 from .logging_config import logger
@@ -64,7 +64,7 @@ async def get_insufficient_cases(
 @router.post("/{case_id}/resolve-insufficiency")
 async def resolve_insufficiency(
     case_id: str,
-    data: dict,
+    data: schemas.ResolveInsufficiencyRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
@@ -77,7 +77,7 @@ async def resolve_insufficiency(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     
-    remarks = data.get("remarks")
+    remarks = data.remarks
     if not remarks:
         raise HTTPException(status_code=400, detail="Remarks are mandatory for clearing insufficiency")
     
@@ -153,25 +153,31 @@ async def get_candidate_invitations(
 
 @router.post("/invite-candidate")
 async def invite_candidate(
-    data: dict,
+    data: schemas.InviteCandidateRequest,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """Create a new candidate and case in PENDING status for invitation."""
     # Create Candidate
     candidate = models.Candidate(
-        name=data.get("name"),
-        email=data.get("email"),
-        phone=data.get("phone"),
-        client_emp_code=data.get("emp_id")
+        name=data.name,
+        email=data.email,
+        phone=data.phone,
+        client_emp_code=data.emp_id
     )
     db.add(candidate)
     await db.flush()
     
     # Create Case
+    # Ensure customer_id is never None - fallback to current_user or provided data
+    final_customer_id = current_user.customer_id if (hasattr(current_user, 'customer_id') and current_user.customer_id) else data.customer_id
+    
+    if not final_customer_id:
+        raise HTTPException(status_code=400, detail="Customer association missing. Cannot create invitation.")
+
     new_case = models.Case(
         case_ref_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
-        customer_id=current_user.customer_id if current_user.role == enums.UserRole.CUSTOMER else data.get("customer_id"),
+        customer_id=final_customer_id,
         candidate_id=candidate.id,
         status=enums.CaseStatus.PENDING
     )
@@ -183,7 +189,7 @@ async def invite_candidate(
 @router.post("/{case_id}/send-bgv-link")
 async def send_bgv_link(
     case_id: str,
-    data: dict,
+    data: schemas.SendBgvLinkRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
@@ -196,19 +202,38 @@ async def send_bgv_link(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     
-    checks = data.get("checks", [])
-    # In a real app, you'd create VerificationCheck records here for selected types
+    # 1. Get existing check types for this case to avoid duplicates
+    existing_checks_res = await db.execute(select(models.VerificationCheck.check_type).filter(models.VerificationCheck.case_id == case.id))
+    existing_check_types = {c[0] for c in existing_checks_res.all()}
+
+    checks = data.checks
+    # Only add checks that don't already exist
     for check_type in checks:
-        new_check = models.VerificationCheck(
-            case_id=case.id,
-            check_type=check_type,
-            status=enums.CheckStatus.VERIFICATION
-        )
-        db.add(new_check)
+        if check_type not in existing_check_types:
+            new_check = models.VerificationCheck(
+                case_id=case.id,
+                check_type=check_type,
+                status=enums.CheckStatus.VERIFICATION
+            )
+            db.add(new_check)
     
     case.status = enums.CaseStatus.LINK_SHARED
     
-    # Trigger email (Mocking notification for now)
+    # Trigger email
+    # Generate the form link using frontend URL (you might want to configure this in .env later)
+    # For now, assuming the frontend runs on localhost:5173 or the domain
+    import os
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    form_link = f"{frontend_url}/candidate/form/{case.id}"
+    
+    if case.candidate and case.candidate.email:
+        background_tasks.add_task(
+            email_utils.send_bgv_invitation_email,
+            to_email=case.candidate.email,
+            candidate_name=case.candidate.name,
+            form_link=form_link
+        )
+    
     await notification_utils.create_notification(
         db, current_user.id, # Internal notification
         "BGV Link Shared",
@@ -221,12 +246,43 @@ async def send_bgv_link(
     await db.commit()
     return {"message": "BGV Link shared successfully"}
 
+@router.get("/{case_id}/public")
+async def get_case_public(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    """Fetch case details publicly for candidate self-service."""
+    stmt = select(models.Case).filter(models.Case.id == case_id).options(
+        joinedload(models.Case.candidate),
+        joinedload(models.Case.customer),
+        selectinload(models.Case.checks)
+    )
+    res = await db.execute(stmt)
+    case = res.scalar_one_or_none()
+    
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    
+    return {
+        "id": case.id,
+        "candidate": {
+            "name": case.candidate.name if case.candidate else "",
+            "email": case.candidate.email if case.candidate else "",
+            "phone": case.candidate.phone if case.candidate else "",
+            "emp_id": case.candidate.client_emp_code if case.candidate else "",
+            "dob": case.candidate.dob.isoformat() if case.candidate and case.candidate.dob else "",
+            "pan_no": case.candidate.pan_no if case.candidate else "",
+            "passport_no": case.candidate.passport_no if case.candidate else "",
+            "nationality": case.candidate.nationality if case.candidate else ""
+        },
+        "customer_name": case.customer.name if case.customer else "",
+        "status": case.status,
+        "checks": [chk.check_type for chk in case.checks]
+    }
+
 @router.post("/{case_id}/submit-documents")
 async def submit_candidate_documents(
     case_id: str,
+    payload: dict,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_async_db),
-    current_user: models.User = Depends(get_current_user)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Called when a candidate finishes submitting their documents via the BGV form.
@@ -238,7 +294,8 @@ async def submit_candidate_documents(
         .filter(models.Case.id == case_id)
         .options(
             joinedload(models.Case.candidate),
-            joinedload(models.Case.customer)
+            joinedload(models.Case.customer),
+            selectinload(models.Case.checks)
         )
     )
     res = await db.execute(stmt)
@@ -249,6 +306,104 @@ async def submit_candidate_documents(
 
     # Mark as documents submitted
     case.status = enums.CaseStatus.DOCUMENTS_SUBMITTED
+
+    candidate_data = payload.get("candidate_data", {})
+
+    # 1. Update Candidate Profile with fresh details
+    if case.candidate:
+        case.candidate.name = f"{candidate_data.get('first_name', '')} {candidate_data.get('last_name', '')}".strip()
+        case.candidate.email = candidate_data.get('email', case.candidate.email)
+        case.candidate.phone = candidate_data.get('contact_no', case.candidate.phone)
+        case.candidate.gender = candidate_data.get('gender', case.candidate.gender)
+        case.candidate.address = candidate_data.get('address', case.candidate.address)
+
+        dob_str = candidate_data.get('dob')
+        if dob_str:
+            try:
+                case.candidate.dob = datetime.strptime(dob_str, "%Y-%m-%d").date()
+            except:
+                pass
+
+    # 2. Map sections to check types and store data
+    section_mapping = {
+        'identities': ['identity', 'aadhaar', 'pan'],
+        'educations': ['education'],
+        'employments': ['employment'],
+        'criminal': ['criminal'],
+        'credit': ['credit', 'cibil'],
+        'global': ['global'],
+        'database': ['database'],
+        'drug_tests': ['drug'],
+        'references': ['reference'],
+        'social_media': ['social'],
+        'addresses': ['address', 'resident']
+    }
+
+    for check in case.checks:
+        check_type = check.check_type.lower()
+        target_section = None
+        for section, types in section_mapping.items():
+            if any(t in check_type for t in types):
+                target_section = section
+                break
+
+        if target_section and target_section in candidate_data:
+            # Store the specific records for this module
+            section_data = candidate_data[target_section]
+            check.data = section_data
+
+    # 3. Synchronize data to Candidate model for unified view (Registry/Detail)
+    if case.candidate:
+        details = case.candidate.address_details or {}
+        all_docs = list(case.candidate.documents or [])
+        
+        # Mapping for unified registry structure
+        registry_map = {
+            'identities': 'identities',
+            'educations': 'educations',
+            'employments': 'employments',
+            'criminal': 'criminal_records',
+            'credit': 'cibil_checks',
+            'global': 'global_database_checks',
+            'database': 'global_database_checks',
+            'drug_tests': 'drug_tests',
+            'references': 'references',
+            'social_media': 'social_media_details',
+            'addresses': 'addresses'
+        }
+
+        for section, target_key in registry_map.items():
+            if section in candidate_data:
+                details[target_key] = candidate_data[section]
+                
+                # Extract any uploaded documents from this section
+                if isinstance(candidate_data[section], list):
+                    for record in candidate_data[section]:
+                        if isinstance(record, dict) and 'files' in record:
+                            for f in record['files']:
+                                # Add check_type to the file metadata for filtering in UI
+                                f_copy = dict(f)
+                                f_copy['check_type'] = section.capitalize()
+                                if section == 'educations': f_copy['check_type'] = 'Educational'
+                                elif section == 'criminal': f_copy['check_type'] = 'Criminal'
+                                elif section == 'drug_tests': f_copy['check_type'] = 'Drug'
+                                elif section == 'addresses': f_copy['check_type'] = 'Address'
+                                elif section == 'employments': f_copy['check_type'] = 'Employment'
+                                elif section == 'identities': f_copy['check_type'] = 'Identity'
+                                elif section == 'references': f_copy['check_type'] = 'Reference'
+                                elif section == 'credit': f_copy['check_type'] = 'CIBIL'
+                                elif section == 'global': f_copy['check_type'] = 'Global Database'
+                                elif section == 'social_media': f_copy['check_type'] = 'Social'
+                                else: f_copy['check_type'] = section.capitalize()
+                                
+                                # Avoid duplicates
+                                if not any(existing.get('public_id') == f_copy.get('public_id') for existing in all_docs):
+                                    all_docs.append(f_copy)
+        
+        case.candidate.address_details = details
+        case.candidate.documents = all_docs
+        # Force session refresh if needed
+        db.add(case.candidate)
 
     # Find the customer's primary user account to notify
     customer_user = None
@@ -282,9 +437,9 @@ async def submit_candidate_documents(
     return {"message": "Documents submitted successfully. Notifications sent to the client and internal team."}
 
 @router.post("/bulk-mark-insufficient")
-async def bulk_mark_insufficient(data: dict[str, Any], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
-    case_ids = data.get("case_ids", [])
-    reason = data.get("reason", "Incomplete documentation")
+async def bulk_mark_insufficient(data: schemas.BulkInsufficientRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    case_ids = data.case_ids
+    reason = data.reason or "Incomplete documentation"
     
     if not case_ids:
         raise HTTPException(status_code=400, detail="No cases selected")
@@ -533,8 +688,14 @@ async def get_strategic_mis(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
-@cache_response(ttl=300, key_prefix="case_history")
 async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db)):
+    # Use per-case cache key to avoid cross-case cache collisions
+    cache_key = f"case_history:{case_id}"
+    from .cache import get_cache, set_cache
+    cached = await get_cache(cache_key)
+    if cached is not None:
+        return cached
+
     stmt = select(models.AuditLog, models.User.full_name).join(models.User, models.AuditLog.user_id == models.User.id).filter(models.AuditLog.resource_id == case_id).order_by(models.AuditLog.timestamp.desc())
     res = await db.execute(stmt)
     history = []
@@ -543,9 +704,10 @@ async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db
             "id": log.id,
             "action": log.action,
             "details": log.details,
-            "timestamp": log.timestamp,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
             "user_name": name
         })
+    await set_cache(cache_key, history, ttl=300)
     return history
 
 @router.post("", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
@@ -1174,15 +1336,11 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
             case_data.out_tat = total_days - allowed
 
     return case_data
-class BulkActionRequest(schemas.BaseModel):
-    case_ids: List[str]
-    action: str
-    target_value: Optional[str] = None
 
 @router.post("/face-match")
-async def face_match(req: dict, current_user: models.User = Depends(get_current_user)):
-    url1 = req.get("url1") # ID Photo
-    url2 = req.get("url2") # Profile/Selfie Photo
+async def face_match(req: schemas.FaceMatchRequest, current_user: models.User = Depends(get_current_user)):
+    url1 = req.url1  # ID Photo
+    url2 = req.url2  # Profile/Selfie Photo
     
     if not url1 or not url2:
         return {"success": False, "message": "Missing URLs"}
@@ -1755,11 +1913,9 @@ async def merge_pdfs(case_id: str, request: Request, background_tasks: Backgroun
     return {"message": "PDF merge queued"}
 
 @router.post("/bulk-allocate")
-async def bulk_allocate(data: dict[str, Any], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
-    case_ids = data.get("case_ids", [])
-    user_id = data.get("user_id")
-    import logging
-    logger = logging.getLogger(__name__)
+async def bulk_allocate(data: schemas.BulkAllocateRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    case_ids = data.case_ids
+    user_id = data.user_id
     logger.info(f"Bulk allocate requested for user_id: {user_id}, case_count: {len(case_ids)}")
     
     update_vals = {
@@ -1806,8 +1962,8 @@ async def bulk_allocate(data: dict[str, Any], background_tasks: BackgroundTasks,
     return {"message": "Success"}
 
 @router.post("/ocr-extract")
-async def ocr_extract(data: Dict[str, str], background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
-    url = data.get("url")
+async def ocr_extract(data: schemas.OcrExtractRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db)):
+    url = data.url
     if not url: raise HTTPException(status_code=400, detail="Document URL required")
     
     try:

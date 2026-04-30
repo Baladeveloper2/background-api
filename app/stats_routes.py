@@ -198,9 +198,9 @@ async def get_dashboard_stats(
         # We calculate these based on VerificationCheck statuses
         check_counts_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).group_by(models.VerificationCheck.status)
         if filter_customer:
-            check_counts_stmt = check_counts_stmt.join(models.Case).filter(models.Case.customer_id == current_user.customer_id)
+            check_counts_stmt = check_counts_stmt.join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(models.Case.customer_id == current_user.customer_id)
         elif filter_verifier:
-            check_counts_stmt = check_counts_stmt.join(models.Case).filter(models.Case.assigned_to == current_user.id)
+            check_counts_stmt = check_counts_stmt.join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(models.Case.assigned_to == current_user.id)
         
         if filter_start: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date >= filter_start)
         if filter_end: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date < filter_end)
@@ -224,7 +224,8 @@ async def get_dashboard_stats(
             "today_entry": int(today_entry),
             "today_entry_percent": 0.0,
             "insufficient_cases": int(status_counts.get(models.CaseStatus.INSUFFICIENT.value, 0)),
-            "interim_cases": sum(status_counts.get(s.value if hasattr(s, "value") else str(s), 0) for s in [models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, models.CaseStatus.QC_PENDING, models.CaseStatus.QA_PENDING]),
+            "candidate_submissions_count": int(status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0)),
+            "interim_cases": sum(status_counts.get(s.value if hasattr(s, "value") else str(s), 0) for s in [models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, models.CaseStatus.QC_PENDING, models.CaseStatus.QA_PENDING, models.CaseStatus.DOCUMENTS_SUBMITTED]),
             "total_clients": int(total_customers),
             "top_client": "Global Logistics Hub" if total_customers > 0 else "N/A",
             "pending_verification": int(status_counts.get(models.CaseStatus.PENDING.value, 0) + status_counts.get(models.CaseStatus.VERIFICATION.value, 0)),
@@ -928,7 +929,7 @@ async def export_dashboard_report(
                 models.Case.received_date < month_end,
                 models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, "QC_PENDING", "QA_PENDING"])
             )
-            check_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).join(models.Case).filter(
+            check_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(
                 models.Case.received_date >= curr,
                 models.Case.received_date < month_end
             ).group_by(models.VerificationCheck.status)

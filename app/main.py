@@ -144,12 +144,14 @@ async def presence_handler(websocket: WebSocket, case_id: str):
     # Extract user_id from token if possible, or use anonymous
     token = websocket.query_params.get("token")
     user_id = "anonymous"
-    if token and "." in token:
+    if token:
         try:
-            import base64
-            payload = json.loads(base64.b64decode(token.split(".")[1] + "==").decode())
+            from jose import jwt
+            from . import auth
+            payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
             user_id = payload.get("id", payload.get("sub", "anonymous"))
-        except:
+        except Exception as e:
+            logger.error(f"WebSocket JWT validation failed: {str(e)}")
             pass
             
     await manager.connect(websocket, user_id)

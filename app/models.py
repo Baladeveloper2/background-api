@@ -131,17 +131,17 @@ class Candidate(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), nullable=False, index=True)
     email = Column(String(255), index=True)
-    phone = Column(String(20))
+    phone = Column(String(20), index=True)
     dob = Column(Date)
-    client_emp_code = Column(String(50), nullable=True)
+    client_emp_code = Column(String(50), nullable=True, index=True)
     address_details = Column(JSONEncodedDict)
     gender = Column(String(20), nullable=True)
     address = Column(Text, nullable=True)
     documents = Column(JSONEncodedList)
     
     # Global Database / Identity specialized fields
-    pan_no = Column(String(50), nullable=True)
-    passport_no = Column(String(50), nullable=True)
+    pan_no = Column(String(50), nullable=True, index=True)
+    passport_no = Column(String(50), nullable=True, index=True)
     nationality = Column(String(100), nullable=True)
     identity_type = Column(String(100), nullable=True)
     db_candidate_name = Column(String(255), nullable=True)
@@ -215,7 +215,7 @@ class VerificationCheck(Base):
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(36), ForeignKey("users.id"))
+    user_id = Column(String(36), ForeignKey("users.id"), index=True)
     action = Column(String(255), index=True)
     resource_id = Column(String(100), index=True, nullable=True)
     details = Column(Text)

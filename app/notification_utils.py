@@ -46,7 +46,7 @@ async def create_notification(
                 "message": notif.message,
                 "category": category.value if hasattr(category, 'value') else category,
                 "case_id": case_id,
-                "case_ref": notif.case_ref, # Assuming relationship or loaded
+                "case_ref": "", # Remove invalid attribute access
                 "extra_data": extra_data,
                 "is_read": 0,
                 "created_at": datetime.utcnow().isoformat()

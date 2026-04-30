@@ -189,7 +189,7 @@ class VerificationCheckBase(BaseModel):
     case_id: str
     check_type: str
     status: CheckStatus = CheckStatus.INTERIM
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[Any] = None
     digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
     rate: Optional[float] = 0.0
@@ -207,7 +207,7 @@ class VerificationCheckCreate(VerificationCheckBase):
 class VerificationCheckUpdate(BaseModel):
     check_type: Optional[str] = None
     status: Optional[CheckStatus] = None
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[Any] = None
     digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
     verified_date: Optional[datetime] = None
@@ -255,7 +255,7 @@ class Customer(CustomerBase):
 
 class CaseBase(BaseModel):
     case_ref_no: Optional[str] = None
-    customer_id: str
+    customer_id: Optional[str] = None
     candidate_id: Optional[str] = None
     batch_id: Optional[str] = None
     status: CaseStatus = CaseStatus.PENDING
@@ -453,6 +453,7 @@ class DashboardStats(BaseModel):
     entry_pending_count: int = 0
     verification_pending_count: int = 0
     at_risk_count: int = 0
+    candidate_submissions_count: int = 0
     positive_count: int = 0
     negative_count: int = 0
     amber_count: int = 0
@@ -567,3 +568,30 @@ class NotificationRead(BaseModel):
 class NotificationMarkRead(BaseModel):
     notification_ids: List[str]
 
+class ResolveInsufficiencyRequest(BaseModel):
+    remarks: str
+
+class SendBgvLinkRequest(BaseModel):
+    checks: List[str]
+
+class BulkInsufficientRequest(BaseModel):
+    case_ids: List[str]
+    reason: Optional[str] = "Incomplete documentation"
+
+class InviteCandidateRequest(BaseModel):
+    name: str
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    emp_id: Optional[str] = None
+    customer_id: Optional[str] = None
+
+class BulkAllocateRequest(BaseModel):
+    case_ids: List[str]
+    user_id: Optional[str] = None
+
+class FaceMatchRequest(BaseModel):
+    url1: str
+    url2: str
+
+class OcrExtractRequest(BaseModel):
+    url: str

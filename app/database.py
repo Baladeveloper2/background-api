@@ -43,17 +43,27 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
 
 Base = declarative_base()
 
+from contextlib import asynccontextmanager
+
 # Async Dependency (Primary/Write)
+@asynccontextmanager
+async def get_async_db_context():
+    async with AsyncSessionLocal() as session:
+        yield session
+
 async def get_async_db():
     async with AsyncSessionLocal() as session:
-        try: yield session
-        finally: await session.close()
+        yield session
 
 # Async Dependency (Read-Only/Reporting)
+@asynccontextmanager
+async def get_read_db_context():
+    async with ReadSessionLocal() as session:
+        yield session
+
 async def get_read_db():
     async with ReadSessionLocal() as session:
-        try: yield session
-        finally: await session.close()
+        yield session
 
 # Sync Dependency
 def get_db():
