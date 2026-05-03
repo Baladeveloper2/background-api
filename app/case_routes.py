@@ -168,17 +168,66 @@ async def invite_candidate(
     db.add(candidate)
     await db.flush()
     
-    # Create Case
     # Ensure customer_id is never None - fallback to current_user or provided data
     final_customer_id = current_user.customer_id if (hasattr(current_user, 'customer_id') and current_user.customer_id) else data.customer_id
     
     if not final_customer_id:
         raise HTTPException(status_code=400, detail="Customer association missing. Cannot create invitation.")
 
+    # Retrieve Customer for shortcode
+    customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == final_customer_id))
+    customer = customer_res.scalar_one_or_none()
+
+    # Standardized prefix: CL-{SHORTCODE}
+    sc = customer.short_code if customer and customer.short_code else (customer.name[:3].upper() if customer else "BGV")
+    prefix = f"CL-{sc}-"
+
+    # Get the current total count to start with
+    count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.customer_id == final_customer_id))
+    count = count_res.scalar() or 0
+
+    # Collision loop: Ensure unique reference number
+    suffix_num = count + 1
+    while True:
+        case_ref = f"{prefix}{str(suffix_num).zfill(3)}"
+        exists_res = await db.execute(select(models.Case.id).filter(models.Case.case_ref_no == case_ref))
+        if not exists_res.scalar_one_or_none():
+            break
+        suffix_num += 1
+
+    # Find or create a daily batch for this customer
+    from datetime import datetime
+    date_str = datetime.utcnow().strftime('%Y-%m-%d')
+    batch_name = f"Batch-{sc}-{date_str}"
+    
+    batch_stmt = select(models.Batch).filter(
+        models.Batch.customer_id == final_customer_id, 
+        models.Batch.batch_no == batch_name
+    ).limit(1)
+    batch_res = await db.execute(batch_stmt)
+    inv_batch = batch_res.scalar_one_or_none()
+
+    if not inv_batch:
+        batch_count_res = await db.execute(select(func.count(models.Batch.id)).filter(models.Batch.customer_id == final_customer_id))
+        batch_count = batch_count_res.scalar() or 0
+        inv_batch = models.Batch(
+            customer_id=final_customer_id,
+            batch_no=batch_name,
+            cl_ref_no=f"CL-{sc}-{(batch_count + 1):03d}",
+            cases_count=0,
+            upload_date=datetime.utcnow()
+        )
+        db.add(inv_batch)
+        await db.flush()
+        
+    # Increment cases count for the batch
+    inv_batch.cases_count = (inv_batch.cases_count or 0) + 1
+
     new_case = models.Case(
-        case_ref_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
+        case_ref_no=case_ref,
         customer_id=final_customer_id,
         candidate_id=candidate.id,
+        batch_id=inv_batch.id,
         status=enums.CaseStatus.PENDING
     )
     db.add(new_case)
@@ -1068,6 +1117,11 @@ async def read_cases(
             
         stmt = stmt.filter(s_filter)
         base_count_stmt = base_count_stmt.filter(s_filter)
+    else:
+        # If 'ALL' or no specific status, exclude cases that are still in self-onboarding/data-entry phase
+        exclude_filter = ~models.Case.status.in_([models.CaseStatus.LINK_SHARED, models.CaseStatus.DOCUMENTS_SUBMITTED])
+        stmt = stmt.filter(exclude_filter)
+        base_count_stmt = base_count_stmt.filter(exclude_filter)
     if batch_id:
         stmt = stmt.filter(models.Case.batch_id == batch_id)
         base_count_stmt = base_count_stmt.filter(models.Case.batch_id == batch_id)
@@ -1097,13 +1151,21 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
     if assigned is not None:
         if assigned:
-            active_filter = [models.Case.assigned_to != None, models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
+            # Active Allocations: Must have a verifier AND be in an active work status (not Pending/Docs Submitted)
+            active_filter = [
+                models.Case.assigned_to != None, 
+                models.Case.status.notin_(['COMPLETED', 'completed', 'Completed', 'PENDING', 'DOCUMENTS_SUBMITTED', 'LINK_SHARED'])
+            ]
             stmt = stmt.filter(*active_filter)
             base_count_stmt = base_count_stmt.filter(*active_filter)
         else:
-            unassigned_filter = [models.Case.assigned_to == None, models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
-            stmt = stmt.filter(*unassigned_filter)
-            base_count_stmt = base_count_stmt.filter(*unassigned_filter)
+            # Unassigned cases: No verifier OR still in Pending/Submission phase
+            unassigned_filter = or_(
+                models.Case.assigned_to == None,
+                models.Case.status.in_(['PENDING', 'DOCUMENTS_SUBMITTED', 'LINK_SHARED'])
+            )
+            stmt = stmt.filter(unassigned_filter)
+            base_count_stmt = base_count_stmt.filter(unassigned_filter)
     
     if exclude_completed:
         comp_filter = [models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
@@ -1416,6 +1478,10 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
         update_data["assigned_at"] = datetime.utcnow()
     elif req.action == "status":
         update_data["status"] = req.target_value
+        if req.target_value == models.CaseStatus.PENDING:
+            # When moving back to Pending (e.g. Cross-Check), clear current assignment
+            update_data["assigned_to"] = None
+            update_data["assigned_at"] = None
         if req.target_value == models.CaseStatus.COMPLETED:
             update_data["completed_date"] = datetime.utcnow()
             # Attribute audit/completion to the actor
@@ -1739,6 +1805,11 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
             elif key == "assigned_to":
                 await create_audit_log(db, current_user.id, "CASE_ASSIGNMENT", f"Case assigned to user ID {value}", resource_id=case_id)
         setattr(db_case, key, value)
+    
+    # Auto-transition from DOCS_SUBMITTED/LINK_SHARED to PENDING upon data entry complete
+    if not update_data.get("status") and db_case.status in [models.CaseStatus.DOCUMENTS_SUBMITTED, models.CaseStatus.LINK_SHARED]:
+        if candidate_update_data or services_update is not None:
+            db_case.status = models.CaseStatus.PENDING
     
     # Update or Create Candidate
     if candidate_update_data:
