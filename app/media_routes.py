@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional
 import io
@@ -26,6 +26,18 @@ router = APIRouter(prefix="/media", tags=["media"])
 load_dotenv(override=True)
 
 from .aws_utils import s3_client, aws_bucket, aws_region
+
+@router.get("/local/{path:path}")
+async def get_local_media(path: str):
+    file_path = os.path.join("uploads", path)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Local file not found")
+    
+    # Optional: Add mimetype detection
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(file_path)
+    
+    return FileResponse(file_path, media_type=mime_type or "application/octet-stream")
 
 # Cloudinary fallback
 cloudinary_url = os.getenv('CLOUDINARY_URL')

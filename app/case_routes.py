@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Response, BackgroundTasks, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, update, delete
+from sqlalchemy import select, func, or_, and_, text, update, delete
 from sqlalchemy.orm import joinedload, selectinload
 from typing import List, Optional, Dict, Any
 from . import models, schemas, enums
@@ -721,8 +721,10 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
     if not case.case_ref_no:
         customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case.customer_id))
         customer = customer_res.scalar_one_or_none()
-        customer_name = customer.name if customer and customer.name else "BGV"
-        prefix = customer_name[:3].upper()
+        
+        # Standardized prefix: CL-{SHORTCODE}
+        sc = customer.short_code if customer and customer.short_code else (customer.name[:3].upper() if customer else "BGV")
+        prefix = f"CL-{sc}-"
         
         count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.customer_id == case.customer_id))
         count = count_res.scalar() or 0
@@ -763,8 +765,10 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     if not case_data.case_ref_no:
         customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case_data.customer_id))
         customer = customer_res.scalar_one_or_none()
-        customer_name = customer.name if customer and customer.name else "BGV"
-        prefix = customer_name[:3].upper()
+        
+        # Standardized prefix: CL-{SHORTCODE}
+        sc = customer.short_code if customer and customer.short_code else (customer.name[:3].upper() if customer else "BGV")
+        prefix = f"CL-{sc}-"
         
         # Get the current total count to start with
         count_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.customer_id == case_data.customer_id))
@@ -993,6 +997,7 @@ async def read_cases(
     order: str = "desc",
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    at_risk: Optional[bool] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -1053,11 +1058,11 @@ async def read_cases(
     # 3. Dynamic Filtering
     if status and str(status).strip().upper() not in ['ALL', '']:
         if status == 'VERIFICATION':
-            # 'Processing' includes initial intake and active verification stages
-            s_filter = models.Case.status.in_(['PENDING', 'VERIFICATION'])
+            # WIP: strictly only active verification stage, not pending intake
+            s_filter = models.Case.status == 'VERIFICATION'
         elif status == 'QC':
-            # 'Quality Check' includes all audit and quality assurance stages
-            s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QC_VERIFIED', 'QA_PENDING'])
+            # QC Pending: active QC stages only — exclude QC_VERIFIED (finalized)
+            s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QA_PENDING'])
         else:
             s_filter = models.Case.status == status
             
@@ -1117,6 +1122,23 @@ async def read_cases(
             stmt = stmt.filter(models.Case.received_date <= t_date)
             base_count_stmt = base_count_stmt.filter(models.Case.received_date <= t_date)
         except: pass
+
+    if at_risk is not None and at_risk:
+        # Include both actual breaches and cases approaching breach
+        # BUT exclude finalized/archived cases
+        risk_threshold = datetime.utcnow() - timedelta(days=7)
+        risk_filter = and_(
+            models.Case.status.notin_(['COMPLETED', 'QC_VERIFIED']),
+            or_(
+                models.Case.is_in_tat == 0,
+                models.Case.received_date < risk_threshold
+            )
+        )
+        stmt = stmt.filter(risk_filter)
+        base_count_stmt = base_count_stmt.filter(risk_filter)
+    elif at_risk is not None and not at_risk:
+        stmt = stmt.filter(models.Case.is_in_tat == 1)
+        base_count_stmt = base_count_stmt.filter(models.Case.is_in_tat == 1)
     
 
 
@@ -1191,7 +1213,7 @@ async def read_cases(
             p_tat = tat_utils.calculate_predictive_tat(check_types)
             case_data.predicted_tat = p_tat
             # Suppress risk alerts for archived protocols
-            if str(case.status).upper() == "COMPLETED":
+            if str(case.status).upper() in ["COMPLETED", "QC_VERIFIED"]:
                 case_data.is_at_risk = False
             else:
                 case_data.is_at_risk = tat_utils.check_is_at_risk(case.received_date, p_tat)

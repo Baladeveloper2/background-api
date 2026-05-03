@@ -51,6 +51,16 @@ async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSe
     if not batch.batch_no:
         batch.batch_no = await get_next_batch_number(db)
         
+    if not batch.cl_ref_no:
+        customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == batch.customer_id))
+        customer = customer_res.scalar_one_or_none()
+        sc = customer.short_code if customer and customer.short_code else (customer.name[:3].upper() if customer else "CL")
+        
+        # Count existing batches for this customer to get next sequence
+        count_res = await db.execute(select(func.count(models.Batch.id)).filter(models.Batch.customer_id == batch.customer_id))
+        count = count_res.scalar() or 0
+        batch.cl_ref_no = f"CL-{sc}-{(count + 1):03d}"
+        
     db_batch = models.Batch(**batch.dict())
     db.add(db_batch)
     await db.commit()
@@ -60,7 +70,6 @@ async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSe
     return db_batch
 
 @router.get("/summary", response_model=List[schemas.BatchSummary])
-@cache_response(ttl=120, key_prefix="batches")
 async def read_batches_summary(
     response: Response,
     skip: int = 0,
@@ -80,6 +89,8 @@ async def read_batches_summary(
         func.sum(case((models.Case.status == models.CaseStatus.VERIFICATION, 1), else_=0)).label("verification_active_count"),
         func.sum(case((models.Case.status == models.CaseStatus.QC, 1), else_=0)).label("qc_active_count"),
         func.sum(case((models.Case.status == models.CaseStatus.QA_PENDING, 1), else_=0)).label("qa_pending_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.DOCUMENTS_SUBMITTED, 1), else_=0)).label("docs_submitted_count"),
+        func.sum(case((models.Case.status == models.CaseStatus.LINK_SHARED, 1), else_=0)).label("link_shared_count"),
         func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
         func.sum(case((models.Case.status.in_([models.CaseStatus.VERIFICATION, models.CaseStatus.QC]), 1), else_=0)).label("in_progress_count"),
         func.max(models.Case.completed_date).label("completed_date")
@@ -96,6 +107,7 @@ async def read_batches_summary(
     stmt = select(
         models.Batch.id,
         models.Batch.batch_no,
+        models.Batch.cl_ref_no,
         models.Batch.customer_id,
         models.Customer.name.label("customer_name"),
         models.Batch.upload_date,
@@ -109,6 +121,8 @@ async def read_batches_summary(
         case_counts.c.verification_active_count,
         case_counts.c.qc_active_count,
         case_counts.c.qa_pending_count,
+        case_counts.c.docs_submitted_count,
+        case_counts.c.link_shared_count,
         case_counts.c.completed_count,
         case_counts.c.in_progress_count,
         case_counts.c.completed_date,
@@ -150,24 +164,19 @@ async def read_batches_summary(
         intended_count = int(r.cases_count or 0)
         pending_total = int(r.total_pending_count or 0)
 
-        if pending_total == 0 and actual_count > 0 and actual_count >= intended_count:
-            batch_status = "Finalized"
-        elif (r.qa_pending_count or 0) > 0:
-            batch_status = "QA Pending"
-        elif (r.qc_active_count or 0) > 0:
-            batch_status = "QC Pending"
-        elif (r.verification_active_count or 0) > 0:
-            batch_status = "In Verification"
-        elif actual_count < intended_count:
-            batch_status = "Entry Pending"
-        elif (r.pending_arrival_count or 0) > 0:
-            batch_status = "Ready for Verification"
+        if pending_total == 0 and actual_count > 0:
+            batch_status = "Completed"
+        elif (r.verification_active_count or 0) > 0 or (r.qc_active_count or 0) > 0 or (r.qa_pending_count or 0) > 0 or (r.docs_submitted_count or 0) > 0 or (r.link_shared_count or 0) > 0:
+            batch_status = "In Progress"
+        elif actual_count >= intended_count and actual_count > 0:
+            batch_status = "Data Entry Completed"
         else:
-            batch_status = "Active"
+            batch_status = "In Progress"
 
         summaries.append({
             "id": r.id,
             "batch_no": r.batch_no,
+            "cl_ref_no": r.cl_ref_no,
             "customer_id": r.customer_id,
             "customer_name": r.customer_name,
             "upload_date": r.upload_date,

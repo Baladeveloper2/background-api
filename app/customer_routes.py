@@ -14,6 +14,7 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 @router.post("", response_model=schemas.Customer)
 async def create_customer(
     name: str = Form(...),
+    short_code: Optional[str] = Form(None),
     city: Optional[str] = Form(None),
     contact_person: Optional[str] = Form(None),
     phone: Optional[str] = Form(None),
@@ -39,8 +40,15 @@ async def create_customer(
         )
         file_path = file_name
 
+    # Check short_code uniqueness
+    if short_code:
+        existing = db.query(models.Customer).filter(models.Customer.short_code == short_code).first()
+        if existing:
+            raise HTTPException(status_code=400, detail=f"Shortcode '{short_code}' is already assigned to another client.")
+
     db_customer = models.Customer(
         name=name,
+        short_code=short_code,
         city=city,
         contact_person=contact_person,
         phone=phone,
@@ -75,7 +83,7 @@ def list_customers(
     query = db.query(
         models.Customer, 
         batch_counts_subq.c.total_batches
-    ).outerjoin(batch_counts_subq, models.Customer.id == batch_counts_subq.c.customer_id)
+    ).outerjoin(batch_counts_subq, models.Customer.id == batch_counts_subq.c.customer_id).order_by(models.Customer.created_at.desc())
     
     if is_customer and current_user.customer_id:
         query = query.filter(models.Customer.id == current_user.customer_id)
@@ -111,6 +119,7 @@ def get_customer(
 async def update_customer(
     customer_id: str,
     name: Optional[str] = Form(None),
+    short_code: Optional[str] = Form(None),
     city: Optional[str] = Form(None),
     contact_person: Optional[str] = Form(None),
     phone: Optional[str] = Form(None),
@@ -132,6 +141,14 @@ async def update_customer(
     if email is not None: db_customer.email = email
     if address is not None: db_customer.address = address
     if status is not None: db_customer.status = status
+
+    if short_code is not None:
+        # Check uniqueness if changed
+        if short_code != db_customer.short_code:
+            existing = db.query(models.Customer).filter(models.Customer.short_code == short_code).first()
+            if existing:
+                raise HTTPException(status_code=400, detail=f"Shortcode '{short_code}' is already assigned to another client.")
+        db_customer.short_code = short_code
 
     if agreement_file and s3_client and aws_bucket:
         file_ext = os.path.splitext(agreement_file.filename)[1]

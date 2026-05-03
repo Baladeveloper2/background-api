@@ -89,11 +89,11 @@ app.add_middleware(
 @app.middleware("http")
 async def add_security_headers(request, call_next):
     response = await call_next(request)
-    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: https://res.cloudinary.com https://*.amazonaws.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com;"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: http://localhost:8000 https://res.cloudinary.com https://*.amazonaws.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'self' http://localhost:5173;"
     return response
 
 # Versioned API Router

@@ -86,6 +86,7 @@ class Customer(Base):
     __tablename__ = "customers"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), index=True)
+    short_code = Column(String(50), unique=True, index=True, nullable=True)
     city = Column(String(100), nullable=True)
     contact_person = Column(String(255))
     phone = Column(String(50))
@@ -155,6 +156,7 @@ class Batch(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     customer_id = Column(String(36), ForeignKey("customers.id"), index=True)
     batch_no = Column(String(50), unique=True, index=True)
+    cl_ref_no = Column(String(50), nullable=True, index=True)
     upload_date = Column(DateTime(timezone=True), server_default=func.now())
     file_url = Column(String(255))
     cases_count = Column(Integer, default=0)

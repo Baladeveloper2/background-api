@@ -139,6 +139,7 @@ class Candidate(CandidateBase):
 class BatchBase(BaseModel):
     customer_id: str
     batch_no: Optional[str] = None
+    cl_ref_no: Optional[str] = None
     file_url: Optional[str] = None
     cases_count: Optional[int] = 0
     tat_days: Optional[int] = 10
@@ -224,6 +225,7 @@ class VerificationCheck(VerificationCheckBase):
 
 class CustomerBase(BaseModel):
     name: str
+    short_code: Optional[str] = None
     city: Optional[str] = None
     contact_person: Optional[str] = None
     phone: Optional[str] = None
@@ -467,6 +469,7 @@ class DashboardStats(BaseModel):
     geo_data: List[GeoPoint] = []
     execution_stats: List[ExecutionPoint] = []
     activity_log: List[ActivityLogItem] = []
+    status_counts: Dict[str, int] = {}
 class DailyStat(BaseModel):
     customer: str
     received: int

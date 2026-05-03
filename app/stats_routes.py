@@ -84,7 +84,17 @@ async def get_dashboard_stats(
         rev_cust_res = await db.execute(rev_cust_stmt)
         
         status_rows = status_res.all()
-        status_counts = {str(row[0].value if hasattr(row[0], "value") else row[0]): int(row[1] or 0) for row in status_rows}
+        # Robust mapping: ensure we get the string value of the status
+        status_counts = {}
+        for row in status_rows:
+            status_val = str(row[0].value if hasattr(row[0], "value") else row[0])
+            status_counts[status_val] = int(row[1] or 0)
+        
+        # Ensure all expected keys exist to avoid undefined in frontend
+        expected_statuses = ['PENDING', 'VERIFICATION', 'QC', 'QC_PENDING', 'QA_PENDING', 'COMPLETED', 'INSUFFICIENT', 'LINK_SHARED', 'DOCUMENTS_SUBMITTED']
+        for s in expected_statuses:
+            if s not in status_counts:
+                status_counts[s] = 0
         
         total_candidates = sum(status_counts.values())
         total_completed = status_counts.get(models.CaseStatus.COMPLETED.value, 0)
@@ -169,30 +179,34 @@ async def get_dashboard_stats(
         # But we still need check_types for Predictive TAT.
         # Let's count cases where (now - received_date) > 0.7 * predictive_tat
         # For simplicity, we'll keep the loop but use a more targeted query
-        risk_stmt = select(models.Case.id, models.Case.received_date).filter(models.Case.status.in_([models.CaseStatus.VERIFICATION, models.CaseStatus.QC]))
-        if filter_verifier: risk_stmt = risk_stmt.filter(models.Case.assigned_to == current_user.id)
+        active_risk_statuses = [
+            models.CaseStatus.PENDING, 
+            models.CaseStatus.VERIFICATION, 
+            models.CaseStatus.QC, 
+            models.CaseStatus.QC_PENDING, 
+            models.CaseStatus.QA_PENDING, 
+            models.CaseStatus.DOCUMENTS_SUBMITTED
+        ]
+        # Optimized: matches read_cases filter exactly
+        risk_threshold = datetime.utcnow() - timedelta(days=7)
+        at_risk_q = select(func.count(models.Case.id)).filter(
+            models.Case.status.notin_(['COMPLETED', 'QC_VERIFIED']),
+            or_(
+                models.Case.is_in_tat == 0,
+                models.Case.received_date < risk_threshold
+            )
+        )
+        if filter_verifier: 
+            at_risk_q = at_risk_q.filter(models.Case.assigned_to == current_user.id)
+        elif filter_customer:
+            at_risk_q = at_risk_q.filter(models.Case.customer_id == current_user.customer_id)
         
-        risk_res = await db.execute(risk_stmt)
-        at_risk_count: int = 0
-        # For each case, we need its checks to calculate predictive TAT
-        # This is the last intensive part.
-        case_ids = [r[0] for r in risk_res.all()]
-        if case_ids:
-            checks_stmt = select(models.VerificationCheck.case_id, models.VerificationCheck.check_type).filter(models.VerificationCheck.case_id.in_(case_ids))
-            checks_res = await db.execute(checks_stmt)
-            case_checks = {}
-            for r in checks_res.all():
-                if r[0] not in case_checks: case_checks[r[0]] = []
-                case_checks[r[0]].append(r[1])
+        # Apply date filters to match terminal view
+        if filter_start: at_risk_q = at_risk_q.filter(models.Case.received_date >= filter_start)
+        if filter_end: at_risk_q = at_risk_q.filter(models.Case.received_date < filter_end)
             
-            # Re-fetch received dates for the loop
-            risk_stmt_2 = select(models.Case.id, models.Case.received_date).filter(models.Case.id.in_(case_ids))
-            risk_res_2 = await db.execute(risk_stmt_2)
-            for cid, r_date in risk_res_2.all():
-                if not r_date: continue
-                p_tat = tat_utils.calculate_predictive_tat(case_checks.get(cid, []))
-                if tat_utils.check_is_at_risk(r_date, p_tat):
-                    at_risk_count += 1
+        at_risk_res = await db.execute(at_risk_q)
+        at_risk_count = at_risk_res.scalar() or 0
 
         # 7. Specific Result Counts (Positive, Negative, Amber, Stop)
         # We calculate these based on VerificationCheck statuses
@@ -216,6 +230,25 @@ async def get_dashboard_stats(
         assigned_res = await db.execute(assigned_stmt)
         total_assigned = assigned_res.scalar() or 0
 
+        # 8. Total Batches
+        batch_stmt = select(func.count(models.Batch.id))
+        if filter_customer: batch_stmt = batch_stmt.filter(models.Batch.customer_id == current_user.customer_id)
+        if filter_start: batch_stmt = batch_stmt.filter(models.Batch.upload_date >= filter_start)
+        if filter_end: batch_stmt = batch_stmt.filter(models.Batch.upload_date < filter_end)
+        batch_res = await db.execute(batch_stmt)
+        total_batches = batch_res.scalar() or 0
+
+        # 9. TAT Stats (In TAT vs Out TAT)
+        tat_stmt = select(models.Case.is_in_tat, func.count(models.Case.id)).group_by(models.Case.is_in_tat)
+        if filter_customer: tat_stmt = tat_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        if filter_start: tat_stmt = tat_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end: tat_stmt = tat_stmt.filter(models.Case.received_date < filter_end)
+        tat_res = await db.execute(tat_stmt)
+        tat_data = {row[0]: row[1] for row in tat_res.all()}
+        
+        in_tat_count = tat_data.get(1, 0)
+        out_tat_count = tat_data.get(0, 0)
+
         # 6. Customers and Revenue already fetched in Step 2.
 
         res_data = {
@@ -233,9 +266,12 @@ async def get_dashboard_stats(
             "completed_today": int(completed_today),
             "total_completed": int(total_completed),
             "total_revenue": float(total_revenue),
+            "total_batches": int(total_batches),
             "entry_pending_count": int(status_counts.get(models.CaseStatus.PENDING.value, 0)),
             "verification_pending_count": int(status_counts.get(models.CaseStatus.VERIFICATION.value, 0)),
             "at_risk_count": int(at_risk_count),
+            "in_tat_count": int(in_tat_count),
+            "out_tat_count": int(out_tat_count),
             "positive_count": int(check_counts.get(models.CheckStatus.GREEN.value, 0)),
             "negative_count": int(check_counts.get(models.CheckStatus.RED.value, 0)),
             "amber_count": int(check_counts.get(models.CheckStatus.AMBER.value, 0)),
@@ -248,7 +284,8 @@ async def get_dashboard_stats(
             "today_qc": [],
             "geo_data": geo_data,
             "execution_stats": [],
-            "activity_log": activity_log
+            "activity_log": activity_log,
+            "status_counts": status_counts
         }
         return res_data
     except Exception as e:
@@ -823,14 +860,55 @@ async def get_governance_stats(db: AsyncSession = Depends(get_read_db), current_
             {"region": "LATAM Stream", "load": pending_count // 6}
         ]
 
+        # 5. Recent Candidates (Live Pipeline)
+        recent_stmt = (
+            select(
+                models.Case.id,
+                models.Candidate.name.label('candidate_name'),
+                models.Case.case_ref_no,
+                models.Case.status,
+                models.Case.received_date,
+                models.Case.is_in_tat,
+                models.Customer.name.label('customer_name')
+            )
+            .join(models.Candidate, models.Case.candidate_id == models.Candidate.id)
+            .join(models.Customer, models.Case.customer_id == models.Customer.id)
+            .order_by(models.Case.received_date.desc())
+            .limit(8)
+        )
+        recent_res = await db.execute(recent_stmt)
+        recent_rows = recent_res.all()
+        
+        recent_candidates = []
+        for row in recent_rows:
+            recent_candidates.append({
+                "id": row[0],
+                "name": row[1],
+                "ref_no": row[2],
+                "status": row[3],
+                "date": row[4].strftime("%d-%m-%Y") if row[4] else "-",
+                "in_tat": bool(row[5]),
+                "customer": row[6]
+            })
+
+        # 6. TAT Stats (In TAT vs Out TAT)
+        tat_stmt = select(models.Case.is_in_tat, func.count(models.Case.id)).group_by(models.Case.is_in_tat)
+        tat_res = await db.execute(tat_stmt)
+        tat_data = {row[0]: row[1] for row in tat_res.all()}
+        in_tat_count = tat_data.get(1, 0)
+        out_tat_count = tat_data.get(0, 0)
+
         return {
             "health": {
                 "velocity": f"{round(float((total_c_count / active_v_count) / 14), 1)}", # Very rough estimation
-                "quality": f"{quality_fidelity}%"
+                "quality": f"{quality_fidelity}%",
+                "in_tat": in_tat_count,
+                "out_tat": out_tat_count
             },
             "velocityStream": velocity_stream,
             "topOperators": operators,
-            "globalLoad": global_load
+            "globalLoad": global_load,
+            "recentCandidates": recent_candidates
         }
     except Exception as e:
         logger.error(f"Error getting governance stats: {str(e)}", exc_info=True)
