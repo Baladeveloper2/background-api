@@ -223,7 +223,7 @@ async def send_bgv_link(
     # Generate the form link using frontend URL (you might want to configure this in .env later)
     # For now, assuming the frontend runs on localhost:5173 or the domain
     import os
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    frontend_url = os.getenv("FRONTEND_URL", "https://background-verification-91d11.web.app")
     form_link = f"{frontend_url}/candidate/form/{case.id}"
     
     if case.candidate and case.candidate.email:
@@ -513,7 +513,10 @@ async def export_mis_data(
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
         if user_role == "CUSTOMER" or role_name == "CUSTOMER":
-            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+            stmt = stmt.filter(
+                models.Case.customer_id == current_user.customer_id,
+                ~models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
+            )
         else:
             if customer_id:
                 stmt = stmt.filter(models.Case.customer_id == customer_id)
@@ -622,7 +625,10 @@ async def get_strategic_mis(
         # RBAC Isolation
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         if "CUSTOMER" in user_role or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
-            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+            stmt = stmt.filter(
+                models.Case.customer_id == current_user.customer_id,
+                ~models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
+            )
         elif customer_id:
             stmt = stmt.filter(models.Case.customer_id == customer_id)
         elif customer_name:

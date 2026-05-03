@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 from typing import List, Optional
 import os
 import uuid
 from datetime import datetime
-from . import models, schemas, database, auth_routes, aws_utils
+from . import models, schemas, database, auth_routes, aws_utils, notification_utils
 from .database import get_async_db
 from .auth_routes import get_current_user
 
@@ -42,6 +42,7 @@ async def upload_client_document(
     is_folder: bool = Form(False),
     parent_id: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -70,6 +71,31 @@ async def upload_client_document(
     db.add(new_doc)
     await db.commit()
     await db.refresh(new_doc)
+    
+    if not is_folder:
+        try:
+            # Try to get customer name
+            customer_name = "Unknown Client"
+            if current_user.customer:
+                customer_name = current_user.customer.name
+            elif current_user.customer_id:
+                # Fetch customer if not loaded
+                c_res = await db.execute(select(models.Customer).filter_by(id=current_user.customer_id))
+                customer = c_res.scalar_one_or_none()
+                if customer:
+                    customer_name = customer.name
+
+            await notification_utils.notify_client_document_uploaded(
+                db=db,
+                document_name=name,
+                customer_id=current_user.customer_id,
+                customer_name=customer_name,
+                background_tasks=background_tasks
+            )
+        except Exception as e:
+            import logging
+            logging.error(f"Error sending upload notification: {str(e)}")
+            
     return new_doc
 
 @router.get("")

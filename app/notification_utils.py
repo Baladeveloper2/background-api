@@ -220,3 +220,23 @@ async def notify_documents_submitted(
             case_id=case_id,
             background_tasks=background_tasks
         )
+
+async def notify_client_document_uploaded(
+    db: AsyncSession,
+    document_name: str,
+    customer_id: str,
+    customer_name: str,
+    background_tasks: Optional[Any] = None
+):
+    """Notify super admins and admins that a client uploaded a new document to their vault."""
+    internal_users = await get_users_by_role(
+        db, [enums.UserRole.SUPER_ADMIN, enums.UserRole.ADMIN, enums.UserRole.MANAGER]
+    )
+    for user in internal_users:
+        await create_notification(
+            db, user.id,
+            "Client Vault Upload",
+            f"Client {customer_name} has uploaded a new document: {document_name}. Check the Client Vault.",
+            enums.NotificationCategory.SYSTEM_ALERT,
+            background_tasks=background_tasks
+        )
