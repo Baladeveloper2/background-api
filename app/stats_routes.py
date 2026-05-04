@@ -99,6 +99,16 @@ async def get_dashboard_stats(
         total_candidates = sum(status_counts.values())
         total_completed = status_counts.get(models.CaseStatus.COMPLETED.value, 0)
 
+        # 2b. Accurate Insufficiency Count from new table
+        insuff_q = select(func.count(distinct(models.Insufficiency.case_id))).filter(models.Insufficiency.is_resolved == False)
+        if filter_customer:
+            insuff_q = insuff_q.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
+        elif filter_verifier:
+            insuff_q = insuff_q.filter(models.Insufficiency.case.has(assigned_to=current_user.id))
+        
+        insuff_res = await db.execute(insuff_q)
+        actual_insuff_count = insuff_res.scalar() or 0
+
         date_row = date_res.one()
         current_month = date_row.this_month or 0
         today_entry = date_row.today_entry or 0
@@ -219,11 +229,11 @@ async def get_dashboard_stats(
 
         # 7. Specific Result Counts (Positive, Negative, Amber, Stop)
         # We calculate these based on VerificationCheck statuses
-        check_counts_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).group_by(models.VerificationCheck.status)
+        check_counts_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).join(models.Case, models.VerificationCheck.case_id == models.Case.id).group_by(models.VerificationCheck.status)
         if filter_customer:
-            check_counts_stmt = check_counts_stmt.join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(models.Case.customer_id == current_user.customer_id)
+            check_counts_stmt = check_counts_stmt.filter(models.Case.customer_id == current_user.customer_id)
         elif filter_verifier:
-            check_counts_stmt = check_counts_stmt.join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(models.Case.assigned_to == current_user.id)
+            check_counts_stmt = check_counts_stmt.filter(models.Case.assigned_to == current_user.id)
         
         if filter_start: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date >= filter_start)
         if filter_end: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date < filter_end)
@@ -256,7 +266,7 @@ async def get_dashboard_stats(
             "current_month": int(current_month),
             "today_entry": int(today_entry),
             "today_entry_percent": 0.0,
-            "insufficient_cases": int(status_counts.get(models.CaseStatus.INSUFFICIENT.value, 0)),
+            "insufficient_cases": int(actual_insuff_count),
             "candidate_submissions_count": int(status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0)),
             "interim_cases": sum(status_counts.get(s.value if hasattr(s, "value") else str(s), 0) for s in [models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, models.CaseStatus.QC_PENDING, models.CaseStatus.QA_PENDING, models.CaseStatus.DOCUMENTS_SUBMITTED]),
             "total_clients": int(total_customers),
@@ -484,11 +494,13 @@ async def get_today_records(
         stmt = (
             select(
                 models.Customer.name.label("client"),
-                func.count(models.Case.id).label("received"),
+                func.count(distinct(models.Case.id)).label("received"),
                 func.sum(case((models.Case.status == models.CaseStatus.COMPLETED.value, 1), else_=0)).label("completed"),
-                func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT.value, 1), else_=0)).label("insufficient"),
+                # Count cases with any unresolved insufficiency
+                func.count(distinct(case((models.Insufficiency.is_resolved == False, models.Case.id), else_=None))).label("insufficient"),
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
+            .outerjoin(models.Insufficiency, and_(models.Case.id == models.Insufficiency.case_id, models.Insufficiency.is_resolved == False))
         )
         
         if filter_start:

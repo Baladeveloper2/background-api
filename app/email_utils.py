@@ -195,3 +195,69 @@ async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_lin
     import asyncio
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
+
+# Template for Submission Notification
+SUBMISSION_NOTIFICATION_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; }}
+        .container {{ max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }}
+        .header {{ background-color: #2563eb; padding: 30px; text-align: center; }}
+        .header h1 {{ color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; }}
+        .content {{ padding: 40px; line-height: 1.6; }}
+        .content p {{ margin-bottom: 20px; }}
+        .details-box {{ background-color: #f1f5f9; padding: 20px; border-radius: 8px; margin: 20px 0; border-top: 4px solid #2563eb; }}
+        .details-row {{ margin-bottom: 10px; font-size: 14px; }}
+        .details-row strong {{ color: #1e293b; width: 120px; display: inline-block; }}
+        .footer {{ background-color: #f1f5f9; padding: 30px; text-align: center; font-size: 13px; color: #64748b; border-top: 1px solid #e2e8f0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Documents Submitted</h1>
+        </div>
+        <div class="content">
+            <p>Hello,</p>
+            <p>This is to notify you that a candidate has successfully submitted their verification documents via the BGV portal.</p>
+            
+            <div class="details-box">
+                <div class="details-row"><strong>Candidate:</strong> {candidate_name}</div>
+                <div class="details-row"><strong>Case Ref:</strong> {case_ref}</div>
+                <div class="details-row"><strong>Status:</strong> Documents Submitted</div>
+                <div class="details-row"><strong>Date:</strong> {submission_date}</div>
+            </div>
+            
+            <p>We will start the Verification Process Soon</p>
+        </div>
+        <div class="footer">
+            <p>&copy; {current_year} {site_name}. All rights reserved.</p>
+            <p>This is an automated system notification.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+async def send_submission_notification_email(to_email: str, candidate_name: str, case_ref: str):
+    """
+    Sends a notification email to the stakeholder (Admin/Customer) when a candidate submits documents.
+    """
+    import datetime
+    site_name = os.getenv("SITE_NAME", "BGVMS")
+    
+    html_content = SUBMISSION_NOTIFICATION_TEMPLATE.format(
+        candidate_name=candidate_name,
+        case_ref=case_ref,
+        submission_date=datetime.datetime.now().strftime("%d-%m-%Y %H:%M"),
+        site_name=site_name,
+        current_year=datetime.datetime.now().year
+    )
+    
+    subject = f"Notification: Documents Submitted - {candidate_name} ({case_ref})"
+    
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)

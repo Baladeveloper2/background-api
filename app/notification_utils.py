@@ -1,7 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Any, Optional
-from datetime import datetime
+from sqlalchemy.orm import joinedload
+from typing import Any, Optional, List
+from datetime import datetime, timezone
 from . import models, enums
 from .ws import manager
 import logging
@@ -49,7 +50,7 @@ async def create_notification(
                 "case_ref": "", # Remove invalid attribute access
                 "extra_data": extra_data,
                 "is_read": 0,
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.now(timezone.utc).isoformat()
             }
         }
 
@@ -183,43 +184,69 @@ async def notify_ping(db: AsyncSession, user_id: str, case_ref: str, case_id: st
         background_tasks=background_tasks
     )
 
+from . import email_utils
+
 async def notify_documents_submitted(
     db: AsyncSession,
     case_id: str,
     case_ref: str,
     candidate_name: str,
-    customer_user_id: Optional[str] = None,
+    customer_users: List[models.User] = [],
     background_tasks: Optional[Any] = None
 ):
     """
     Fired when a candidate submits their BGV form documents.
     Notifies:
-      - The client (customer user) who owns the case
+      - The client (customer users) who owns the case
       - All internal SUPER_ADMIN / MANAGER / ADMIN users
     """
     title = "📋 Documents Submitted"
     message = f"Candidate {candidate_name} has submitted all required documents for Case {case_ref}. Please review and proceed with verification."
 
-    # 1. Notify the client contact
-    if customer_user_id:
-        await create_notification(
-            db, customer_user_id, title, message,
-            enums.NotificationCategory.FORM_SUBMITTED,
-            case_id=case_id,
-            background_tasks=background_tasks
-        )
+    # 1. Notify the client contacts
+    for user in customer_users:
+        try:
+            await create_notification(
+                db, user.id, title, message,
+                enums.NotificationCategory.FORM_SUBMITTED,
+                case_id=case_id,
+                background_tasks=background_tasks
+            )
+            
+            # Send Email to Customer
+            if user.email:
+                if background_tasks:
+                    background_tasks.add_task(email_utils.send_submission_notification_email, user.email, candidate_name, case_ref)
+                else:
+                    await email_utils.send_submission_notification_email(user.email, candidate_name, case_ref)
+        except Exception as e:
+            logger.error(f"Failed to notify customer user {user.id}: {str(e)}")
 
     # 2. Notify internal team (Super Admins + Managers + Admins)
-    internal_users = await get_users_by_role(
-        db, [enums.UserRole.SUPER_ADMIN, enums.UserRole.ADMIN, enums.UserRole.MANAGER]
-    )
-    for user in internal_users:
-        await create_notification(
-            db, user.id, title, message,
-            enums.NotificationCategory.FORM_SUBMITTED,
-            case_id=case_id,
-            background_tasks=background_tasks
+    try:
+        internal_users = await get_users_by_role(
+            db, [enums.UserRole.SUPER_ADMIN, enums.UserRole.ADMIN, enums.UserRole.MANAGER]
         )
+        logger.info(f"Notify Internal Team: found {len(internal_users)} stakeholders")
+        for user in internal_users:
+            try:
+                await create_notification(
+                    db, user.id, title, message,
+                    enums.NotificationCategory.FORM_SUBMITTED,
+                    case_id=case_id,
+                    background_tasks=background_tasks
+                )
+                
+                # Send Email to Internal User
+                if user.email:
+                    if background_tasks:
+                        background_tasks.add_task(email_utils.send_submission_notification_email, user.email, candidate_name, case_ref)
+                    else:
+                        await email_utils.send_submission_notification_email(user.email, candidate_name, case_ref)
+            except Exception as e:
+                logger.error(f"Failed to notify internal user {user.id}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to fetch internal users for notification: {str(e)}")
 
 async def notify_client_document_uploaded(
     db: AsyncSession,
@@ -251,14 +278,14 @@ async def notify_insufficiency_raised(
     raised_by_name: str,
     raised_by_role: str,
     message: str,
-    customer_user_id: Optional[str] = None,
+    customer_user_ids: List[str] = [],
     background_tasks: Optional[Any] = None
 ):
     """
     Triggered when an insufficiency is raised at the check level.
     Notifies:
       - Super Admin
-      - Customer
+      - Customer Users
     """
     title = f"❗ Insufficiency Raised: {check_name}"
     content = (
@@ -277,22 +304,84 @@ async def notify_insufficiency_raised(
     }
 
     # 1. Notify Super Admins
-    super_admins = await get_users_by_role(db, [enums.UserRole.SUPER_ADMIN])
-    for admin in super_admins:
-        await create_notification(
-            db, admin.id, title, content,
-            enums.NotificationCategory.INSUFFICIENT_DOCS,
-            case_id=case_id,
-            extra_data=extra_data,
-            background_tasks=background_tasks
-        )
+    try:
+        super_admins = await get_users_by_role(db, [enums.UserRole.SUPER_ADMIN])
+        for admin in super_admins:
+            await create_notification(
+                db, admin.id, title, content,
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=case_id,
+                extra_data=extra_data,
+                background_tasks=background_tasks
+            )
+    except Exception as e:
+        logger.error(f"Failed to notify admins of insufficiency: {str(e)}")
 
-    # 2. Notify Customer
-    if customer_user_id:
-        await create_notification(
-            db, customer_user_id, title, content,
-            enums.NotificationCategory.INSUFFICIENT_DOCS,
-            case_id=case_id,
-            extra_data=extra_data,
-            background_tasks=background_tasks
+    # 2. Notify Customer Users
+    for user_id in customer_user_ids:
+        try:
+            await create_notification(
+                db, user_id, title, content,
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=case_id,
+                extra_data=extra_data,
+                background_tasks=background_tasks
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify customer user {user_id} of insufficiency: {str(e)}")
+async def notify_insufficiency_resolved(
+    db: AsyncSession,
+    insuff_id: str,
+    background_tasks: Optional[Any] = None
+):
+    """
+    Triggered when a candidate or client uploads documents for an insufficiency.
+    Notifies:
+      - Assigned Verifier (if any)
+      - Super Admin
+    """
+    try:
+        # Fetch insufficiency with related info
+        stmt = select(models.Insufficiency).options(
+            joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
+            joinedload(models.Insufficiency.check)
+        ).filter(models.Insufficiency.id == insuff_id)
+        
+        res = await db.execute(stmt)
+        insuff = res.scalar_one_or_none()
+        
+        if not insuff:
+            return
+
+        case = insuff.case
+        candidate_name = case.candidate.name if case.candidate else "N/A"
+        check_name = insuff.check.check_type if insuff.check else "General"
+        
+        title = f"✅ Insufficiency Resolved: {candidate_name}"
+        content = (
+            f"Evidence submitted for check: {check_name}\n"
+            f"Candidate: {candidate_name} | Case: {case.case_ref_no or case.id}\n"
+            f"Status updated to: {insuff.status}"
         )
+        
+        # 1. Notify Super Admins
+        super_admins = await get_users_by_role(db, [enums.UserRole.SUPER_ADMIN])
+        for admin in super_admins:
+            await create_notification(
+                db, admin.id, title, content,
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=case.id,
+                background_tasks=background_tasks
+            )
+            
+        # 2. Notify Assigned Verifier
+        if case.assigned_to:
+            await create_notification(
+                db, case.assigned_to, title, content,
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=case.id,
+                background_tasks=background_tasks
+            )
+
+    except Exception as e:
+        logger.error(f"Error in notify_insufficiency_resolved: {str(e)}")

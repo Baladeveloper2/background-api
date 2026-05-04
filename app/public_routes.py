@@ -16,6 +16,7 @@ async def get_public_insufficiency(token: str, db: AsyncSession = Depends(get_as
         select(models.Insufficiency)
         .options(
             joinedload(models.Insufficiency.case).joinedload(models.Case.customer),
+            joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
             joinedload(models.Insufficiency.check)
         )
         .filter(models.Insufficiency.token == token, models.Insufficiency.is_resolved == False)
@@ -28,7 +29,7 @@ async def get_public_insufficiency(token: str, db: AsyncSession = Depends(get_as
         
     return {
         "id": insuff.id,
-        "case_ref_no": insuff.case.case_ref_no,
+        "case_ref": insuff.case.case_ref_no or insuff.case.id,
         "candidate_name": insuff.case.candidate.name if insuff.case.candidate else "Candidate",
         "check_name": insuff.check.check_type if insuff.check else "General Verification",
         "customer_name": insuff.case.customer.name if insuff.case.customer else "Our Client",

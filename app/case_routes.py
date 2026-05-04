@@ -65,7 +65,8 @@ async def get_insufficient_cases(
             "check_name": i.check.check_type if i.check else "General",
             "marked_at": i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else "N/A",
             "remarks": i.message or "No remarks found",
-            "status": i.status
+            "status": i.status,
+            "documents": i.documents or []
         })
         seen_check_ids.add((i.case_id, i.check_id))
 
@@ -171,7 +172,10 @@ async def resolve_insufficiency(
     ni_res = await db.execute(new_insuff_stmt)
     new_insuff = ni_res.scalars().first()
     if new_insuff:
-        new_insuff.status = "CUSTOMER_UPLOADED"
+        new_insuff.status = "RESOLVED"
+        new_insuff.is_resolved = True
+        new_insuff.resolved_at = datetime.utcnow()
+        new_insuff.resolved_by = current_user.id
         new_insuff.documents = data.documents or []
         new_insuff.updated_at = datetime.utcnow()
         new_insuff.updated_by = current_user.id
@@ -542,16 +546,17 @@ async def submit_candidate_documents(
         # Force session refresh if needed
         db.add(case.candidate)
 
-    # Find the customer's primary user account to notify
-    customer_user = None
+    # Find all active customer users to notify
+    customer_users = []
     if case.customer_id:
         cu_stmt = select(models.User).filter(
             models.User.customer_id == case.customer_id,
-            models.User.role == enums.UserRole.CUSTOMER
-        ).limit(1)
+            models.User.role == enums.UserRole.CUSTOMER,
+            models.User.status == enums.Status.ACTIVE
+        )
         cu_res = await db.execute(cu_stmt)
-        customer_user = cu_res.scalar_one_or_none()
-        logger.info(f"Notification Target (Customer): {customer_user.id if customer_user else 'NOT FOUND'}")
+        customer_users = cu_res.scalars().all()
+        logger.info(f"Notification Targets (Customer): found {len(customer_users)} users")
 
     logger.info(f"Triggering notifications for case {case.id}")
 
@@ -561,7 +566,7 @@ async def submit_candidate_documents(
         case_id=case.id,
         case_ref=case.case_ref_no or case.id,
         candidate_name=case.candidate.name if case.candidate else "Candidate",
-        customer_user_id=customer_user.id if customer_user else None,
+        customer_users=customer_users,
         background_tasks=background_tasks
     )
 
@@ -639,10 +644,11 @@ async def raise_check_insufficiency(
     Raises an insufficiency at the check level.
     - Updates check status to INSUFFICIENT
     - Updates case status to INSUFFICIENT
-    - Logs the event
-    - Notifies Super Admin and Customer
+    - Creates a secure insufficiency record with a token
+    - Sends email to candidate with evidence upload link
+    - Notifies internal stakeholders and customer users
     """
-    # 1. Fetch Case and Check
+    # 1. Fetch Case and Check with Candidate/Customer info
     stmt = select(models.Case).filter(models.Case.id == case_id).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
@@ -659,65 +665,112 @@ async def raise_check_insufficiency(
         raise HTTPException(status_code=404, detail="Check not found in this case")
         
     # 2. Update Statuses
-    check.status = enums.CheckStatus.INSUFFICIENT.value if hasattr(enums.CheckStatus.INSUFFICIENT, 'value') else enums.CheckStatus.INSUFFICIENT
-    case.status = enums.CaseStatus.INSUFFICIENT.value if hasattr(enums.CaseStatus.INSUFFICIENT, 'value') else enums.CaseStatus.INSUFFICIENT
-    case.insufficiency_count = (case.insufficiency_count or 0) + 1
+    check.status = enums.CheckStatus.INSUFFICIENT
+    case.status = enums.CaseStatus.INSUFFICIENT
+    
+    # Check for existing open insufficiency for this check to avoid duplicates
+    exist_stmt = select(models.Insufficiency).filter(
+        models.Insufficiency.case_id == case.id,
+        models.Insufficiency.check_id == check.id,
+        models.Insufficiency.is_resolved == False
+    )
+    exist_res = await db.execute(exist_stmt)
+    new_insuff = exist_res.scalars().first()
+
+    import uuid
+    token = uuid.uuid4().hex
+
+    if new_insuff:
+        # Update existing record (Re-notification)
+        new_insuff.message = data.message
+        new_insuff.token = token
+        new_insuff.status = "INSUFFICIENT"
+        new_insuff.updated_at = datetime.utcnow()
+    else:
+        # Create fresh record
+        case.insufficiency_count = (case.insufficiency_count or 0) + 1
+        new_insuff = models.Insufficiency(
+            case_id=case.id,
+            check_id=check.id,
+            raised_by=current_user.id,
+            role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
+            message=data.message,
+            status="INSUFFICIENT",
+            token=token
+        )
+        db.add(new_insuff)
     
     db.add(check)
     db.add(case)
     
-    # 3. Create Insufficiency Record
-    new_insuff = models.Insufficiency(
-        case_id=case.id,
-        check_id=check.id,
-        raised_by=current_user.id,
-        role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
-        message=data.message,
-        status="OPEN"
-    )
-    db.add(new_insuff)
-    
     # 4. Audit Log
     audit = models.AuditLog(
         user_id=current_user.id,
-        action="RAISE_INSUFFICIENT",
+        action="RAISE_INSUFFICIENCY",
         resource_id=case.id,
-        details=f"Insufficiency raised for check {check.check_type}: {data.message}"
+        details=f"Insufficiency raised for check {check.check_type}. Message: {data.message}"
     )
     db.add(audit)
     
-    # 5. Find Customer User
-    customer_user = None
+    # 5. Find Customer Users to notify
+    customer_users = []
     if case.customer_id:
         cu_stmt = select(models.User).filter(
             models.User.customer_id == case.customer_id,
-            models.User.role == enums.UserRole.CUSTOMER
-        ).limit(1)
+            models.User.role == enums.UserRole.CUSTOMER,
+            models.User.status == "ACTIVE"
+        )
         cu_res = await db.execute(cu_stmt)
-        customer_user = cu_res.scalar_one_or_none()
+        customer_users = cu_res.scalars().all()
         
-    # 6. Notify
+    # 6. Notify Stakeholders
     try:
         await notification_utils.notify_insufficiency_raised(
             db=db,
             case_id=case.id,
-            case_ref=case.case_ref_no,
-            candidate_name=case.candidate.name if case.candidate else "N/A",
+            case_ref=case.case_ref_no or case.id,
+            candidate_name=case.candidate.name if case.candidate else "Candidate",
             check_id=check.id,
             check_name=check.check_type,
             raised_by_name=current_user.full_name or current_user.email,
             raised_by_role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
             message=data.message,
-            customer_user_id=customer_user.id if customer_user else None,
+            customer_user_ids=[u.id for u in customer_users],
             background_tasks=background_tasks
         )
     except Exception as e:
-        print(f"Notification failed but continuing: {e}")
+        logger.error(f"Stakeholder notification failed but continuing: {e}")
+
+    # 7. Send Email to Candidate
+    if case.candidate and case.candidate.email:
+        import os
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        upload_link = f"{frontend_url}/candidate/insufficiency/{token}"
+        
+        background_tasks.add_task(
+            email_utils.send_insufficiency_email,
+            to_email=case.candidate.email,
+            candidate_name=case.candidate.name,
+            case_ref=case.case_ref_no or case.id, # Fixed keyword mismatch
+            check_name=check.check_type,
+            custom_message=data.message,
+            upload_link=upload_link
+        )
     
     await db.commit()
-    await manager.broadcast({"type": "CASE_STATUS_UPDATE", "case_id": case.id, "status": case.status})
     
-    return {"message": "Insufficiency raised successfully", "insufficiency_id": new_insuff.id}
+    # WebSocket broadcast for real-time status update in dashboards
+    await manager.broadcast({
+        "type": "CASE_STATUS_UPDATE", 
+        "case_id": case.id, 
+        "status": case.status
+    })
+    
+    return {
+        "status": "success", 
+        "insufficiency_id": new_insuff.id, 
+        "token": token
+    }
 
 @router.get("/export")
 async def export_mis_data(
@@ -2811,83 +2864,4 @@ async def reject_insufficiency(id: str, data: Dict[str, str], db: AsyncSession =
     await db.commit()
     return {"status": "success"}
 
-@router.post("/{case_id}/checks/{check_id}/raise-insufficiency")
-async def raise_insufficiency_for_check(
-    case_id: str, 
-    check_id: str, 
-    data: schemas.RaiseInsufficiencyRequest, 
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_async_db), 
-    current_user: models.User = Depends(get_current_user)
-):
-    """Raise a new insufficiency for a specific check."""
-    # 1. Fetch case and check with candidate info
-    stmt = select(models.Case).options(
-        joinedload(models.Case.candidate),
-        joinedload(models.Case.customer)
-    ).filter(models.Case.id == case_id)
-    res = await db.execute(stmt)
-    db_case = res.scalar_one_or_none()
-    
-    if not db_case:
-        raise HTTPException(404, detail="Case not found")
-        
-    check_stmt = select(models.VerificationCheck).filter(models.VerificationCheck.id == check_id)
-    check_res = await db.execute(check_stmt)
-    db_check = check_res.scalar_one_or_none()
-    
-    if not db_check:
-        raise HTTPException(404, detail="Check not found")
-
-    # 2. Create Insufficiency record
-    token = secrets.token_urlsafe(32)
-    insuff = models.Insufficiency(
-        case_id=case_id,
-        check_id=check_id,
-        raised_by=current_user.id,
-        role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
-        message=data.message,
-        status="INSUFFICIENT",
-        token=token
-    )
-    db.add(insuff)
-    
-    # 3. Update Case/Check Status
-    db_case.status = enums.CaseStatus.INSUFFICIENT
-    db_check.status = enums.CheckStatus.INSUFFICIENT
-    
-    # 4. Audit Log
-    audit_log = models.AuditLog(
-        user_id=current_user.id,
-        action="RAISE_INSUFFICIENCY",
-        resource_id=case_id,
-        details=f"Insufficiency raised for check {db_check.check_type}. Message: {data.message}"
-    )
-    db.add(audit_log)
-    
-    await db.commit()
-
-    # 5. Send Email to Candidate
-    if db_case.candidate and db_case.candidate.email:
-        # Generate full URL for the candidate portal
-        # The frontend route is /candidate/insufficiency/:token
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-        upload_link = f"{frontend_url}/candidate/insufficiency/{token}"
-        
-        background_tasks.add_task(
-            email_utils.send_insufficiency_email,
-            to_email=db_case.candidate.email,
-            candidate_name=db_case.candidate.name,
-            case_ref_no=db_case.case_ref_no,
-            check_name=db_check.check_type,
-            custom_message=data.message,
-            upload_link=upload_link
-        )
-
-    # 6. Notify Stakeholders (Internal)
-    await notification_utils.notify_insufficiency_raised(
-        db, insuff.id, 
-        background_tasks=background_tasks
-    )
-
-    return {"status": "success", "insufficiency_id": insuff.id, "token": token}
+    return {"status": "success"}
