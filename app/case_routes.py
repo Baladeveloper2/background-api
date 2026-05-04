@@ -405,7 +405,9 @@ async def get_case_public(case_id: str, db: AsyncSession = Depends(get_async_db)
             "dob": case.candidate.dob.isoformat() if case.candidate and case.candidate.dob else "",
             "pan_no": case.candidate.pan_no if case.candidate else "",
             "passport_no": case.candidate.passport_no if case.candidate else "",
-            "nationality": case.candidate.nationality if case.candidate else ""
+            "nationality": case.candidate.nationality if case.candidate else "",
+            "gender": case.candidate.gender if case.candidate else "",
+            "address": case.candidate.address if case.candidate else ""
         },
         "customer_name": case.customer.name if case.customer else "",
         "status": case.status,
@@ -549,6 +551,9 @@ async def submit_candidate_documents(
         ).limit(1)
         cu_res = await db.execute(cu_stmt)
         customer_user = cu_res.scalar_one_or_none()
+        logger.info(f"Notification Target (Customer): {customer_user.id if customer_user else 'NOT FOUND'}")
+
+    logger.info(f"Triggering notifications for case {case.id}")
 
     # Fire dual notifications (client + internal team)
     await notification_utils.notify_documents_submitted(

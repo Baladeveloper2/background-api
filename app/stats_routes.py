@@ -174,39 +174,48 @@ async def get_dashboard_stats(
                 curr_m = curr_m.replace(month=curr_m.month + 1)
             max_iter -= 1
 
-        # 5. At Risk Count (Optimized: No full object fetch)
-        # Instead of fetching full models, we fetch IDs and count.
-        # But we still need check_types for Predictive TAT.
-        # Let's count cases where (now - received_date) > 0.7 * predictive_tat
-        # For simplicity, we'll keep the loop but use a more targeted query
-        active_risk_statuses = [
-            models.CaseStatus.PENDING, 
-            models.CaseStatus.VERIFICATION, 
-            models.CaseStatus.QC, 
-            models.CaseStatus.QC_PENDING, 
-            models.CaseStatus.QA_PENDING, 
-            models.CaseStatus.DOCUMENTS_SUBMITTED
-        ]
-        # Optimized: matches read_cases filter exactly
-        risk_threshold = datetime.utcnow() - timedelta(days=7)
+        # 5. At Risk and Out TAT Count (Dynamic calculation)
+        now_time = datetime.utcnow()
+        risk_threshold = now_time - timedelta(days=7) # 7 days for "At Risk"
+        out_tat_threshold = now_time - timedelta(days=10) # 10 days for "Out TAT" breach
+
+        # At Risk: Active cases older than 7 days but not yet breached 10 days
+        # (or already breached but still active)
         at_risk_q = select(func.count(models.Case.id)).filter(
             models.Case.status.notin_(['COMPLETED', 'QC_VERIFIED']),
-            or_(
-                models.Case.is_in_tat == 0,
-                models.Case.received_date < risk_threshold
-            )
+            models.Case.received_date < risk_threshold
         )
         if filter_verifier: 
             at_risk_q = at_risk_q.filter(models.Case.assigned_to == current_user.id)
         elif filter_customer:
             at_risk_q = at_risk_q.filter(models.Case.customer_id == current_user.customer_id)
         
-        # Apply date filters to match terminal view
         if filter_start: at_risk_q = at_risk_q.filter(models.Case.received_date >= filter_start)
         if filter_end: at_risk_q = at_risk_q.filter(models.Case.received_date < filter_end)
             
         at_risk_res = await db.execute(at_risk_q)
         at_risk_count = at_risk_res.scalar() or 0
+
+        # Out TAT (SLA Breached): 
+        # 1. Finalized cases where is_in_tat was marked 0
+        # 2. Active cases older than 10 days
+        out_tat_q = select(func.count(models.Case.id)).filter(
+            or_(
+                and_(models.Case.status.in_(['COMPLETED', 'QC_VERIFIED']), models.Case.is_in_tat == 0),
+                and_(models.Case.status.notin_(['COMPLETED', 'QC_VERIFIED']), models.Case.received_date < out_tat_threshold)
+            )
+        )
+        if filter_verifier: 
+            out_tat_q = out_tat_q.filter(models.Case.assigned_to == current_user.id)
+        elif filter_customer:
+            out_tat_q = out_tat_q.filter(models.Case.customer_id == current_user.customer_id)
+            
+        if filter_start: out_tat_q = out_tat_q.filter(models.Case.received_date >= filter_start)
+        if filter_end: out_tat_q = out_tat_q.filter(models.Case.received_date < filter_end)
+        
+        out_tat_res = await db.execute(out_tat_q)
+        out_tat_count = out_tat_res.scalar() or 0
+        in_tat_count = max(0, total_candidates - out_tat_count)
 
         # 7. Specific Result Counts (Positive, Negative, Amber, Stop)
         # We calculate these based on VerificationCheck statuses
@@ -238,16 +247,7 @@ async def get_dashboard_stats(
         batch_res = await db.execute(batch_stmt)
         total_batches = batch_res.scalar() or 0
 
-        # 9. TAT Stats (In TAT vs Out TAT)
-        tat_stmt = select(models.Case.is_in_tat, func.count(models.Case.id)).group_by(models.Case.is_in_tat)
-        if filter_customer: tat_stmt = tat_stmt.filter(models.Case.customer_id == current_user.customer_id)
-        if filter_start: tat_stmt = tat_stmt.filter(models.Case.received_date >= filter_start)
-        if filter_end: tat_stmt = tat_stmt.filter(models.Case.received_date < filter_end)
-        tat_res = await db.execute(tat_stmt)
-        tat_data = {row[0]: row[1] for row in tat_res.all()}
-        
-        in_tat_count = tat_data.get(1, 0)
-        out_tat_count = tat_data.get(0, 0)
+        # 9. TAT Stats (Handled dynamically in step 5)
 
         # 6. Customers and Revenue already fetched in Step 2.
 
