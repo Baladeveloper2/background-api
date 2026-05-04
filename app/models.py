@@ -200,6 +200,7 @@ class Case(Base):
     qa_user = relationship("User", foreign_keys=[qa_id], backref="qa_cases")
     qc_user = relationship("User", foreign_keys=[qc_id], backref="qc_cases")
     checks = relationship("VerificationCheck", back_populates="case", cascade="all, delete-orphan")
+    insufficiencies = relationship("Insufficiency", back_populates="case", cascade="all, delete-orphan")
 
 class VerificationCheck(Base):
     __tablename__ = "verification_checks"
@@ -213,6 +214,7 @@ class VerificationCheck(Base):
     verifier_remarks = Column(Text)
     verified_date = Column(DateTime(timezone=True), nullable=True, index=True)
     rate = Column(Float, default=0.0)
+    insufficiencies = relationship("Insufficiency", back_populates="check", cascade="all, delete-orphan")
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -276,6 +278,7 @@ class InsufficiencyLog(Base):
     __tablename__ = "insufficiency_logs"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), index=True, nullable=True)
     user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
     from_status = Column(String(50), nullable=False)
     notes = Column(Text, nullable=True)
@@ -284,6 +287,33 @@ class InsufficiencyLog(Base):
     
     user = relationship("User")
     case = relationship("Case", backref="insufficiency_logs")
+    check = relationship("VerificationCheck", backref="insufficiency_logs")
+
+class Insufficiency(Base):
+    __tablename__ = "insufficiencies"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), index=True, nullable=False)
+    raised_by = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    role = Column(String(50))
+    message = Column(Text, nullable=False)
+    documents = Column(JSONEncodedList) # Support for customer evidence uploads
+    status = Column(String(50), default="INSUFFICIENT")
+    is_resolved = Column(Boolean, default=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    updated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    resolved_remarks = Column(Text, nullable=True)
+    token = Column(String(100), unique=True, index=True, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    case = relationship("Case", back_populates="insufficiencies")
+    check = relationship("VerificationCheck", back_populates="insufficiencies")
+    user = relationship("User", foreign_keys=[raised_by], backref="raised_insufficiencies")
+    resolver = relationship("User", foreign_keys=[resolved_by], backref="resolved_insufficiencies")
+    updater = relationship("User", foreign_keys=[updated_by], backref="updated_insufficiencies")
 
 class DashboardSummary(Base):
     __tablename__ = "dashboard_summaries"

@@ -240,3 +240,59 @@ async def notify_client_document_uploaded(
             enums.NotificationCategory.SYSTEM_ALERT,
             background_tasks=background_tasks
         )
+
+async def notify_insufficiency_raised(
+    db: AsyncSession,
+    case_id: str,
+    case_ref: str,
+    candidate_name: str,
+    check_id: str,
+    check_name: str,
+    raised_by_name: str,
+    raised_by_role: str,
+    message: str,
+    customer_user_id: Optional[str] = None,
+    background_tasks: Optional[Any] = None
+):
+    """
+    Triggered when an insufficiency is raised at the check level.
+    Notifies:
+      - Super Admin
+      - Customer
+    """
+    title = f"❗ Insufficiency Raised: {check_name}"
+    content = (
+        f"Case: {case_ref} | Candidate: {candidate_name}\n"
+        f"Check: {check_name}\n"
+        f"Raised By: {raised_by_name} ({raised_by_role})\n"
+        f"Reason: {message}"
+    )
+    
+    extra_data = {
+        "check_id": check_id,
+        "check_name": check_name,
+        "raised_by": raised_by_name,
+        "raised_by_role": raised_by_role,
+        "reason": message
+    }
+
+    # 1. Notify Super Admins
+    super_admins = await get_users_by_role(db, [enums.UserRole.SUPER_ADMIN])
+    for admin in super_admins:
+        await create_notification(
+            db, admin.id, title, content,
+            enums.NotificationCategory.INSUFFICIENT_DOCS,
+            case_id=case_id,
+            extra_data=extra_data,
+            background_tasks=background_tasks
+        )
+
+    # 2. Notify Customer
+    if customer_user_id:
+        await create_notification(
+            db, customer_user_id, title, content,
+            enums.NotificationCategory.INSUFFICIENT_DOCS,
+            case_id=case_id,
+            extra_data=extra_data,
+            background_tasks=background_tasks
+        )

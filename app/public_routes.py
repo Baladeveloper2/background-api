@@ -1,0 +1,83 @@
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
+from typing import Dict, Any
+from . import models, schemas, notification_utils, email_utils
+from .database import get_async_db
+from datetime import datetime
+
+router = APIRouter(prefix="/public", tags=["public"])
+
+@router.get("/insufficiency/{token}", response_model=schemas.PublicInsufficiencyResponse)
+async def get_public_insufficiency(token: str, db: AsyncSession = Depends(get_async_db)):
+    """Fetch insufficiency details using a secure token (unauthenticated)."""
+    stmt = (
+        select(models.Insufficiency)
+        .options(
+            joinedload(models.Insufficiency.case).joinedload(models.Case.customer),
+            joinedload(models.Insufficiency.check)
+        )
+        .filter(models.Insufficiency.token == token, models.Insufficiency.is_resolved == False)
+    )
+    res = await db.execute(stmt)
+    insuff = res.unique().scalar_one_or_none()
+    
+    if not insuff:
+        raise HTTPException(status_code=404, detail="Invalid or expired resolution link")
+        
+    return {
+        "id": insuff.id,
+        "case_ref_no": insuff.case.case_ref_no,
+        "candidate_name": insuff.case.candidate.name if insuff.case.candidate else "Candidate",
+        "check_name": insuff.check.check_type if insuff.check else "General Verification",
+        "customer_name": insuff.case.customer.name if insuff.case.customer else "Our Client",
+        "message": insuff.message,
+        "status": insuff.status
+    }
+
+@router.post("/insufficiency/{token}/submit")
+async def submit_candidate_insufficiency(
+    token: str, 
+    data: schemas.PublicInsufficiencySubmit, 
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_async_db)
+):
+    """Candidate submits evidence via public portal."""
+    stmt = select(models.Insufficiency).options(
+        joinedload(models.Insufficiency.case).joinedload(models.Case.candidate)
+    ).filter(models.Insufficiency.token == token)
+    res = await db.execute(stmt)
+    insuff = res.scalar_one_or_none()
+    
+    if not insuff:
+        raise HTTPException(status_code=404, detail="Invalid token")
+        
+    # Update insufficiency
+    insuff.documents = data.documents
+    insuff.status = "CUSTOMER_UPLOADED"
+    insuff.updated_at = datetime.utcnow()
+    
+    # Update case status if needed
+    db_case = insuff.case
+    if db_case.status == "INSUFFICIENT":
+        # Check if all insufficiencies for this case are now uploaded or resolved
+        from sqlalchemy import func
+        rem_stmt = select(func.count(models.Insufficiency.id)).filter(
+            models.Insufficiency.case_id == db_case.id,
+            models.Insufficiency.status == "INSUFFICIENT",
+            models.Insufficiency.is_resolved == False
+        )
+        rem_res = await db.execute(rem_stmt)
+        if rem_res.scalar() == 0:
+            db_case.status = "VERIFICATION" # Move back to queue
+    
+    await db.commit()
+    
+    # Notify stakeholders
+    await notification_utils.notify_insufficiency_resolved(
+        db, insuff.id, 
+        background_tasks=background_tasks
+    )
+    
+    return {"status": "success", "message": "Evidence submitted successfully"}

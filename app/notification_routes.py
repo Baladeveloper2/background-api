@@ -8,10 +8,12 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 @router.get("", response_model=list[schemas.NotificationRead])
 async def get_notifications(
+    skip: int = 0,
+    limit: int = 50,
     db: AsyncSession = Depends(database.get_async_db),
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
-    """Fetch unread/recent notifications for the current user."""
+    """Fetch notifications for the current user with pagination."""
 
     stmt = (
         select(
@@ -23,8 +25,9 @@ async def get_notifications(
         .outerjoin(models.Case, models.Notification.case_id == models.Case.id)
         .outerjoin(models.Candidate, models.Case.candidate_id == models.Candidate.id)
         .filter(models.Notification.user_id == current_user.id)
-        .order_by(models.Notification.is_read.asc(), desc(models.Notification.created_at))
-        .limit(50)
+        .order_by(desc(models.Notification.created_at))
+        .offset(skip)
+        .limit(limit)
     )
     res = await db.execute(stmt)
     

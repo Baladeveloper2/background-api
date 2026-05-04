@@ -12,73 +12,18 @@ BGV_INVITATION_TEMPLATE = """
 <html>
 <head>
     <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f8fafc;
-            color: #1e293b;
-            margin: 0;
-            padding: 0;
-        }}
-        .container {{
-            max-width: 600px;
-            margin: 40px auto;
-            background-color: #ffffff;
-            padding: 0;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-        }}
-        .header {{
-            background-color: #1e293b;
-            padding: 30px;
-            text-align: center;
-        }}
-        .header img {{
-            max-height: 50px;
-            margin-bottom: 15px;
-        }}
-        .header h1 {{
-            color: #ffffff;
-            margin: 0;
-            font-size: 24px;
-            font-weight: 600;
-        }}
-        .content {{
-            padding: 40px;
-            line-height: 1.6;
-        }}
-        .content p {{
-            margin-bottom: 20px;
-        }}
-        .button-container {{
-            text-align: center;
-            margin: 35px 0;
-        }}
-        .button {{
-            background-color: #2563eb;
-            color: #ffffff !important;
-            padding: 14px 30px;
-            text-decoration: none;
-            border-radius: 8px;
-            font-weight: 600;
-            display: inline-block;
-            box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);
-        }}
-        .footer {{
-            background-color: #f1f5f9;
-            padding: 30px;
-            text-align: center;
-            font-size: 13px;
-            color: #64748b;
-            border-top: 1px solid #e2e8f0;
-        }}
-        .footer p {{
-            margin: 5px 0;
-        }}
-        .link-text {{
-            color: #2563eb;
-            word-break: break-all;
-        }}
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; }}
+        .container {{ max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }}
+        .header {{ background-color: #1e293b; padding: 30px; text-align: center; }}
+        .header img {{ max-height: 50px; margin-bottom: 15px; }}
+        .header h1 {{ color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; }}
+        .content {{ padding: 40px; line-height: 1.6; }}
+        .content p {{ margin-bottom: 20px; }}
+        .button-container {{ text-align: center; margin: 35px 0; }}
+        .button {{ background-color: #2563eb; color: #ffffff !important; padding: 14px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2); }}
+        .footer {{ background-color: #f1f5f9; padding: 30px; text-align: center; font-size: 13px; color: #64748b; border-top: 1px solid #e2e8f0; }}
+        .footer p {{ margin: 5px 0; }}
+        .link-text {{ color: #2563eb; word-break: break-all; }}
     </style>
 </head>
 <body>
@@ -105,6 +50,56 @@ BGV_INVITATION_TEMPLATE = """
             <p>&copy; {current_year} {site_name}. All rights reserved.</p>
             <p>Need help? Contact us at <a href="mailto:{support_email}">{support_email}</a></p>
             <p>This is an automated security message. Please do not reply.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+# Template for Insufficiency Notification
+INSUFFICIENCY_EMAIL_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; }}
+        .container {{ max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }}
+        .header {{ background-color: #ef4444; padding: 30px; text-align: center; }}
+        .header h1 {{ color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; }}
+        .content {{ padding: 40px; line-height: 1.6; }}
+        .content p {{ margin-bottom: 20px; }}
+        .message-box {{ background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+        .details {{ font-size: 14px; color: #64748b; margin-bottom: 20px; }}
+        .button-container {{ text-align: center; margin: 35px 0; }}
+        .button {{ background-color: #ef4444; color: #ffffff !important; padding: 14px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; }}
+        .footer {{ background-color: #f1f5f9; padding: 30px; text-align: center; font-size: 13px; color: #64748b; border-top: 1px solid #e2e8f0; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Action Required: Insufficiency Reported</h1>
+        </div>
+        <div class="content">
+            <p>Dear <strong>{candidate_name}</strong>,</p>
+            <p>During our verification process for your application (Case: {case_ref}), an insufficiency was noted for the following check:</p>
+            <div class="details">
+                <strong>Check Type:</strong> {check_name}<br>
+                <strong>Reference ID:</strong> {case_ref}
+            </div>
+            <p><strong>Message from our verification team:</strong></p>
+            <div class="message-box">
+                {custom_message}
+            </div>
+            <p>Please click the button below to securely upload the requested documents or provide further information.</p>
+            <div class="button-container">
+                <a href="{upload_link}" class="button">Upload Documents</a>
+            </div>
+            <p>Best regards,<br>The {site_name} Team</p>
+        </div>
+        <div class="footer">
+            <p>&copy; {current_year} {site_name}. All rights reserved.</p>
+            <p>Need help? Contact us at {support_email}</p>
         </div>
     </div>
 </body>
@@ -149,6 +144,31 @@ def send_email_sync(to_email: str, subject: str, html_content: str):
     except Exception as e:
         logger.error(f"❌ Email Service Error: {str(e)}")
         return False
+
+async def send_insufficiency_email(to_email: str, candidate_name: str, case_ref: str, check_name: str, custom_message: str, upload_link: str):
+    """
+    Sends an insufficiency notification email to the candidate.
+    """
+    import datetime
+    site_name = os.getenv("SITE_NAME", "BGVMS")
+    support_email = os.getenv("SUPPORT_EMAIL", f"support@{site_name.lower().replace(' ', '')}.com")
+    
+    html_content = INSUFFICIENCY_EMAIL_TEMPLATE.format(
+        candidate_name=candidate_name,
+        case_ref=case_ref,
+        check_name=check_name,
+        custom_message=custom_message,
+        upload_link=upload_link,
+        site_name=site_name,
+        support_email=support_email,
+        current_year=datetime.datetime.now().year
+    )
+    
+    subject = f"Urgent: Action Required for your {site_name} Verification"
+    
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
 
 async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_link: str):
     """

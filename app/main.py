@@ -4,7 +4,8 @@ from . import (
     models, auth_routes, customer_routes, partner_routes, 
     user_routes, candidate_routes, batch_routes, case_routes, 
     verification_routes, stats_routes, role_routes, media_routes,
-    notification_routes, ai_routes, billing_routes, client_doc_routes
+    notification_routes, ai_routes, billing_routes, client_doc_routes,
+    public_routes
 )
 
 
@@ -114,6 +115,7 @@ api_v1.include_router(notification_routes.router)
 api_v1.include_router(ai_routes.router)
 api_v1.include_router(billing_routes.router)
 api_v1.include_router(client_doc_routes.router)
+api_v1.include_router(public_routes.router)
 
 
 

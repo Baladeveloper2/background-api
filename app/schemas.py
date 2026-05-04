@@ -325,6 +325,23 @@ class Case(CaseBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+class InsufficiencyRead(BaseModel):
+    id: str
+    case_id: str
+    check_id: str
+    raised_by: str
+    raised_by_role: Optional[str] = None
+    message: str
+    is_resolved: bool = False
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
+    resolved_remarks: Optional[str] = None
+    created_at: datetime
+    check_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CaseRead(Case):
     candidate: Optional[Candidate] = None
     candidate_name: Optional[str] = None
@@ -340,6 +357,7 @@ class CaseRead(Case):
     is_at_risk: Optional[bool] = False
     in_tat: Optional[int] = 0
     out_tat: Optional[int] = 0
+    insufficiencies: List[InsufficiencyRead] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -573,6 +591,8 @@ class NotificationMarkRead(BaseModel):
 
 class ResolveInsufficiencyRequest(BaseModel):
     remarks: str
+    check_id: Optional[str] = None
+    documents: Optional[List[Dict[str, Any]]] = None
 
 class SendBgvLinkRequest(BaseModel):
     checks: List[str]
@@ -580,6 +600,22 @@ class SendBgvLinkRequest(BaseModel):
 class BulkInsufficientRequest(BaseModel):
     case_ids: List[str]
     reason: Optional[str] = "Incomplete documentation"
+
+class RaiseInsufficiencyRequest(BaseModel):
+    message: str
+
+class PublicInsufficiencyResponse(BaseModel):
+    id: str
+    status: str
+    message: str
+    candidate_name: str
+    case_ref: str
+    check_name: str
+    customer_name: str
+
+class PublicInsufficiencySubmit(BaseModel):
+    remarks: str
+    documents: List[dict] = []
 
 class InviteCandidateRequest(BaseModel):
     name: str

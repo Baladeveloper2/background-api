@@ -33,6 +33,7 @@ async def main():
             CREATE TABLE IF NOT EXISTS insufficiency_logs (
                 id VARCHAR(36) NOT NULL,
                 case_id VARCHAR(36) NOT NULL,
+                check_id VARCHAR(36),
                 user_id VARCHAR(36) NOT NULL,
                 from_status VARCHAR(50) NOT NULL,
                 notes TEXT,
@@ -40,13 +41,25 @@ async def main():
                 resolved_at DATETIME,
                 PRIMARY KEY (id),
                 INDEX ix_insufficiency_logs_case_id (case_id),
+                INDEX ix_insufficiency_logs_check_id (check_id),
                 INDEX ix_insufficiency_logs_user_id (user_id),
                 INDEX ix_insufficiency_logs_marked_at (marked_at),
                 FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE,
+                FOREIGN KEY (check_id) REFERENCES verification_checks(id) ON DELETE CASCADE,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
         """))
         print("SUCCESS: 'insufficiency_logs' table created.")
+        
+        # 3. Add check_id column to insufficiency_logs if not exists
+        print("Ensuring 'check_id' exists in 'insufficiency_logs'...")
+        try:
+            await conn.execute(text("ALTER TABLE insufficiency_logs ADD COLUMN check_id VARCHAR(36) AFTER case_id;"))
+            await conn.execute(text("CREATE INDEX ix_insufficiency_logs_check_id ON insufficiency_logs (check_id);"))
+            await conn.execute(text("ALTER TABLE insufficiency_logs ADD CONSTRAINT fk_insuff_check FOREIGN KEY (check_id) REFERENCES verification_checks(id) ON DELETE CASCADE;"))
+            print("SUCCESS: 'check_id' column added.")
+        except Exception as e:
+            print(f"INFO: 'check_id' column check: {e}")
 
     print("Migration completed successfully!")
     await async_engine.dispose()

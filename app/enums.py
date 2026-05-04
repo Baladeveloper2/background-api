@@ -37,6 +37,7 @@ class CheckStatus(str, enum.Enum):
     QC_PENDING = "QC_PENDING"
     QC_VERIFIED = "QC_VERIFIED"
     COMPLETED = "COMPLETED"
+    INSUFFICIENT = "INSUFFICIENT"
 
 class NotificationChannel(str, enum.Enum):
     SYSTEM = "SYSTEM"
