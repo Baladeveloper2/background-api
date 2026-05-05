@@ -77,13 +77,20 @@ async def get_customer_ledger(customer_id: str, db: AsyncSession = Depends(get_a
     
     ledger = []
     for c in cases:
-        case_total = sum(chk.rate or 0 for chk in c.checks)
+        # Build itemized check breakdown: [{check_type, rate}]
+        check_items = [
+            {"check_type": chk.check_type, "rate": float(chk.rate or 0)}
+            for chk in c.checks
+        ]
+        case_total = sum(item["rate"] for item in check_items)
         ledger.append({
             "case_ref": c.case_ref_no,
             "candidate": c.candidate.name if c.candidate else "Unknown",
             "completed_at": c.completed_date,
-            "checks": [chk.check_type for chk in c.checks],
+            "checks": [chk.check_type for chk in c.checks],  # kept for backward compat
+            "check_items": check_items,  # NEW: itemized breakdown
             "billing_amount": float(case_total)
         })
         
     return ledger
+
