@@ -696,7 +696,8 @@ async def raise_check_insufficiency(
             role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
             message=data.message,
             status="INSUFFICIENT",
-            token=token
+            token=token,
+            documents=data.documents or []
         )
         db.add(new_insuff)
     

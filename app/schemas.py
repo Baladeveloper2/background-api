@@ -614,6 +614,7 @@ class BulkInsufficientRequest(BaseModel):
 
 class RaiseInsufficiencyRequest(BaseModel):
     message: str
+    documents: Optional[List[Dict[str, Any]]] = []
 
 class PublicInsufficiencyResponse(BaseModel):
     id: str
