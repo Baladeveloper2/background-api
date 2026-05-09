@@ -9,8 +9,12 @@ import uuid
 from anyio import to_thread
 from functools import partial
 from .auth_routes import get_current_user, limiter
-from .models import User
+from .models import User, DocumentMetadata
 from . import aws_utils
+from .database import get_async_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+import hashlib
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -18,7 +22,8 @@ router = APIRouter(prefix="/media", tags=["media"])
 @limiter.limit("50/minute")
 async def public_upload_file(
     request: Request,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_async_db)
 ):
     """Exclusively S3 public upload for candidates."""
     if not aws_utils.s3_client:
@@ -31,6 +36,15 @@ async def public_upload_file(
             raise HTTPException(status_code=400, detail=f"Unsupported file format ({ext})")
 
         file_data = await file.read()
+        
+        # Calculate Hash for Fraud Detection
+        file_hash = hashlib.sha256(file_data).hexdigest()
+        
+        # Check for cross-candidate duplication (Fraud Indicator)
+        stmt = select(DocumentMetadata).filter(DocumentMetadata.file_hash == file_hash)
+        existing = await db.execute(stmt)
+        duplicate = existing.scalar_one_or_none()
+        
         unique_filename = f"public_documents/{uuid.uuid4()}_{file.filename}"
         
         await to_thread.run_sync(
@@ -42,6 +56,16 @@ async def public_upload_file(
                 ContentType=file.content_type
             )
         )
+
+        # Store Metadata
+        new_meta = DocumentMetadata(
+            file_hash=file_hash,
+            file_name=file.filename,
+            mime_type=file.content_type,
+            size=len(file_data)
+        )
+        db.add(new_meta)
+        await db.commit()
         
         return {
             "url": f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}",
@@ -50,7 +74,9 @@ async def public_upload_file(
             "original_filename": file.filename,
             "mimetype": file.content_type,
             "size": len(file_data),
-            "storage_provider": "s3"
+            "storage_provider": "s3",
+            "is_duplicate": duplicate is not None,
+            "duplicate_info": f"Previously uploaded on {duplicate.created_at.date()}" if duplicate else None
         }
     except Exception as e:
         logging.error(f"S3 Public Upload error: {str(e)}", exc_info=True)

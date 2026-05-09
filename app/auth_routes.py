@@ -111,7 +111,10 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
 @router.post("/login", response_model=schemas.Token)
 @limiter.limit("5/minute")
 async def login_for_access_token(request: Request, db: AsyncSession = Depends(database.get_async_db), form_data: OAuth2PasswordRequestForm = Depends()):
-    stmt = select(models.User).options(selectinload(models.User.role_rel)).filter(models.User.email == form_data.username)
+    stmt = select(models.User).options(
+        selectinload(models.User.role_rel),
+        selectinload(models.User.customer)
+    ).filter(models.User.email == form_data.username)
     res = await db.execute(stmt)
     user = res.unique().scalar_one_or_none()
     
@@ -131,7 +134,44 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
         },
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    return {"access_token": token, "token_type": "bearer"}
+
+    branding = None
+    if user.customer:
+        branding = {
+            "primary": user.customer.brand_primary_color,
+            "secondary": user.customer.brand_secondary_color,
+            "logo": user.customer.logo_url
+        }
+
+    return {
+        "access_token": token, 
+        "token_type": "bearer",
+        "branding": branding
+    }
+
+@router.get("/me")
+async def get_me(current_user: models.User = Depends(get_current_user), db: AsyncSession = Depends(database.get_async_db)):
+    """Return full user details including branding for session hydration."""
+    stmt = select(models.Customer).filter(models.Customer.id == current_user.customer_id)
+    res = await db.execute(stmt)
+    customer = res.scalar_one_or_none()
+    
+    branding = None
+    if customer:
+        branding = {
+            "primary": customer.brand_primary_color,
+            "secondary": customer.brand_secondary_color,
+            "logo": customer.logo_url
+        }
+        
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "full_name": current_user.full_name,
+        "role": str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role),
+        "customer_id": current_user.customer_id,
+        "branding": branding
+    }
 
 @router.post("/register", response_model=schemas.User)
 async def register_user(user: schemas.UserCreate, db: AsyncSession = Depends(database.get_async_db)):

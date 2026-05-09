@@ -2,6 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case, update, delete
+from sqlalchemy.exc import IntegrityError
+
 from sqlalchemy.orm import selectinload
 from typing import List, Optional, Dict, Any
 from . import models, schemas
@@ -63,8 +65,16 @@ async def create_batch(request: Request, batch: schemas.BatchCreate, db: AsyncSe
         
     db_batch = models.Batch(**batch.dict())
     db.add(db_batch)
-    await db.commit()
-    await db.refresh(db_batch)
+    try:
+        await db.commit()
+        await db.refresh(db_batch)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Batch number '{batch.batch_no}' or CL Ref '{batch.cl_ref_no}' already exists."
+        )
+    
     # Bust summary cache so new batch appears immediately
     await clear_cache("batches")
     return db_batch

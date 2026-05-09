@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, case
 from typing import List, Optional
 import os
 import uuid
@@ -29,6 +29,7 @@ async def get_document_summary(
         models.Customer.id,
         models.Customer.name,
         func.count(models.ClientDocument.id).label("total_docs"),
+        func.sum(case((and_(models.ClientDocument.is_read == False, models.ClientDocument.is_folder == False), 1), else_=0)).label("unread_docs"),
         func.max(models.ClientDocument.created_at).label("latest_upload")
     ).outerjoin(models.ClientDocument, models.Customer.id == models.ClientDocument.customer_id) \
      .group_by(models.Customer.id, models.Customer.name)
@@ -138,7 +139,8 @@ async def list_client_documents(
             "file_path": doc.file_path,
             "file_type": doc.file_type,
             "uploaded_by": doc.uploaded_by,
-            "created_at": doc.created_at
+            "created_at": doc.created_at,
+            "is_read": doc.is_read
         }
         if doc.is_folder:
             c_stmt = select(func.count(models.ClientDocument.id)).filter(models.ClientDocument.parent_id == doc.id)
@@ -196,7 +198,39 @@ async def download_document(
         raise HTTPException(403, detail="Access denied")
     
     url = await aws_utils.generate_presigned_url(doc.file_path, as_attachment=as_attachment, filename=doc.name)
+    
+    # Mark as read if not already
+    if not doc.is_read:
+        doc.is_read = True
+        doc.read_at = datetime.utcnow()
+        doc.read_by = current_user.id
+        await db.commit()
+        
     return {"url": url}
+
+@router.post("/{doc_id}/toggle-read")
+async def toggle_document_read(
+    doc_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    stmt = select(models.ClientDocument).filter(models.ClientDocument.id == doc_id)
+    res = await db.execute(stmt)
+    doc = res.scalar_one_or_none()
+    
+    if not doc:
+        raise HTTPException(404, detail="Document not found")
+        
+    doc.is_read = not doc.is_read
+    if doc.is_read:
+        doc.read_at = datetime.utcnow()
+        doc.read_by = current_user.id
+    else:
+        doc.read_at = None
+        doc.read_by = None
+        
+    await db.commit()
+    return {"id": doc.id, "is_read": doc.is_read}
 
 @router.delete("/{doc_id}")
 async def delete_document(

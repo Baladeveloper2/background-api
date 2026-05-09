@@ -18,7 +18,9 @@ def run_migrations():
         # Upgrade TEXT columns to MEDIUMTEXT for large JSON/Base64 data
         "ALTER TABLE verification_checks MODIFY data MEDIUMTEXT;",
         "ALTER TABLE candidates MODIFY address_details MEDIUMTEXT;",
-        "ALTER TABLE candidates MODIFY documents MEDIUMTEXT;"
+        "ALTER TABLE candidates MODIFY documents MEDIUMTEXT;",
+        "ALTER TABLE candidates MODIFY pan_no VARCHAR(255);",
+        "ALTER TABLE candidates MODIFY passport_no VARCHAR(255);"
     ]
     
     with engine.connect() as connection:

@@ -202,6 +202,7 @@ async def notify_documents_submitted(
     """
     title = "📋 Documents Submitted"
     message = f"Candidate {candidate_name} has submitted all required documents for Case {case_ref}. Please review and proceed with verification."
+    email_tasks = []
 
     # 1. Notify the client contacts
     for user in customer_users:
@@ -218,7 +219,7 @@ async def notify_documents_submitted(
                 if background_tasks:
                     background_tasks.add_task(email_utils.send_submission_notification_email, user.email, candidate_name, case_ref)
                 else:
-                    await email_utils.send_submission_notification_email(user.email, candidate_name, case_ref)
+                    email_tasks.append(email_utils.send_submission_notification_email(user.email, candidate_name, case_ref))
         except Exception as e:
             logger.error(f"Failed to notify customer user {user.id}: {str(e)}")
 
@@ -242,9 +243,16 @@ async def notify_documents_submitted(
                     if background_tasks:
                         background_tasks.add_task(email_utils.send_submission_notification_email, user.email, candidate_name, case_ref)
                     else:
-                        await email_utils.send_submission_notification_email(user.email, candidate_name, case_ref)
+                        email_tasks.append(email_utils.send_submission_notification_email(user.email, candidate_name, case_ref))
             except Exception as e:
                 logger.error(f"Failed to notify internal user {user.id}: {str(e)}")
+                
+        # Dispatch all concurrent email tasks if any were accumulated
+        if email_tasks:
+            import asyncio
+            asyncio.create_task(asyncio.gather(*email_tasks, return_exceptions=True))
+            logger.info(f"Dispatched {len(email_tasks)} concurrent emails in background.")
+            
     except Exception as e:
         logger.error(f"Failed to fetch internal users for notification: {str(e)}")
 

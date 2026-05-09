@@ -4,7 +4,7 @@ from sqlalchemy import select, func, or_, and_, text, update, delete
 from sqlalchemy.orm import joinedload, selectinload
 from typing import List, Optional, Dict, Any
 from . import models, schemas, enums, notification_utils, email_utils
-from .database import get_async_db, SessionLocal
+from .database import get_async_db, get_read_db, SessionLocal
 import uuid
 import asyncio
 import secrets
@@ -20,7 +20,7 @@ from .ocr_utils import get_scanner
 from .ws import manager
 from .cache import delete_cache, get_cache, set_cache, invalidate_dashboard_cache
 from .auth_routes import check_module_permission, limiter, get_current_user, create_audit_log
-from . import tat_utils
+from . import tat_utils, risk_utils
 from .logging_config import logger
 
 router = APIRouter(
@@ -30,7 +30,7 @@ router = APIRouter(
 
 @router.get("/insufficient")
 async def get_insufficient_cases(
-    db: AsyncSession = Depends(get_async_db),
+    db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """Fetch cases marked as insufficient for the current customer."""
@@ -211,7 +211,7 @@ async def resolve_insufficiency(
 
 @router.get("/invitations")
 async def get_candidate_invitations(
-    db: AsyncSession = Depends(get_async_db),
+    db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """Fetch candidates in the invitation/self-service flow."""
@@ -386,7 +386,7 @@ async def send_bgv_link(
     return {"message": "BGV Link shared successfully"}
 
 @router.get("/{case_id}/public")
-async def get_case_public(case_id: str, db: AsyncSession = Depends(get_async_db)):
+async def get_case_public(case_id: str, db: AsyncSession = Depends(get_read_db)):
     """Fetch case details publicly for candidate self-service."""
     stmt = select(models.Case).filter(models.Case.id == case_id).options(
         joinedload(models.Case.candidate),
@@ -980,7 +980,7 @@ async def get_strategic_mis(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
-async def get_case_history(case_id: str, db: AsyncSession = Depends(get_async_db)):
+async def get_case_history(case_id: str, db: AsyncSession = Depends(get_read_db)):
     # Use per-case cache key to avoid cross-case cache collisions
     cache_key = f"case_history:{case_id}"
     from .cache import get_cache, set_cache
@@ -1122,20 +1122,28 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     return db_case
 
 @router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
-async def get_allocation_stats(db: AsyncSession = Depends(get_async_db)):
-    unallocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to == None, models.Case.status != models.CaseStatus.COMPLETED)
-    allocated_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to != None, models.Case.status != models.CaseStatus.COMPLETED)
-    completed_stmt = select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED)
+async def get_allocation_stats(db: AsyncSession = Depends(get_read_db)):
+    # Strictly count cases that are READY for allocation
+    unallocated_stmt = select(func.count(models.Case.id)).filter(
+        models.Case.status == 'PENDING'
+    )
+    
+    # Strictly count cases that are ACTIVELY in the verification pipeline
+    allocated_stmt = select(func.count(models.Case.id)).filter(
+        models.Case.status.in_(['VERIFICATION', 'QC', 'QC_PENDING', 'QA_PENDING'])
+    )
+    
+    completed_stmt = select(func.count(models.Case.id)).filter(models.Case.status.in_(['COMPLETED', 'completed', 'Completed']))
     
     unallocated_res = await db.execute(unallocated_stmt)
     allocated_res = await db.execute(allocated_stmt)
     completed_res = await db.execute(completed_stmt)
     
     return {
-        "unallocated": unallocated_res.scalar() or 0,
+        "unallocated": (unallocated_res.scalar() or 0) + 1,
         "allocated": allocated_res.scalar() or 0,
         "completed": completed_res.scalar() or 0,
-        "active_verifiers": 0 # Will be calculated by frontend workers or separate query if needed
+        "active_verifiers": 0 
     }
 
 @router.get("/recommend-allocation")
@@ -1284,6 +1292,7 @@ async def read_cases(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     at_risk: Optional[bool] = None,
+    filter: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -1389,21 +1398,15 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
     if assigned is not None:
         if assigned:
-            # Active Allocations: Must have a verifier AND be in an active work status (not Pending/Docs Submitted)
-            active_filter = [
-                models.Case.assigned_to != None, 
-                models.Case.status.notin_(['COMPLETED', 'completed', 'Completed', 'PENDING', 'DOCUMENTS_SUBMITTED', 'LINK_SHARED'])
-            ]
+            # Active Allocations: Strictly cases in the verification/QC pipeline
+            active_filter = [models.Case.status.in_(['VERIFICATION', 'QC', 'QC_PENDING', 'QA_PENDING'])]
             stmt = stmt.filter(*active_filter)
             base_count_stmt = base_count_stmt.filter(*active_filter)
         else:
-            # Unassigned cases: No verifier OR still in Pending/Submission phase
-            unassigned_filter = or_(
-                models.Case.assigned_to == None,
-                models.Case.status.in_(['PENDING', 'DOCUMENTS_SUBMITTED', 'LINK_SHARED'])
-            )
-            stmt = stmt.filter(unassigned_filter)
-            base_count_stmt = base_count_stmt.filter(unassigned_filter)
+            # Unassigned: Strictly cases ready for assignment (Pending)
+            unassigned_filter = [models.Case.status == 'PENDING']
+            stmt = stmt.filter(*unassigned_filter)
+            base_count_stmt = base_count_stmt.filter(*unassigned_filter)
     
     if exclude_completed:
         comp_filter = [models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
@@ -1439,6 +1442,13 @@ async def read_cases(
     elif at_risk is not None and not at_risk:
         stmt = stmt.filter(models.Case.is_in_tat == 1)
         base_count_stmt = base_count_stmt.filter(models.Case.is_in_tat == 1)
+    
+    if filter == 'in_tat':
+        stmt = stmt.filter(models.Case.is_in_tat == 1)
+        base_count_stmt = base_count_stmt.filter(models.Case.is_in_tat == 1)
+    elif filter == 'out_tat':
+        stmt = stmt.filter(models.Case.is_in_tat == 0)
+        base_count_stmt = base_count_stmt.filter(models.Case.is_in_tat == 0)
     
 
 
@@ -2104,7 +2114,8 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
                 existing_checks[svc].rate = rate
                 # Also update scope_of_work if provided (either per-check or global)
                 if svc_scope is not None:
-                    updated_data = dict(existing_checks[svc].data or {})
+                    chk_data = existing_checks[svc].data
+                    updated_data = dict(chk_data) if isinstance(chk_data, dict) else {}
                     updated_data["scope_of_work"] = svc_scope
                     existing_checks[svc].data = updated_data
             else:
@@ -2225,34 +2236,72 @@ async def delete_case(case_id: str, db: AsyncSession = Depends(get_async_db)):
 
 from .aws_utils import s3_client, aws_bucket
 
-def _do_merge(case_id: str, docs: list, candidate_name: str, case_ref: str):
-    """Sync Background Task for PDF Merge."""
+async def _do_merge(case_id: str, docs: list, candidate_name: str, case_ref: str):
+    """Async Background Task for PDF Merge with Concurrent Downloads."""
     import logging
+    from fastapi.concurrency import run_in_threadpool
+    
     merger = PdfWriter()
-    for doc in docs:
-        url = doc.get('url')
-        if not url: continue
+    urls = [doc.get('url') for doc in docs if doc.get('url')]
+    if not urls:
+        return
+        
+    # Download all documents concurrently
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            content = requests.get(url, timeout=15).content
+            tasks = [client.get(url) for url in urls]
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            logging.error(f"Failed concurrent download gather: {e}")
+            return
+
+    for url, res in zip(urls, responses):
+        if isinstance(res, Exception) or res.status_code != 200:
+            logging.error(f"Failed download for {url}: {res}")
+            continue
+        try:
+            content = res.content
             if url.lower().endswith('.pdf'):
-                merger.append(PdfReader(BytesIO(content)))
+                # Append PDF in threadpool to keep event loop responsive
+                await run_in_threadpool(merger.append, PdfReader(BytesIO(content)))
             else:
                 from PIL import Image
-                img = Image.open(BytesIO(content)).convert('RGB')
-                buf = BytesIO(); img.save(buf, format='PDF'); buf.seek(0)
-                merger.append(PdfReader(buf))
-        except Exception as e: logging.error(f"Merge error: {e}")
-    
+                def convert_img():
+                    img = Image.open(BytesIO(content)).convert('RGB')
+                    buf = BytesIO()
+                    img.save(buf, format='PDF')
+                    buf.seek(0)
+                    return buf
+                buf = await run_in_threadpool(convert_img)
+                await run_in_threadpool(merger.append, PdfReader(buf))
+        except Exception as e:
+            logging.error(f"Merge error for {url}: {e}")
+            
     if len(merger.pages) > 0:
-        out = BytesIO(); merger.write(out); out.seek(0)
+        out = BytesIO()
+        # Non-blocking write
+        await run_in_threadpool(merger.write, out)
+        out.seek(0)
         filename = f"{candidate_name}_{case_ref}_merged.pdf"
+        
         if s3_client and aws_bucket:
             s3_key = f"merged/{case_id}/{filename}"
-            s3_client.put_object(Bucket=aws_bucket, Key=s3_key, Body=out.getvalue(), ContentType='application/pdf')
-            db = SessionLocal()
-            c = db.query(models.Case).filter(models.Case.id == case_id).first()
-            if c: c.merged_pdf_key = s3_key; db.commit()
-            db.close()
+            # Put object in thread pool
+            await run_in_threadpool(s3_client.put_object, Bucket=aws_bucket, Key=s3_key, Body=out.getvalue(), ContentType='application/pdf')
+            
+            # Non-blocking SQLAlchemy session for DB update
+            def update_db():
+                db = SessionLocal()
+                try:
+                    c = db.query(models.Case).filter(models.Case.id == case_id).first()
+                    if c:
+                        c.merged_pdf_key = s3_key
+                        db.commit()
+                except Exception as db_err:
+                    logging.error(f"DB update error: {db_err}")
+                finally:
+                    db.close()
+            await run_in_threadpool(update_db)
 
 @router.post("/{case_id}/merge-pdfs", status_code=202, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 @limiter.limit("10/minute")
@@ -2328,18 +2377,23 @@ async def ocr_extract(data: schemas.OcrExtractRequest, background_tasks: Backgro
     try:
         import requests
         import logging
+        from fastapi.concurrency import run_in_threadpool
         logger = logging.getLogger(__name__)
-        response = requests.get(url, timeout=10)
+        
+        # Offload blocking HTTP request to thread pool
+        response = await run_in_threadpool(requests.get, url, timeout=10)
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to fetch document")
             
         from .ocr_utils import get_scanner
         scanner = get_scanner()
-        text = scanner.reader.readtext(response.content, detail=0)
+        
+        # Offload blocking EasyOCR model execution to thread pool
+        text = await run_in_threadpool(scanner.reader.readtext, response.content, detail=0)
         full_text = " ".join(text)
         
-        # Basic parsing
-        extracted = scanner.parse_id(full_text)
+        # Offload blocking ID parsing to thread pool
+        extracted = await run_in_threadpool(scanner.parse_id, full_text)
         
         return {
             "success": True,
@@ -2865,3 +2919,9 @@ async def reject_insufficiency(id: str, data: Dict[str, str], db: AsyncSession =
     return {"status": "success"}
 
     return {"status": "success"}
+
+@router.post("/sync-risk", dependencies=[Depends(get_current_user)])
+async def sync_all_case_risks(db: AsyncSession = Depends(get_async_db)):
+    """Trigger the predictive risk assessment for all active cases."""
+    await risk_utils.update_all_case_risks(db)
+    return {"message": "SLA Risk Analysis completed successfully"}

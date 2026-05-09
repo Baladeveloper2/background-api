@@ -501,15 +501,21 @@ class DailyReportResponse(BaseModel):
     totals: DailyStat
 
 class VerifierDailyStat(BaseModel):
-    id: str
+    verifier_id: str
     verifier_name: str
     verifier_email: str
     role: str
     assigned: int
-    completed: int
-    in_progress: int
+    data_entry: int = 0
+    wip: int = 0
     insufficient: int = 0
+    interim: int = 0
+    qc_pending: int = 0
+    completed: int = 0
+    today_tat: int = 0
     revoked: int = 0
+    earnings: float = 0.0
+    efficiency: float = 0.0
 
 class VerifierDailyResponse(BaseModel):
     date: str
@@ -518,12 +524,17 @@ class VerifierDailyResponse(BaseModel):
 class TodayRecord(BaseModel):
     client: str
     received: int
-    completed: int
-    pending: int
-    insufficient: int
-    verifier_revoke_count: Optional[int] = 0
-    qc_revoke_count: Optional[int] = 0
-    tat_percent: Optional[float] = 0.0
+    data_entry: int = 0
+    wip: int = 0
+    pending: int = 0
+    insufficient: int = 0
+    interim: int = 0
+    qc_pending: int = 0
+    completed: int = 0
+    today_tat: int = 0
+    verifier_revoke_count: int = 0
+    qc_revoke_count: int = 0
+    tat_percent: float = 0.0
 
 class TodayRecordsResponse(BaseModel):
     date: str

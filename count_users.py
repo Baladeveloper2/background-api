@@ -5,10 +5,10 @@ from sqlalchemy import select
 
 async def check():
     async with AsyncSessionLocal() as db:
-        res = await db.execute(select(models.Case).filter(models.Case.status == 'DOCUMENTS_SUBMITTED'))
-        cases = res.scalars().all()
-        for c in cases:
-            print(f"ID: {c.id}, Assigned: {c.assigned_to}")
+        res = await db.execute(select(models.User.full_name))
+        names = [r[0] for r in res.all()]
+        print(f"Total Users: {len(names)}")
+        print(f"Names: {names}")
 
 if __name__ == "__main__":
     asyncio.run(check())

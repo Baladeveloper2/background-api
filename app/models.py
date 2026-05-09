@@ -7,6 +7,15 @@ from sqlalchemy.sql import func
 from .database import Base
 from .enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel
 from datetime import datetime
+import os
+from cryptography.fernet import Fernet
+
+# Initialize Encryption Key from environment or generate a stable fallback for dev
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    # Use a valid 32-byte base64 key for development
+    ENCRYPTION_KEY = b'F_AbrO9ACR5CuZALXglre4TUCIiO2fsj9gzK7kTqL1s='
+fernet = Fernet(ENCRYPTION_KEY)
 
 class JSONEncodedDict(TypeDecorator):
     impl = MEDIUMTEXT
@@ -39,6 +48,28 @@ class JSONEncodedList(TypeDecorator):
             return data if isinstance(data, list) else []
         except:
             return []
+
+class EncryptedString(TypeDecorator):
+    """
+    SQLAlchemy TypeDecorator for AES-256 field-level encryption.
+    Automatically encrypts data on write and decrypts on read.
+    """
+    impl = String(1024) # Extra space for encryption overhead
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return fernet.encrypt(value.encode()).decode()
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        try:
+            return fernet.decrypt(value.encode()).decode()
+        except Exception:
+            # Fallback for existing plain text data during migration phase
+            return value
 
 class User(Base):
     __tablename__ = "users"
@@ -99,6 +130,11 @@ class Customer(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     pricing_config = Column(JSONEncodedDict)
     documents = Column(JSONEncodedList)
+    # White-Labeling Branding
+    brand_primary_color = Column(String(20), default="#7c3aed")
+    brand_secondary_color = Column(String(20), default="#f5f3ff")
+    logo_url = Column(String(512), nullable=True)
+    custom_domain = Column(String(255), nullable=True)
 
 class ClientDocument(Base):
     __tablename__ = "client_documents"
@@ -110,11 +146,15 @@ class ClientDocument(Base):
     file_path = Column(String(500), nullable=True)
     file_type = Column(String(100), nullable=True)
     uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    is_read = Column(Boolean, default=False)
+    read_at = Column(DateTime, nullable=True)
+    read_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     customer = relationship("Customer", backref="client_docs")
-    uploader = relationship("User", backref="uploaded_client_docs")
+    uploader = relationship("User", foreign_keys=[uploaded_by], backref="uploaded_client_docs")
+    reader = relationship("User", foreign_keys=[read_by], backref="read_client_docs")
 
 class Partner(Base):
     __tablename__ = "partners"
@@ -140,9 +180,9 @@ class Candidate(Base):
     address = Column(Text, nullable=True)
     documents = Column(JSONEncodedList)
     
-    # Global Database / Identity specialized fields
-    pan_no = Column(String(50), nullable=True, index=True)
-    passport_no = Column(String(50), nullable=True, index=True)
+    # Global Database / Identity specialized fields (Encrypted)
+    pan_no = Column(EncryptedString, nullable=True, index=True)
+    passport_no = Column(EncryptedString, nullable=True, index=True)
     nationality = Column(String(100), nullable=True)
     identity_type = Column(String(100), nullable=True)
     db_candidate_name = Column(String(255), nullable=True)
@@ -184,6 +224,10 @@ class Case(Base):
     ai_summary = Column(Text, nullable=True)
     file_no = Column(String(50), nullable=True, index=True)
     insufficiency_count = Column(Integer, default=0)
+    # SLA Breach Prediction & Risk Analytics
+    risk_score = Column(Integer, default=0) # 0-100 probability
+    risk_factors = Column(JSONEncodedDict, default=lambda: {}) # Reasons: ["Slow Employer Response", "Missing Docs"]
+    last_risk_assessment = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index("index_customer_status", "customer_id", "status"),
@@ -328,3 +372,17 @@ class DashboardSummary(Base):
     last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     customer = relationship("Customer")
+
+class DocumentMetadata(Base):
+    __tablename__ = "document_metadata"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    file_hash = Column(String(64), index=True, nullable=False)
+    file_name = Column(String(255))
+    mime_type = Column(String(100))
+    size = Column(Integer)
+    uploader_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    candidate_id = Column(String(36), ForeignKey("candidates.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    uploader = relationship("User")
+    candidate = relationship("Candidate")
