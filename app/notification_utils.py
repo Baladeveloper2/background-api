@@ -75,8 +75,36 @@ async def create_notification(
 # --- Specialized Stakeholder Alerting ---
 
 async def get_users_by_role(db: AsyncSession, roles: list[enums.UserRole]):
-    """Helper to fetch all users with given roles."""
-    stmt = select(models.User).filter(models.User.role.in_(roles), models.User.status == "ACTIVE")
+    """
+    Helper to fetch all users with given roles.
+    Checks both the User.role Enum column and the linked Role.name (RBAC).
+    """
+    # Map Enums to human-readable names used in RBAC Role.name
+    role_name_map = {
+        enums.UserRole.QC: ["QC", "QC Verifier", "Quality Control"],
+        enums.UserRole.SUPER_ADMIN: ["Super Admin", "SUPER_ADMIN"],
+        enums.UserRole.ADMIN: ["Admin", "ADMIN"],
+        enums.UserRole.MANAGER: ["Manager", "MANAGER"]
+    }
+    
+    target_names = []
+    for r in roles:
+        if r in role_name_map:
+            target_names.extend(role_name_map[r])
+        target_names.append(r.value if hasattr(r, 'value') else str(r))
+
+    from sqlalchemy import or_
+    stmt = (
+        select(models.User)
+        .outerjoin(models.Role, models.User.role_id == models.Role.id)
+        .filter(
+            or_(
+                models.User.role.in_(roles),
+                models.Role.name.in_(target_names)
+            ),
+            models.User.status == "ACTIVE"
+        )
+    )
     res = await db.execute(stmt)
     return res.scalars().all()
 

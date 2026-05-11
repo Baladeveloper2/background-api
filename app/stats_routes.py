@@ -483,6 +483,7 @@ async def get_verifier_daily(
                 "assigned": int(row[5]),
                 "data_entry": int(row[6]),
                 "wip": int(row[7]),
+                "in_progress": int(row[7]),
                 "insufficient": int(row[8]),
                 "interim": int(row[9]),
                 "qc_pending": int(row[10]),

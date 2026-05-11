@@ -5,7 +5,7 @@ from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
-from .enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel
+from .enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel, QCStatus, FinalResult, QCIssueStatus, QCIssueType
 from datetime import datetime
 import os
 from cryptography.fernet import Fernet
@@ -228,6 +228,11 @@ class Case(Base):
     risk_score = Column(Integer, default=0) # 0-100 probability
     risk_factors = Column(JSONEncodedDict, default=lambda: {}) # Reasons: ["Slow Employer Response", "Missing Docs"]
     last_risk_assessment = Column(DateTime, nullable=True)
+    
+    # Global Verdict & Quality Audit Rollup
+    final_result = Column(String(50), nullable=True) # Holistic Case Verdict
+    final_report_status = Column(String(50), nullable=True) # POSITIVE, NEGATIVE, DISCREPANCY, INTERIM, INSUFFICIENT
+    qc_remarks = Column(Text, nullable=True) # Overall QC Remarks
 
     __table_args__ = (
         Index("index_customer_status", "customer_id", "status"),
@@ -258,7 +263,74 @@ class VerificationCheck(Base):
     verifier_remarks = Column(Text)
     verified_date = Column(DateTime(timezone=True), nullable=True, index=True)
     rate = Column(Float, default=0.0)
+    
+    # New Operational Fields for Dynamic Workflow
+    confidence_score = Column(Float, default=0.0) # 0-100
+    api_sync_status = Column(String(100), default="NOT_SYNCED") # e.g. "SYNCED", "FAILED", "PENDING"
+    assigned_verifier_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    
+    # Enterprise Enterprise QC Flow Extensions
+    qc_verifier_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    qc_status = Column(String(50), default="PENDING_REVIEW") 
+    final_result = Column(String(50), nullable=True) # Maps to FinalResult Enum string values
+    qc_remarks = Column(Text, nullable=True)
+    qc_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Relationships
+    assigned_verifier = relationship("User", foreign_keys=[assigned_verifier_id])
+    qc_verifier = relationship("User", foreign_keys=[qc_verifier_id])
+    
+    @property
+    def assigned_verifier_name(self):
+        return self.assigned_verifier.full_name if self.assigned_verifier else None
+
+    @property
+    def qc_verifier_name(self):
+        return self.qc_verifier.full_name if self.qc_verifier else None
     insufficiencies = relationship("Insufficiency", back_populates="check", cascade="all, delete-orphan")
+    documents = relationship("VerificationDocument", back_populates="check", cascade="all, delete-orphan")
+    logs = relationship("VerificationLog", back_populates="check", cascade="all, delete-orphan")
+
+class VerificationDocument(Base):
+    __tablename__ = "verification_documents"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), index=True)
+    file_name = Column(String(255), nullable=False)
+    file_url = Column(String(512), nullable=False) # S3 Public URL or signed URL
+    file_type = Column(String(100))
+    s3_key = Column(String(255), nullable=True)
+    uploaded_by_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    check = relationship("VerificationCheck", back_populates="documents")
+    uploader = relationship("User", foreign_keys=[uploaded_by_id])
+    
+    @property
+    def uploaded_by_name(self):
+        return self.uploader.full_name if self.uploader else None
+
+class VerificationLog(Base):
+    __tablename__ = "verification_logs"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), nullable=True, index=True)
+    action = Column(String(255), nullable=False) # e.g. "STATUS_UPDATED", "DOCUMENT_UPLOADED"
+    performed_by_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    remarks = Column(Text, nullable=True)
+    old_status = Column(String(50), nullable=True)
+    new_status = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    case = relationship("Case", backref="verification_logs")
+    check = relationship("VerificationCheck", back_populates="logs")
+    performer = relationship("User", foreign_keys=[performed_by_id])
+    
+    @property
+    def performer_name(self):
+        return self.performer.full_name if self.performer else None
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -386,3 +458,23 @@ class DocumentMetadata(Base):
 
     uploader = relationship("User")
     candidate = relationship("Candidate")
+
+class QCFieldIssue(Base):
+    __tablename__ = "qc_field_issues"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), index=True, nullable=True)
+    field_name = Column(String(255), nullable=False)
+    issue_type = Column(Enum(QCIssueType), nullable=False)
+    comment = Column(Text, nullable=True)
+    raised_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True) # Usually the original verifier
+    status = Column(Enum(QCIssueStatus), default=QCIssueStatus.OPEN, index=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    case = relationship("Case", backref="qc_field_issues")
+    check = relationship("VerificationCheck", backref="qc_field_issues")
+    raiser = relationship("User", foreign_keys=[raised_by], backref="raised_qc_issues")
+    assignee = relationship("User", foreign_keys=[assigned_to], backref="assigned_qc_issues")

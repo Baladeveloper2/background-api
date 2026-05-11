@@ -104,6 +104,8 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
 
             if module == "bvs" and is_oversight:
                 return current_user
+            if module == "bms" and is_oversight and action == "read":
+                return current_user
             raise HTTPException(status_code=403, detail=f"No {action} access to {module}")
         return current_user
     return permission_checker

@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr, field_validator, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from app.enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel
+from app.enums import UserRole, Status, CaseStatus, CheckStatus, NotificationCategory, NotificationChannel, QCStatus, FinalResult, QCIssueStatus, QCIssueType
 
 class UserBase(BaseModel):
     email: str
@@ -212,6 +212,34 @@ class VerificationCheckUpdate(BaseModel):
     digital_token: Optional[str] = None
     verifier_remarks: Optional[str] = None
     verified_date: Optional[datetime] = None
+    
+    # QC-specific updates
+    qc_verifier_id: Optional[str] = None
+    qc_status: Optional[QCStatus] = None
+    final_result: Optional[FinalResult] = None
+    qc_remarks: Optional[str] = None
+    qc_reviewed_at: Optional[datetime] = None
+
+class VerificationDocumentRead(BaseModel):
+    id: str
+    file_name: str
+    file_url: str
+    file_type: Optional[str] = None
+    uploaded_at: datetime
+    uploaded_by_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class VerificationLogRead(BaseModel):
+    id: str
+    action: str
+    remarks: Optional[str] = None
+    old_status: Optional[str] = None
+    new_status: Optional[str] = None
+    created_at: datetime
+    performer_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class VerificationCheck(VerificationCheckBase):
     id: str
@@ -220,8 +248,26 @@ class VerificationCheck(VerificationCheckBase):
     candidate_name: Optional[str] = None
     customer_name: Optional[str] = None
     given_address: Optional[str] = None
+    
+    # New Operational Fields
+    confidence_score: float = 0.0
+    api_sync_status: str = "NOT_SYNCED"
+    assigned_verifier_name: Optional[str] = None
+    
+    # Enterprise QC Extension Fields
+    qc_verifier_id: Optional[str] = None
+    qc_verifier_name: Optional[str] = None
+    qc_status: str = "PENDING_REVIEW"
+    final_result: Optional[str] = None
+    qc_remarks: Optional[str] = None
+    qc_reviewed_at: Optional[datetime] = None
+    
+    # Nested Relationships
+    documents: List[VerificationDocumentRead] = []
+    logs: List[VerificationLogRead] = []
 
     model_config = ConfigDict(from_attributes=True)
+
 
 class CustomerBase(BaseModel):
     name: str
@@ -267,6 +313,9 @@ class CaseBase(BaseModel):
     qc_id: Optional[str] = None
     ai_summary: Optional[str] = None
     file_no: Optional[str] = None
+    final_result: Optional[str] = None
+    final_report_status: Optional[str] = None
+    qc_remarks: Optional[str] = None
     
     @field_validator('status', mode='before')
     @classmethod
@@ -297,6 +346,9 @@ class CaseUpdate(BaseModel):
     scope_of_work: Optional[str] = None
     check_scopes: Optional[Dict[str, str]] = None
     file_no: Optional[str] = None
+    final_result: Optional[str] = None
+    final_report_status: Optional[str] = None
+    qc_remarks: Optional[str] = None
 
 class CaseCreateExtended(BaseModel):
     batch_id: str
@@ -320,6 +372,9 @@ class Case(CaseBase):
     is_in_tat: Optional[int] = 1
     ai_summary: Optional[str] = None
     file_no: Optional[str] = None
+    final_result: Optional[str] = None
+    final_report_status: Optional[str] = None
+    qc_remarks: Optional[str] = None
     insufficiency_count: Optional[int] = 0
     checks: List[VerificationCheck] = []
 
@@ -358,8 +413,10 @@ class CaseRead(Case):
     in_tat: Optional[int] = 0
     out_tat: Optional[int] = 0
     insufficiencies: List[InsufficiencyRead] = []
+    verification_logs: List[VerificationLogRead] = [] # Global Case Logs
 
     model_config = ConfigDict(from_attributes=True)
+
 
 class InsufficiencyLogBase(BaseModel):
     case_id: str
@@ -646,3 +703,28 @@ class FaceMatchRequest(BaseModel):
 
 class OcrExtractRequest(BaseModel):
     url: str
+
+class QCFieldIssueBase(BaseModel):
+    case_id: Optional[str] = None
+    check_id: Optional[str] = None
+    field_name: str
+    issue_type: QCIssueType
+    comment: Optional[str] = None
+    assigned_to: Optional[str] = None
+
+class QCFieldIssueCreate(QCFieldIssueBase):
+    pass
+
+class QCFieldIssueRead(QCFieldIssueBase):
+    id: str
+    status: QCIssueStatus
+    raised_by: str
+    raised_by_name: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class QCFieldIssueResolve(BaseModel):
+    comment: Optional[str] = None

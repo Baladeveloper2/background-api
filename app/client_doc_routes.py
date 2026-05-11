@@ -69,10 +69,6 @@ async def upload_client_document(
         uploaded_by=current_user.id
     )
     
-    db.add(new_doc)
-    await db.commit()
-    await db.refresh(new_doc)
-    
     if not is_folder:
         try:
             # Try to get customer name
@@ -96,6 +92,9 @@ async def upload_client_document(
         except Exception as e:
             import logging
             logging.error(f"Error sending upload notification: {str(e)}")
+
+    await db.commit()
+    await db.refresh(new_doc)
             
     return new_doc
 

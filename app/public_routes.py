@@ -73,12 +73,12 @@ async def submit_candidate_insufficiency(
         if rem_res.scalar() == 0:
             db_case.status = "VERIFICATION" # Move back to queue
     
-    await db.commit()
-    
     # Notify stakeholders
     await notification_utils.notify_insufficiency_resolved(
         db, insuff.id, 
         background_tasks=background_tasks
     )
+    
+    await db.commit()
     
     return {"status": "success", "message": "Evidence submitted successfully"}

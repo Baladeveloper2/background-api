@@ -1,7 +1,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, case, update, delete
+from sqlalchemy import select, func, case, update, delete, or_
 from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy.orm import selectinload
@@ -92,7 +92,7 @@ async def read_batches_summary(
 ):
     # 1. Subquery for Case counts per batch
     case_counts = select(
-        models.Case.batch_id,
+        models.Batch.id.label("batch_uuid"),
         func.count(models.Case.id).label("actual_case_count"),
         func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("total_pending_count"),
         func.sum(case((models.Case.status == models.CaseStatus.PENDING, 1), else_=0)).label("pending_arrival_count"),
@@ -104,14 +104,21 @@ async def read_batches_summary(
         func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
         func.sum(case((models.Case.status.in_([models.CaseStatus.VERIFICATION, models.CaseStatus.QC]), 1), else_=0)).label("in_progress_count"),
         func.max(models.Case.completed_date).label("completed_date")
-    ).group_by(models.Case.batch_id).subquery()
+    ).select_from(models.Case).join(
+        models.Batch, 
+        or_(models.Case.batch_id == models.Batch.id, models.Case.batch_id == models.Batch.batch_no)
+    ).group_by(models.Batch.id).subquery()
 
     # 2. Subquery for Check values
     check_values = select(
-        models.Case.batch_id,
+        models.Batch.id.label("batch_uuid"),
         func.sum(models.VerificationCheck.rate).label("total_check_value")
-    ).join(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)\
-     .group_by(models.Case.batch_id).subquery()
+    ).select_from(models.Case).join(
+        models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id
+    ).join(
+        models.Batch,
+        or_(models.Case.batch_id == models.Batch.id, models.Case.batch_id == models.Batch.batch_no)
+    ).group_by(models.Batch.id).subquery()
 
     # 3. Main query
     stmt = select(
@@ -138,8 +145,8 @@ async def read_batches_summary(
         case_counts.c.completed_date,
         check_values.c.total_check_value
     ).join(models.Customer, models.Batch.customer_id == models.Customer.id)\
-     .outerjoin(case_counts, models.Batch.id == case_counts.c.batch_id)\
-     .outerjoin(check_values, models.Batch.id == check_values.c.batch_id)
+     .outerjoin(case_counts, models.Batch.id == case_counts.c.batch_uuid)\
+     .outerjoin(check_values, models.Batch.id == check_values.c.batch_uuid)
 
     if client: stmt = stmt.filter(models.Customer.name.ilike(f"%{client}%"))
     if batch_no: stmt = stmt.filter(models.Batch.batch_no.ilike(f"%{batch_no}%"))

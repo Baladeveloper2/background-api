@@ -28,6 +28,38 @@ router = APIRouter(
     tags=["cases"]
 )
 
+def validate_case_completion(case_obj: models.Case):
+    """
+    Enterprise Validation Routine:
+    Ensures a case cannot transition to COMPLETED until ALL associated verification 
+    modules achieve QC approval and host a final decision classification.
+    """
+    if not case_obj.checks:
+        return True
+        
+    incomplete_checks = []
+    
+    for chk in case_obj.checks:
+        q_stat = str(chk.qc_status or "PENDING_REVIEW").upper()
+        has_result = chk.final_result is not None
+        
+        # Standard Enterprise Check: Must be explicit approval + categorized result
+        is_enterprise_compliant = (q_stat == "APPROVED") and has_result
+        
+        # Backward-Compatibility Check: Allow strictly finalized legacy checks to pass
+        is_legacy_final = str(chk.status).upper() in ["GREEN", "RED", "AMBER", "STOP", "QC_VERIFIED", "COMPLETED"]
+        
+        if not (is_enterprise_compliant or is_legacy_final):
+            incomplete_checks.append(f"{chk.check_type} (QC: {q_stat}, Result: {chk.final_result or 'None'})")
+    
+    if incomplete_checks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Operational Protocol Violation: Case {case_obj.case_ref_no} cannot be finalized. "
+                   f"The following modules must receive explicit QC Approval and Final Decision first: {', '.join(incomplete_checks)}."
+        )
+    return True
+
 @router.get("/insufficient")
 async def get_insufficient_cases(
     db: AsyncSession = Depends(get_read_db),
@@ -840,8 +872,21 @@ async def export_mis_data(
         workbook = xlsxwriter.Workbook(output, {'constant_memory': True, 'in_memory': True})
         worksheet = workbook.add_worksheet('Case MIS')
         
-        # Headers
-        headers = ["Case ID", "Candidate Name", "Client Name", "Status", "Received Date", "Completed Date", "Assigned To", "TAT (Days)", "SLA Status", "In-TAT Days", "Out-TAT Days"]
+        # Headers expanded for full MIS compliance
+        headers = [
+            "Case ID", "Candidate Name", "Client Name", "Status", "Received Date", "Completed Date", 
+            "Assigned To", "TAT (Days)", "SLA Status", "In-TAT Days", "Out-TAT Days",
+            "Email", "Phone", "Employee ID", "Department", "Designation"
+        ]
+        
+        # Add columns for each possible check type (Dynamic mapping)
+        check_types = [
+            "Address", "Education", "Employment", "Criminal", "Identity", 
+            "Drug", "Credit", "Global Database", "Reference", "Social Media"
+        ]
+        for ct in check_types:
+            headers.extend([f"{ct} Status", f"{ct} Remarks", f"{ct} Date"])
+            
         for col, header in enumerate(headers):
             worksheet.write(0, col, header)
 
@@ -877,6 +922,31 @@ async def export_mis_data(
             worksheet.write(row_idx, 8, "In-TAT" if c.is_in_tat == 1 else "Out-TAT")
             worksheet.write(row_idx, 9, in_tat_days)
             worksheet.write(row_idx, 10, out_tat_days)
+            
+            # Candidate Metadata
+            worksheet.write(row_idx, 11, c.candidate.email if c.candidate else "N/A")
+            worksheet.write(row_idx, 12, c.candidate.phone if c.candidate else "N/A")
+            worksheet.write(row_idx, 13, c.candidate.client_emp_code if c.candidate else "N/A")
+            # Department/Designation from address_details if available
+            ad = c.candidate.address_details if c.candidate and c.candidate.address_details else {}
+            worksheet.write(row_idx, 14, ad.get("department", "N/A"))
+            worksheet.write(row_idx, 15, ad.get("designation", "N/A"))
+            
+            # Check-wise Status and Remarks
+            check_map = {chk.check_type.lower(): chk for chk in (c.checks or [])}
+            col_offset = 16
+            for ct in check_types:
+                chk = check_map.get(ct.lower())
+                if chk:
+                    worksheet.write(row_idx, col_offset, chk.status)
+                    worksheet.write(row_idx, col_offset + 1, chk.verifier_remarks or "")
+                    worksheet.write(row_idx, col_offset + 2, chk.verified_date.strftime("%Y-%m-%d") if chk.verified_date else "")
+                else:
+                    worksheet.write(row_idx, col_offset, "N/A")
+                    worksheet.write(row_idx, col_offset + 1, "")
+                    worksheet.write(row_idx, col_offset + 2, "")
+                col_offset += 3
+                
             row_idx += 1
 
         workbook.close()
@@ -906,7 +976,8 @@ async def get_strategic_mis(
         stmt = select(models.Case).options(
             selectinload(models.Case.candidate),
             selectinload(models.Case.customer),
-            selectinload(models.Case.checks)
+            selectinload(models.Case.checks),
+            selectinload(models.Case.assigned_user)
         )
 
         # RBAC Isolation
@@ -936,7 +1007,10 @@ async def get_strategic_mis(
         for c in cases:
             # Map check statuses with technical-to-report translation
             check_map = {k: "NA" for k in report_keys}
+            detailed_checks = []
 
+            # Deduplicate checks by type to prevent counting redundancies (e.g. 12 cards for 10 checks)
+            distinct_checks = {}
             for chk in c.checks:
                 status_label = "In Progress"
                 s = str(chk.status).upper()
@@ -963,6 +1037,30 @@ async def get_strategic_mis(
                 
                 if report_key in report_keys:
                     check_map[report_key] = status_label
+                
+                # Take the most recent one if duplicates exist
+                chk_data = {
+                    "id": chk.id,
+                    "type": chk.check_type,
+                    "status": status_label,
+                    "raw_status": chk.status,
+                    "data": chk.data or {},
+                    "remarks": chk.verifier_remarks or "",
+                    "updated_at": chk.verified_date.strftime("%Y-%m-%d %H:%M") if chk.verified_date else None,
+                    "verified_date": chk.verified_date.strftime("%Y-%m-%d") if chk.verified_date else None,
+                    "created_at_raw": chk.verified_date or datetime.min # For sorting
+                }
+                
+                if chk.check_type not in distinct_checks:
+                    distinct_checks[chk.check_type] = chk_data
+                else:
+                    # If duplicate, keep the one with more data or more recent
+                    if chk.verified_date and (not distinct_checks[chk.check_type]["created_at_raw"] or chk.verified_date > distinct_checks[chk.check_type]["created_at_raw"]):
+                         distinct_checks[chk.check_type] = chk_data
+
+            detailed_checks = list(distinct_checks.values())
+
+
 
             report.append({
                 "id": c.id,
@@ -973,11 +1071,184 @@ async def get_strategic_mis(
                 "completed_date": c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "N/A",
                 "customer_name": c.customer.name if c.customer else "N/A",
                 "status": c.status,
-                "checks": check_map
+                "assigned_to_name": c.assigned_user.full_name if c.assigned_user else "Unallocated",
+                "tat_days": c.tat_days or 10,
+                "checks": check_map,
+                "detailed_checks": detailed_checks
             })
         return report
     except Exception as e:
         logger.error(f"Error generating strategic MIS: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/strategic-mis/{case_id}")
+async def get_case_strategic_details(
+    case_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns strategic MIS details for a single specific case."""
+    try:
+        stmt = select(models.Case).options(
+            joinedload(models.Case.candidate),
+            joinedload(models.Case.customer),
+            joinedload(models.Case.assigned_user),
+            joinedload(models.Case.qc_user),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.assigned_verifier),
+            joinedload(models.Case.verification_logs).joinedload(models.VerificationLog.performer)
+        ).filter(models.Case.id == case_id)
+
+
+        # RBAC Isolation
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        if "CUSTOMER" in user_role or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+
+        res = await db.execute(stmt)
+        c = res.unique().scalar_one_or_none()
+
+        if not c:
+            raise HTTPException(status_code=404, detail="Case not found or access denied")
+
+        report_keys = ['identity', 'resident', 'education', 'employment', 'criminal', 'reference', 'drug', 'credit', 'global', 'social']
+        check_map = {k: "NA" for k in report_keys}
+        detailed_checks = []
+
+        for chk in c.checks:
+            status_label = "In Progress"
+            s = str(chk.status).upper()
+            if s == "GREEN": status_label = "Positive"
+            elif s == "RED": status_label = "Negative"
+            elif s == "AMBER": status_label = "Amber"
+            elif s == "INTERIM": status_label = "Interim"
+            elif s in ["COMPLETED", "VERIFIED", "QC_VERIFIED"]: status_label = "Positive"
+            
+            tech_type = chk.check_type.lower()
+            report_key = tech_type
+            if "address" in tech_type or "resident" in tech_type: report_key = "resident"
+            elif "identity" in tech_type: report_key = "identity"
+            elif "education" in tech_type or "academic" in tech_type: report_key = "education"
+            elif "employment" in tech_type: report_key = "employment"
+            elif "criminal" in tech_type: report_key = "criminal"
+            elif "reference" in tech_type: report_key = "reference"
+            elif "drug" in tech_type: report_key = "drug"
+            elif "cibil" in tech_type or "credit" in tech_type: report_key = "credit"
+            elif "global" in tech_type: report_key = "global"
+            elif "social" in tech_type: report_key = "social"
+            
+            if report_key in report_keys:
+                check_map[report_key] = status_label
+            
+            detailed_checks.append({
+                "id": chk.id,
+                "type": chk.check_type,
+                "status": status_label,
+                "raw_status": chk.status,
+                "data": chk.data or {},
+                "remarks": chk.verifier_remarks or "",
+                "confidence_score": chk.confidence_score or 0.0,
+                "api_sync_status": chk.api_sync_status or "NOT_SYNCED",
+                "assigned_verifier_name": chk.assigned_verifier.full_name if chk.assigned_verifier else "Unallocated",
+                "updated_at": chk.verified_date.strftime("%Y-%m-%d %H:%M") if chk.verified_date else None,
+                "verified_date": chk.verified_date.strftime("%Y-%m-%d") if chk.verified_date else None,
+                "documents": [
+                    {
+                        "id": d.id,
+                        "file_name": d.file_name,
+                        "file_url": d.file_url,
+                        "file_type": d.file_type,
+                        "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+                        "uploaded_by_name": d.uploader.full_name if d.uploader else "System"
+                    } for d in chk.documents
+                ],
+                "logs": [
+                    {
+                        "id": l.id,
+                        "action": l.action,
+                        "remarks": l.remarks,
+                        "old_status": l.old_status,
+                        "new_status": l.new_status,
+                        "created_at": l.created_at.isoformat() if l.created_at else None,
+                        "performer_name": l.performer.full_name if l.performer else "System"
+                    } for l in chk.logs
+                ]
+            })
+
+
+        # Auto-detect QC Verifier from logs if not explicitly set in qc_id
+        qc_name = "Not Assigned"
+        if c.qc_user:
+            qc_name = c.qc_user.full_name if c.qc_user.full_name else c.qc_user.email
+        else:
+            # Fallback: Find the person who performed a finalization action
+            final_keywords = ["COMPLETE", "AUTHORIZE", "QC", "APPROVE", "FINAL", "CLOSE", "DONE", "REPORT", "ISSUE"]
+            for l in reversed(c.verification_logs):
+                action_upper = str(l.action).upper()
+                new_status_upper = str(l.new_status).upper()
+                if new_status_upper in ["COMPLETED", "QC_VERIFIED", "APPROVED", "FINALIZED"] or \
+                   any(kw in action_upper for kw in final_keywords):
+                    qc_name = l.performer.full_name if (l.performer and l.performer.full_name) else (l.performer.email if l.performer else "System")
+                    break
+            
+            # Last Resort: If still Not Assigned but case is COMPLETED, take the very last log performer
+            if qc_name == "Not Assigned" and str(c.status).upper() in ["COMPLETED", "QC_VERIFIED"]:
+                if c.verification_logs:
+                    # Get the most recent log that has a performer
+                    for l in reversed(c.verification_logs):
+                        if l.performer:
+                            qc_name = l.performer.full_name if l.performer.full_name else l.performer.email
+                            break
+
+        # Find Verifier Assignment Date
+        verifier_assigned_at = c.assigned_at.strftime("%Y-%m-%d %H:%M") if c.assigned_at else "N/A"
+        
+        # Find QC Assignment Date (from logs)
+        qc_assigned_at = "N/A"
+        for l in c.verification_logs:
+            if str(l.new_status).upper() == "QC":
+                qc_assigned_at = l.created_at.strftime("%Y-%m-%d %H:%M")
+                break
+
+        return {
+            "id": c.id,
+            "case_ref_no": c.case_ref_no,
+            "emp_code": c.candidate.client_emp_code if c.candidate else "N/A",
+            "candidate_name": c.candidate.name if c.candidate else "N/A",
+            "candidate_email": c.candidate.email if c.candidate else "N/A",
+            "candidate_phone": c.candidate.phone if c.candidate else "N/A",
+            "received_date": c.received_date.strftime("%Y-%m-%d") if c.received_date else "N/A",
+            "completed_date": c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "N/A",
+            "customer_name": c.customer.name if c.customer else "N/A",
+            "status": c.status,
+            "current_stage": c.status.replace('_', ' ').capitalize() if c.status else "Pending",
+            "final_decision": "Positive" if str(c.status).upper() in ["COMPLETED", "QC_VERIFIED", "GREEN", "POSITIVE"] else ("Negative" if str(c.status).upper() in ["RED", "NEGATIVE"] else "Pending"),
+            "assigned_to_name": c.assigned_user.full_name if (c.assigned_user and c.assigned_user.full_name) else (c.assigned_user.email if c.assigned_user else "Unallocated"),
+            "verifier_assigned_at": verifier_assigned_at,
+            "qc_verifier_name": qc_name,
+            "qc_assigned_at": qc_assigned_at,
+            "ops_manager": "Aravind (Ops Head)", # Placeholder or map from account manager
+            "tat_days": c.tat_days or 10,
+            "risk_score": c.risk_score or 15,
+            "checks": check_map,
+            "detailed_checks": detailed_checks or [],
+            "verification_logs": [
+                {
+                    "id": l.id,
+                    "action": l.action,
+                    "remarks": l.remarks,
+                    "old_status": l.old_status,
+                    "new_status": l.new_status,
+                    "created_at": l.created_at.isoformat() if l.created_at else None,
+                    "performer_name": (l.performer.full_name if l.performer else "System")
+                } for l in (c.verification_logs or [])
+            ]
+        }
+
+
+    except Exception as e:
+        logger.error(f"Error fetching case strategic details: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{case_id}/history", dependencies=[Depends(get_current_user)])
@@ -1022,6 +1293,15 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
     if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
         case.customer_id = current_user.customer_id
 
+    # Resolve batch_id (it might be batch_no from frontend)
+    if case.batch_id and case.batch_id.strip():
+        batch_id_val = case.batch_id.strip()
+        b_stmt = select(models.Batch.id).filter(or_(models.Batch.id == batch_id_val, models.Batch.batch_no == batch_id_val))
+        b_res = await db.execute(b_stmt)
+        resolved_batch_id = b_res.scalar_one_or_none()
+        if resolved_batch_id:
+            case.batch_id = resolved_batch_id
+
     db_case = models.Case(**case.dict())
     db.add(db_case)
     await db.commit()
@@ -1029,7 +1309,12 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
         select(models.Case).options(
             joinedload(models.Case.candidate),
             joinedload(models.Case.customer),
-            selectinload(models.Case.checks)
+            selectinload(models.Case.checks).options(
+                selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
+                selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
+                selectinload(models.VerificationCheck.assigned_verifier),
+                selectinload(models.VerificationCheck.qc_verifier)
+            )
         ).filter(models.Case.id == db_case.id)
     )
     db_case = res.unique().scalar_one()
@@ -1076,11 +1361,23 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
     target_customer_id = current_user.customer_id if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) else case_data.customer_id
 
+    # Resolve batch_id (it might be batch_no from frontend)
+    print(f"DEBUG: create_case_full incoming batch_id: {case_data.batch_id}")
+    resolved_batch_id = None
+    if case_data.batch_id and case_data.batch_id.strip():
+        batch_id_val = case_data.batch_id.strip()
+        # Try finding by ID or batch_no
+        b_stmt = select(models.Batch.id).filter(or_(models.Batch.id == batch_id_val, models.Batch.batch_no == batch_id_val))
+        b_res = await db.execute(b_stmt)
+        resolved_batch_id = b_res.scalar_one_or_none()
+    
+    print(f"DEBUG: create_case_full resolved_batch_id: {resolved_batch_id}")
+
     db_case = models.Case(
         case_ref_no=case_ref,
         customer_id=target_customer_id,
         candidate_id=db_candidate.id,
-        batch_id=case_data.batch_id,
+        batch_id=resolved_batch_id,
         status=models.CaseStatus.PENDING,
         received_date=datetime.utcnow(),
         file_no=case_data.file_no
@@ -1111,7 +1408,12 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     stmt = select(models.Case).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
-        selectinload(models.Case.checks)
+        selectinload(models.Case.checks).options(
+            selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
+            selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
+            selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.VerificationCheck.qc_verifier)
+        )
     ).filter(models.Case.id == db_case.id)
     res = await db.execute(stmt)
     db_case = res.unique().scalar_one()
@@ -1305,9 +1607,16 @@ async def read_cases(
         selectinload(models.Case.assigned_user).joinedload(models.User.role_rel),
         selectinload(models.Case.qa_user),
         selectinload(models.Case.qc_user),
-        selectinload(models.Case.checks),
+        selectinload(models.Case.checks).options(
+            selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
+            selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
+            selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.VerificationCheck.qc_verifier)
+        ),
+        selectinload(models.Case.verification_logs).joinedload(models.VerificationLog.performer),
         selectinload(models.Case.insufficiencies).options(joinedload(models.Insufficiency.check))
     )
+
 
     # Apply joins for filtering/sorting if needed (using selectinload for data, join for query)
     stmt = stmt.outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
@@ -1497,11 +1806,30 @@ async def read_cases(
         else:
             case_data.queue_age = "0h"
         
-        # Add check_name to insufficiencies
+        # Add check_name to insufficiencies and populate nested log names
         if hasattr(case, 'insufficiencies'):
             for i, insuff in enumerate(case.insufficiencies):
                 if insuff.check:
                     case_data.insufficiencies[i].check_name = insuff.check.check_type
+        
+        # Populate nested names for logs and documents
+        if case_data.verification_logs:
+            for i, log in enumerate(case.verification_logs):
+                if log.performer:
+                    case_data.verification_logs[i].performer_name = log.performer.full_name
+
+        for i, check_model in enumerate(case.checks):
+            # Populate logs in check
+            if check_model.logs:
+                for j, log_model in enumerate(check_model.logs):
+                    if log_model.performer:
+                        case_data.checks[i].logs[j].performer_name = log_model.performer.full_name
+            # Populate documents in check
+            if check_model.documents:
+                for j, doc_model in enumerate(check_model.documents):
+                    if doc_model.uploader:
+                        case_data.checks[i].documents[j].uploaded_by_name = doc_model.uploader.full_name
+
         
         # Calculate In-TAT/Out-TAT
         if case.received_date:
@@ -1583,7 +1911,13 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
     stmt = select(models.Case).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
-        selectinload(models.Case.checks),
+        selectinload(models.Case.checks).options(
+            selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
+            selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
+            selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.VerificationCheck.qc_verifier)
+        ),
+        selectinload(models.Case.verification_logs).joinedload(models.VerificationLog.performer),
         joinedload(models.Case.batch),
         joinedload(models.Case.assigned_user).joinedload(models.User.role_rel),
         joinedload(models.Case.qa_user),
@@ -1768,9 +2102,18 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
     # Revoke Logic for Bulk
     if req.action == "status":
         for cid in req.case_ids:
-            res_c = await db.execute(select(models.Case).filter(models.Case.id == cid))
+            res_c = await db.execute(
+                select(models.Case)
+                .options(selectinload(models.Case.checks))
+                .filter(models.Case.id == cid)
+            )
             case_obj = res_c.scalar_one_or_none()
             if not case_obj: continue
+
+            # Validation for completion
+            if req.target_value == models.CaseStatus.COMPLETED:
+                validate_case_completion(case_obj)
+
             
             # QC Revoke: Moving back from QC or Completed
             if (case_obj.status in [models.CaseStatus.QC, models.CaseStatus.COMPLETED]) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
@@ -1990,6 +2333,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
     manual_completed_date = update_data.get("completed_date")
 
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
+        validate_case_completion(db_case)
         db_case.completed_date = manual_completed_date or datetime.utcnow()
         # TAT Performance tracking
         if db_case.batch_id and db_case.received_date:
@@ -2181,7 +2525,12 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
         select(models.Case).options(
             joinedload(models.Case.candidate),
             joinedload(models.Case.customer),
-            selectinload(models.Case.checks)
+            selectinload(models.Case.checks).options(
+                selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
+                selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
+                selectinload(models.VerificationCheck.assigned_verifier),
+                selectinload(models.VerificationCheck.qc_verifier)
+            )
         ).filter(models.Case.id == db_case.id)
     )
     db_case = res.unique().scalar_one()
