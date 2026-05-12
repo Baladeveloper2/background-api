@@ -170,3 +170,34 @@ async def get_local_media(path: str):
     import mimetypes
     mime_type, _ = mimetypes.guess_type(file_path)
     return FileResponse(file_path, media_type=mime_type or "application/octet-stream")
+
+@router.get("/proxy")
+async def proxy_media(
+    public_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Enterprise Proxy: Streams S3 objects directly to the frontend.
+    Essential for CORS-compliant report rendering (html2pdf/html2canvas).
+    """
+    if not aws_utils.s3_client:
+        raise HTTPException(status_code=503, detail="S3 Storage unavailable")
+        
+    try:
+        response = await to_thread.run_sync(
+            partial(
+                aws_utils.s3_client.get_object,
+                Bucket=aws_utils.aws_bucket,
+                Key=public_id
+            )
+        )
+        
+        return StreamingResponse(
+            io.BytesIO(response['Body'].read()),
+            media_type=response.get('ContentType', 'application/octet-stream')
+        )
+    except aws_utils.s3_client.exceptions.NoSuchKey:
+        raise HTTPException(status_code=404, detail="Media asset not found in storage")
+    except Exception as e:
+        logging.error(f"Media Proxy Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Protocol Error: Failed to retrieve media stream")

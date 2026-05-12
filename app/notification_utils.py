@@ -156,7 +156,7 @@ async def notify_qc_completed(db: AsyncSession, case_id: str, case_ref: str, can
             case_id=case_id
         )
 
-async def notify_case_closed(db: AsyncSession, case_id: str, case_ref: str, candidate_name: str):
+async def notify_case_closed(db: AsyncSession, case_id: str, case_ref: str, candidate_name: str, final_result: str = "POSITIVE"):
     """Final notification when case status becomes COMPLETED/DISPATCHED."""
     # Notify Super Admins
     recipients = await get_users_by_role(db, [enums.UserRole.SUPER_ADMIN])
@@ -164,7 +164,7 @@ async def notify_case_closed(db: AsyncSession, case_id: str, case_ref: str, cand
         await create_notification(
             db, user.id,
             "Case Successfully Closed",
-            f"Identity verification for Case {case_ref} ({candidate_name}) is now fully complete and the final report has been dispatched.",
+            f"BGV Verification for {case_ref} ({candidate_name}) is now fully complete. Final Result: {final_result}.",
             enums.NotificationCategory.CASE_COMPLETED,
             case_id=case_id
         )

@@ -46,10 +46,13 @@ def validate_case_completion(case_obj: models.Case):
         # Standard Enterprise Check: Must be explicit approval + categorized result
         is_enterprise_compliant = (q_stat == "APPROVED") and has_result
         
-        # Backward-Compatibility Check: Allow strictly finalized legacy checks to pass
-        is_legacy_final = str(chk.status).upper() in ["GREEN", "RED", "AMBER", "STOP", "QC_VERIFIED", "COMPLETED"]
+        # Backward-Compatibility & Manager-Override Check: 
+        # Allow checks to pass if they are already in a finalized legacy status, 
+        # OR if they have a result and are NOT rejected (Manager override during closure).
+        is_legacy_final = str(chk.status).upper() in ["GREEN", "RED", "AMBER", "STOP", "QC_VERIFIED", "COMPLETED", "POSITIVE", "NEGATIVE", "DISCREPANCY", "INSUFFICIENT", "INTERIM", "QC_PENDING", "PENDING_REVIEW"]
+        is_result_present_and_not_rejected = has_result and q_stat != "REJECTED"
         
-        if not (is_enterprise_compliant or is_legacy_final):
+        if not (is_enterprise_compliant or is_legacy_final or is_result_present_and_not_rejected):
             incomplete_checks.append(f"{chk.check_type} (QC: {q_stat}, Result: {chk.final_result or 'None'})")
     
     if incomplete_checks:
@@ -1667,8 +1670,8 @@ async def read_cases(
             # WIP: strictly only active verification stage, not pending intake
             s_filter = models.Case.status == 'VERIFICATION'
         elif status == 'QC':
-            # QC Pending: active QC stages only — exclude QC_VERIFIED (finalized)
-            s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QA_PENDING'])
+            # QC Active Pipeline: include all stages including verified but not yet finalized COMPLETED
+            s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QA_PENDING', 'QC_VERIFIED'])
         else:
             s_filter = models.Case.status == status
             
@@ -2494,7 +2497,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
         new_status = update_data["status"]
         
         # Auto-set completion metadata
-        if new_status == models.CaseStatus.COMPLETED:
+        if str(new_status).upper() == "COMPLETED":
             if not db_case.completed_date:
                 db_case.completed_date = datetime.utcnow()
             if not db_case.qc_id:
@@ -2505,13 +2508,21 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
             await notification_utils.notify_verification_completed(db, case_id, db_case.case_ref_no, candidate_name, current_user.full_name)
         
         # Scenario 2: QC finishes -> Moves to Completed
-        elif old_status == models.CaseStatus.QC and new_status == models.CaseStatus.COMPLETED:
-            await notification_utils.notify_qc_completed(db, case_id, db_case.case_ref_no, candidate_name, current_user.full_name)
-            await notification_utils.notify_case_closed(db, case_id, db_case.case_ref_no, candidate_name)
-        
-        # Scenario 3: General Completion (In case it jumps to completed)
-        elif old_status != models.CaseStatus.COMPLETED and new_status == models.CaseStatus.COMPLETED:
-            await notification_utils.notify_case_closed(db, case_id, db_case.case_ref_no, candidate_name)
+        elif str(old_status).upper() != "COMPLETED" and str(new_status).upper() == "COMPLETED":
+            # Capture final result for notification (checking both result and status fields)
+            f_result = update_data.get("final_report_status") or update_data.get("final_result") or db_case.final_report_status or "POSITIVE"
+            
+            # Ensure final_result column is also synced
+            db_case.final_result = f_result
+            db_case.final_report_status = f_result
+            db_case.completed_date = datetime.utcnow() # Force set completion date here too for safety
+            
+            # Scenario 2a: If coming from QC Review
+            if old_status == models.CaseStatus.QC:
+                await notification_utils.notify_qc_completed(db, case_id, db_case.case_ref_no, candidate_name, current_user.full_name)
+            
+            # Final Closure Notification with Result
+            await notification_utils.notify_case_closed(db, case_id, db_case.case_ref_no, candidate_name, final_result=f_result)
 
         # Scenario 4: Insufficient Flags
         elif new_status == models.CaseStatus.INSUFFICIENT:
