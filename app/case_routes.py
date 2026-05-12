@@ -65,10 +65,13 @@ def validate_case_completion(case_obj: models.Case):
 
 @router.get("/insufficient")
 async def get_insufficient_cases(
+    resolved: bool = False,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Fetch cases marked as insufficient for the current customer."""
+    """Fetch cases marked as insufficient for the current customer with filtering."""
     # 1. Fetch from new Insufficiency table
     stmt_new = (
         select(models.Insufficiency)
@@ -77,12 +80,24 @@ async def get_insufficient_cases(
             joinedload(models.Insufficiency.case).joinedload(models.Case.customer),
             joinedload(models.Insufficiency.check)
         )
-        .filter(models.Insufficiency.is_resolved == False)
+        .filter(models.Insufficiency.is_resolved == resolved)
     )
     
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt_new = stmt_new.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
         
+    if from_date:
+        try:
+            f_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            stmt_new = stmt_new.filter(models.Insufficiency.created_at >= f_dt)
+        except: pass
+            
+    if to_date:
+        try:
+            t_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            stmt_new = stmt_new.filter(models.Insufficiency.created_at <= t_dt)
+        except: pass
+
     res_new = await db.execute(stmt_new)
     insufficiencies = res_new.unique().scalars().all()
     
@@ -93,17 +108,23 @@ async def get_insufficient_cases(
         results.append({
             "id": i.case_id,
             "insufficiency_id": i.id,
-            "case_ref_no": i.case.case_ref_no,
-            "candidate_name": i.case.candidate.name if i.case.candidate else "N/A",
-            "customer_name": i.case.customer.name if i.case.customer else "N/A",
+            "case_ref_no": i.case.case_ref_no if i.case else "N/A",
+            "candidate_name": i.case.candidate.name if i.case and i.case.candidate else "N/A",
+            "customer_name": i.case.customer.name if i.case and i.case.customer else "N/A",
             "check_id": i.check_id,
             "check_name": i.check.check_type if i.check else "General",
             "marked_at": i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else "N/A",
             "remarks": i.message or "No remarks found",
             "status": i.status,
-            "documents": i.documents or []
+            "documents": i.documents or [],
+            "is_resolved": i.is_resolved,
+            "resolved_at": i.updated_at.strftime("%Y-%m-%d %H:%M") if (i.is_resolved and i.updated_at) else None
         })
         seen_check_ids.add((i.case_id, i.check_id))
+
+    # Legacy tracking doesn't fully apply to 'Completed' state, so exit early if requesting resolved items
+    if resolved:
+        return sorted(results, key=lambda x: x["marked_at"], reverse=True)
 
     # 2. Fetch from legacy Case status for backward compatibility
     stmt_legacy = select(models.Case).filter(
@@ -119,6 +140,18 @@ async def get_insufficient_cases(
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
         
+    if from_date:
+        try:
+            f_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            stmt_legacy = stmt_legacy.filter(models.Case.received_date >= f_dt)
+        except: pass
+            
+    if to_date:
+        try:
+            t_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            stmt_legacy = stmt_legacy.filter(models.Case.received_date <= t_dt)
+        except: pass
+
     res_legacy = await db.execute(stmt_legacy)
     legacy_cases = res_legacy.unique().scalars().all()
     
@@ -127,7 +160,6 @@ async def get_insufficient_cases(
         last_log = c.insufficiency_logs[-1] if c.insufficiency_logs else None
         check_id = last_log.check_id if last_log else None
         
-        # If still no check_id, try to find any check for this case
         if not check_id:
             ck_stmt = select(models.VerificationCheck.id).filter(models.VerificationCheck.case_id == c.id).limit(1)
             ck_res = await db.execute(ck_stmt)
@@ -141,13 +173,14 @@ async def get_insufficient_cases(
                 "customer_name": c.customer.name if c.customer else "N/A",
                 "check_id": check_id,
                 "check_name": last_log.check.check_type if last_log and last_log.check else "General",
-                "marked_at": last_log.marked_at.strftime("%Y-%m-%d %H:%M") if last_log else c.received_date.strftime("%Y-%m-%d %H:%M"),
+                "marked_at": last_log.marked_at.strftime("%Y-%m-%d %H:%M") if last_log else (c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A"),
                 "remarks": last_log.notes if last_log else "Legacy insufficiency",
-                "status": "INSUFFICIENT"
+                "status": "INSUFFICIENT",
+                "is_resolved": False
             })
             seen_check_ids.add((c.id, check_id))
             
-    return results
+    return sorted(results, key=lambda x: x["marked_at"], reverse=True)
 
 @router.post("/{case_id}/resolve-insufficiency")
 async def resolve_insufficiency(
@@ -246,22 +279,55 @@ async def resolve_insufficiency(
 
 @router.get("/invitations")
 async def get_candidate_invitations(
+    response: Response,
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Fetch candidates in the invitation/self-service flow."""
-    stmt = select(models.Case).filter(
+    """Fetch candidates in the invitation/self-service flow with optimized pagination and search."""
+    base_conditions = [
         models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
-    ).options(
-        joinedload(models.Case.candidate),
-        joinedload(models.Case.customer)
-    )
+    ]
     
     if current_user.role == enums.UserRole.CUSTOMER:
-        stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
+        base_conditions.append(models.Case.customer_id == current_user.customer_id)
         
+    count_stmt = select(func.count(models.Case.id)).filter(*base_conditions)
+    stmt = select(models.Case).filter(*base_conditions)
+    
+    # OuterJoin Candidate to permit searching and seamless display even if missing
+    count_stmt = count_stmt.outerjoin(models.Case.candidate)
+    stmt = stmt.outerjoin(models.Case.candidate)
+    
+    # Prepare distinct loading strategy optimized for paginated results
+    stmt = stmt.options(
+        selectinload(models.Case.candidate),
+        selectinload(models.Case.customer)
+    )
+    
+    if search:
+        search_filter = or_(
+            models.Candidate.name.ilike(f"%{search}%"),
+            models.Candidate.email.ilike(f"%{search}%"),
+            models.Candidate.client_emp_code.ilike(f"%{search}%")
+        )
+        count_stmt = count_stmt.filter(search_filter)
+        stmt = stmt.filter(search_filter)
+        
+    # Execute distinct counting
+    cnt_res = await db.execute(count_stmt)
+    total_count = cnt_res.scalar() or 0
+    
+    # Sort, Paginate and Execute Main Data Stream
+    stmt = stmt.order_by(models.Case.received_date.desc()).offset(skip).limit(limit)
     res = await db.execute(stmt)
     cases = res.unique().scalars().all()
+    
+    # Finalize Headers compliant with UI expectation
+    response.headers["X-Total-Count"] = str(total_count)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
     
     return [
         {
@@ -271,7 +337,7 @@ async def get_candidate_invitations(
             "phone": c.candidate.phone if c.candidate else "N/A",
             "emp_id": c.candidate.client_emp_code if c.candidate else "N/A",
             "status": c.status,
-            "created_at": c.received_date.strftime("%Y-%m-%d %H:%M")
+            "created_at": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else None
         }
         for c in cases
     ]
@@ -824,7 +890,8 @@ async def export_mis_data(
         stmt = select(models.Case).options(
             joinedload(models.Case.candidate),
             joinedload(models.Case.customer),
-            joinedload(models.Case.assigned_user)
+            joinedload(models.Case.assigned_user),
+            selectinload(models.Case.checks)
         )
         
         # Join Customer if client_name or search is used
@@ -1968,9 +2035,11 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
                             if isinstance(f, dict) and f.get('url') and f.get('url') not in existing_urls:
                                 all_docs.append({
                                     'url': f['url'],
-                                    'original_filename': f.get('name', 'Supporting Document'),
+                                    'original_filename': f.get('original_filename') or f.get('file_name') or f.get('name', 'Supporting Document'),
                                     'check_type': check_label,
-                                    'uploaded_at': datetime.utcnow().isoformat()
+                                    'uploaded_at': datetime.utcnow().isoformat(),
+                                    'is_primary': True,
+                                    'public_id': f.get('public_id') or f.get('path')
                                 })
                                 existing_urls.add(f['url'])
         db_case.candidate.documents = all_docs
@@ -2680,6 +2749,35 @@ async def merge_pdfs(case_id: str, request: Request, background_tasks: Backgroun
     docs = db_case.candidate.documents or []
     background_tasks.add_task(_do_merge, case_id, docs, db_case.candidate.name, db_case.case_ref_no)
     return {"message": "PDF merge queued"}
+
+@router.post("/{case_id}/generate-report", status_code=202, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
+async def generate_report_async(case_id: str, request: Request, current_user: models.User = Depends(get_current_user)):
+    """
+    Fires a fully decoupled asynchronous rendering pipeline that employs headless Playwright 
+    mechanics to output a pixel-perfect final verification vector report.
+    """
+    auth_header = request.headers.get("Authorization")
+    token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization bearer required for headless bootstrap.")
+        
+    # Import the Celery Task context-locally to ensure dynamic load chain integrity
+    from .worker import generate_case_pdf
+    
+    # Extract client frontend context if passed as query to facilitate local runtime testing
+    frontend_override = request.query_params.get("fe_url")
+    
+    # Hand-off to persistent cluster node
+    task = generate_case_pdf.delay(case_id, token, frontend_override)
+    
+    return {
+        "message": "Headless rendering cycle initiated in backend cluster.",
+        "task_id": task.id,
+        "status": "QUEUED"
+    }
 
 @router.post("/bulk-allocate")
 async def bulk_allocate(data: schemas.BulkAllocateRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):

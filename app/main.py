@@ -89,13 +89,20 @@ app.add_middleware(
 # Custom Security Headers Middleware
 @app.middleware("http")
 async def add_security_headers(request, call_next):
-    response = await call_next(request)
-    response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: http://localhost:8000 https://res.cloudinary.com https://*.amazonaws.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'self' http://localhost:5173;"
-    return response
+    from fastapi.responses import Response
+    try:
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: http://localhost:8000 https://res.cloudinary.com https://*.amazonaws.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'self' http://localhost:5173;"
+        return response
+    except RuntimeError as exc:
+        if "No response returned" in str(exc):
+            # Suppress unhandled TaskGroup crashes caused by sudden client disconnects
+            return Response(status_code=499)
+        raise exc
 
 # Versioned API Router
 api_v1 = APIRouter(prefix="/api/v1")

@@ -245,7 +245,8 @@ async def upload_verification_document(
         file_url=file_url,
         file_type=file.content_type,
         s3_key=uploaded_path,
-        uploaded_by_id=current_user.id
+        uploaded_by_id=current_user.id,
+        is_primary=False # Default to false on upload
     )
     db.add(doc)
     
@@ -262,6 +263,52 @@ async def upload_verification_document(
     await db.commit()
     await db.refresh(doc)
     
+    return doc
+
+class RegisterDocumentRequest(schemas.BaseModel):
+    file_name: str
+    file_type: str
+    s3_key: str
+    file_url: str
+
+@router.post("/checks/{check_id}/register-document")
+async def register_uploaded_document(
+    check_id: str,
+    req: RegisterDocumentRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Registers an ALREADY-uploaded S3 artifact (via pre-signed PUT) to this specific check audits."""
+    stmt = select(models.VerificationCheck).filter(models.VerificationCheck.id == check_id)
+    res = await db.execute(stmt)
+    check = res.scalar_one_or_none()
+    if not check:
+        raise HTTPException(404, detail="Check target not found")
+
+    # Save metadata reference
+    doc = models.VerificationDocument(
+        check_id=check_id,
+        file_name=req.file_name,
+        file_url=req.file_url,
+        file_type=req.file_type,
+        s3_key=req.s3_key,
+        uploaded_by_id=current_user.id,
+        is_primary=False
+    )
+    db.add(doc)
+    
+    # Log standard audit hook
+    log = models.VerificationLog(
+        case_id=check.case_id,
+        check_id=check_id,
+        action="DOCUMENT_UPLOADED",
+        performed_by_id=current_user.id,
+        remarks=f"External evidence source '{req.file_name}' registered securely."
+    )
+    db.add(log)
+    
+    await db.commit()
+    await db.refresh(doc)
     return doc
 
 @router.patch("/checks/{check_id}/status-ops")
@@ -414,4 +461,24 @@ async def resolve_qc_issue(
     
     await db.commit()
     return {"status": "success", "message": "Issue resolved"}
+
+@router.patch("/documents/{doc_id}/primary")
+async def toggle_document_primary(
+    doc_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Toggles the 'Primary Evidence' flag for a document."""
+    stmt = select(models.VerificationDocument).filter(models.VerificationDocument.id == doc_id)
+    res = await db.execute(stmt)
+    doc = res.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(404, detail="Document not found")
+    
+    # Toggle logic
+    doc.is_primary = not doc.is_primary
+    
+    await db.commit()
+    await db.refresh(doc)
+    return doc
 

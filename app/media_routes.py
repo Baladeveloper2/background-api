@@ -125,6 +125,39 @@ async def upload_file(
         logging.error(f"S3 Upload error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"S3 Upload failed: {str(e)}")
 
+class PresignedRequest(BaseModel):
+    file_name: str
+    content_type: str
+    category: Optional[str] = "bgv_documents" # or "public_documents"
+
+@router.post("/request-presigned-upload")
+async def get_presigned_upload_url(
+    req: PresignedRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Generates a direct S3 upload signature."""
+    if not aws_utils.s3_client:
+        raise HTTPException(status_code=503, detail="S3 service offline")
+    
+    ext = os.path.splitext(req.file_name)[1].lower()
+    allowed = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp', '.gif']
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="File type not allowed")
+
+    folder = "bgv_documents" if req.category != "public_documents" else "public_documents"
+    s3_key = f"{folder}/{uuid.uuid4()}_{req.file_name}"
+    
+    url = aws_utils.generate_presigned_put_url(s3_key, req.content_type)
+    if not url:
+        raise HTTPException(status_code=500, detail="Failed to sign URL")
+        
+    return {
+        "upload_url": url,
+        "public_id": s3_key,
+        "predicted_url": f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{s3_key}",
+        "headers": {"Content-Type": req.content_type}
+    }
+
 @router.get("/public-get-url")
 async def public_get_signed_url(
     public_id: str,

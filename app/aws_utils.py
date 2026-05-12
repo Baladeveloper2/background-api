@@ -63,3 +63,27 @@ async def generate_presigned_url(path, as_attachment=False, filename=None):
         Params=params,
         ExpiresIn=3600
     )
+
+def generate_presigned_put_url(path: str, content_type: str, expires_in: int = 600):
+    """
+    Generates a pre-signed URL for the client to upload a file directly to S3 via HTTP PUT.
+    By default, expires in 10 minutes.
+    """
+    if not s3_client:
+        return None
+        
+    try:
+        return s3_client.generate_presigned_url(
+            ClientMethod='put_object',
+            Params={
+                'Bucket': aws_bucket,
+                'Key': path,
+                'ContentType': content_type
+            },
+            ExpiresIn=expires_in,
+            HttpMethod='PUT'
+        )
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to generate presigned PUT URL: {e}")
+        return None

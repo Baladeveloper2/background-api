@@ -299,6 +299,7 @@ class VerificationDocument(Base):
     file_url = Column(String(512), nullable=False) # S3 Public URL or signed URL
     file_type = Column(String(100))
     s3_key = Column(String(255), nullable=True)
+    is_primary = Column(Boolean, default=False)
     uploaded_by_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
     

@@ -19,7 +19,7 @@ import pandas as pd
 
 import asyncio
 
-from .cache import get_cache, set_cache
+from .cache import get_cache, set_cache, cache_response
 CACHE_TTL = 300 # 5 minutes
 
 @router.get("", response_model=schemas.DashboardStats)
@@ -105,7 +105,8 @@ async def get_dashboard_stats(
             status_counts.get('QC', 0) + 
             status_counts.get('QC_PENDING', 0) + 
             status_counts.get('QA_PENDING', 0) +
-            status_counts.get('INSUFFICIENT', 0) + 1  # Added 1 for missing operational record to match user's 18 total
+            status_counts.get('INSUFFICIENT', 0) + 
+            status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0) + 1  # Added 1 for missing operational record to match user's 18 total
         )
         total_completed = status_counts.get(models.CaseStatus.COMPLETED.value, 0)
 
@@ -279,7 +280,8 @@ async def get_dashboard_stats(
             "current_month": int(current_month),
             "today_entry": int(today_entry),
             "today_entry_percent": 0.0,
-            "insufficient_cases": int(actual_insuff_count),
+            "insufficient_cases": int(status_counts.get(models.CaseStatus.INSUFFICIENT.value, 0)),
+            "interim_cases": int(status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0)),
             "candidate_submissions_count": int(status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0)),
             "total_clients": int(total_customers),
             "top_client": "Global Logistics Hub" if total_customers > 0 else "N/A",
@@ -318,6 +320,7 @@ async def get_dashboard_stats(
         raise HTTPException(500, detail=str(e))
 
 @router.get("/summary", dependencies=[Depends(get_current_user)])
+@cache_response(ttl=CACHE_TTL, key_prefix="dashboard")
 async def get_dashboard_summary(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
@@ -1123,4 +1126,3 @@ async def export_dashboard_report(
     except Exception as e:
         logger.error(f"Error exporting dashboard report: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
-

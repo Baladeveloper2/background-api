@@ -225,6 +225,7 @@ class VerificationDocumentRead(BaseModel):
     file_name: str
     file_url: str
     file_type: Optional[str] = None
+    is_primary: bool = False
     uploaded_at: datetime
     uploaded_by_name: Optional[str] = None
 
