@@ -53,7 +53,8 @@ async def read_users(
     db: AsyncSession = Depends(database.get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    res = await db.execute(select(models.User).offset(skip).limit(limit))
+    stmt = select(models.User).order_by(models.User.created_at.desc()).offset(skip).limit(limit)
+    res = await db.execute(stmt)
     users = res.scalars().all()
     return users
 

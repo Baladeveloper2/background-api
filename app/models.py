@@ -216,6 +216,8 @@ class Case(Base):
     qc_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     received_date = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     assigned_at = Column(DateTime(timezone=True), nullable=True)
+    link_shared_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
     completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
     verifier_revoke_count = Column(Integer, default=0)

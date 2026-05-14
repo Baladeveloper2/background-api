@@ -81,6 +81,7 @@ async def get_insufficient_cases(
             joinedload(models.Insufficiency.check)
         )
         .filter(models.Insufficiency.is_resolved == resolved)
+        .order_by(models.Insufficiency.created_at.desc())
     )
     
     if current_user.role == enums.UserRole.CUSTOMER:
@@ -180,7 +181,8 @@ async def get_insufficient_cases(
             })
             seen_check_ids.add((c.id, check_id))
             
-    return sorted(results, key=lambda x: x["marked_at"], reverse=True)
+    # Final Sort (Latest First)
+    return sorted(results, key=lambda x: x["marked_at"] if x["marked_at"] != "N/A" else "", reverse=True)
 
 @router.post("/{case_id}/resolve-insufficiency")
 async def resolve_insufficiency(
@@ -283,23 +285,51 @@ async def get_candidate_invitations(
     skip: int = 0,
     limit: int = 100,
     search: Optional[str] = None,
+    status: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """Fetch candidates in the invitation/self-service flow with optimized pagination and search."""
-    base_conditions = [
-        models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
-    ]
+    # Base status conditions for invitations
+    allowed_statuses = [enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED]
+    
+    # Initialize base conditions
+    base_conditions = []
+    
+    # If a specific status is requested, use it (narrowing down)
+    if status and status != 'ALL':
+        base_conditions.append(models.Case.status == status)
+    else:
+        # Default: show all invitation statuses
+        base_conditions.append(models.Case.status.in_(allowed_statuses))
     
     if current_user.role == enums.UserRole.CUSTOMER:
         base_conditions.append(models.Case.customer_id == current_user.customer_id)
+        
+    if from_date:
+        try:
+            f_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            base_conditions.append(models.Case.received_date >= f_dt)
+        except Exception as e:
+            logger.warning(f"Invalid from_date format: {from_date}")
+        
+    if to_date:
+        try:
+            t_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            base_conditions.append(models.Case.received_date <= t_dt)
+        except Exception as e:
+            logger.warning(f"Invalid to_date format: {to_date}")
+            
+    logger.info(f"Fetching invitations with status={status}, search={search}, from={from_date}, to={to_date}")
         
     count_stmt = select(func.count(models.Case.id)).filter(*base_conditions)
     stmt = select(models.Case).filter(*base_conditions)
     
     # OuterJoin Candidate to permit searching and seamless display even if missing
-    count_stmt = count_stmt.outerjoin(models.Case.candidate)
-    stmt = stmt.outerjoin(models.Case.candidate)
+    count_stmt = count_stmt.outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
+    stmt = stmt.outerjoin(models.Case.candidate).outerjoin(models.Case.customer)
     
     # Prepare distinct loading strategy optimized for paginated results
     stmt = stmt.options(
@@ -311,7 +341,8 @@ async def get_candidate_invitations(
         search_filter = or_(
             models.Candidate.name.ilike(f"%{search}%"),
             models.Candidate.email.ilike(f"%{search}%"),
-            models.Candidate.client_emp_code.ilike(f"%{search}%")
+            models.Candidate.client_emp_code.ilike(f"%{search}%"),
+            models.Customer.name.ilike(f"%{search}%")
         )
         count_stmt = count_stmt.filter(search_filter)
         stmt = stmt.filter(search_filter)
@@ -320,8 +351,8 @@ async def get_candidate_invitations(
     cnt_res = await db.execute(count_stmt)
     total_count = cnt_res.scalar() or 0
     
-    # Sort, Paginate and Execute Main Data Stream
-    stmt = stmt.order_by(models.Case.received_date.desc()).offset(skip).limit(limit)
+    # Sort by received_date (Latest First) and Execute Main Data Stream
+    stmt = stmt.order_by(models.Case.received_date.desc(), models.Case.id.desc()).offset(skip).limit(limit)
     res = await db.execute(stmt)
     cases = res.unique().scalars().all()
     
@@ -337,7 +368,10 @@ async def get_candidate_invitations(
             "phone": c.candidate.phone if c.candidate else "N/A",
             "emp_id": c.candidate.client_emp_code if c.candidate else "N/A",
             "status": c.status,
-            "created_at": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else None
+            "client_name": c.customer.name if c.customer else "N/A",
+            "created_at": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else None,
+            "link_shared_at": c.link_shared_at.strftime("%Y-%m-%d %H:%M") if c.link_shared_at else (c.received_date.strftime("%Y-%m-%d %H:%M") if c.status == enums.CaseStatus.LINK_SHARED else None),
+            "submitted_at": c.submitted_at.strftime("%Y-%m-%d %H:%M") if c.submitted_at else None
         }
         for c in cases
     ]
@@ -458,6 +492,7 @@ async def send_bgv_link(
             db.add(new_check)
     
     case.status = enums.CaseStatus.LINK_SHARED
+    case.link_shared_at = datetime.utcnow()
     
     # Trigger email
     # Generate the form link using frontend URL (you might want to configure this in .env later)
@@ -548,6 +583,7 @@ async def submit_candidate_documents(
 
     # Mark as documents submitted
     case.status = enums.CaseStatus.DOCUMENTS_SUBMITTED
+    case.submitted_at = datetime.utcnow()
 
     candidate_data = payload.get("candidate_data", {})
 

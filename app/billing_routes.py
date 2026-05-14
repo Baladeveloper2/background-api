@@ -46,7 +46,7 @@ async def get_billing_summary(
     if customer_id:
         stmt = stmt.filter(models.Customer.id == customer_id)
         
-    stmt = stmt.group_by(models.Customer.id, models.Customer.name)
+    stmt = stmt.group_by(models.Customer.id, models.Customer.name).order_by(func.sum(models.VerificationCheck.rate).desc())
     
     res = await db.execute(stmt)
     results = res.all()

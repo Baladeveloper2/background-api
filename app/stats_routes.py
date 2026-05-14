@@ -460,6 +460,7 @@ async def get_verifier_daily(
                 models.UserRole.QA, 
                 models.UserRole.MANAGER
             ]))
+            .order_by(models.User.created_at.desc())
         )
         
         res = await db.execute(stmt)

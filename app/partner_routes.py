@@ -22,7 +22,7 @@ def list_partners(
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth_routes.check_module_permission("bms", "partner", action="read"))
 ):
-    return db.query(models.Partner).all()
+    return db.query(models.Partner).order_by(models.Partner.created_at.desc()).all()
 
 @router.get("/{partner_id}", response_model=schemas.Partner)
 def get_partner(
