@@ -22,6 +22,66 @@ import asyncio
 from .cache import get_cache, set_cache, cache_response
 CACHE_TTL = 300 # 5 minutes
 
+# ─── Sidebar live counts ───────────────────────────────────────────────────────
+@router.get("/sidebar-counts")
+async def get_sidebar_counts(
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Lightweight endpoint polled every 30s by the sidebar for badge counts."""
+    result = {}
+    try:
+        # Unread / new docs in client vault
+        unread_q = await db.execute(
+            select(func.count(models.CustomerDocument.id))
+            .where(models.CustomerDocument.is_read == False)
+        )
+        result["client_vault"] = unread_q.scalar() or 0
+
+        # Pending batches (not closed/completed)
+        batch_q = await db.execute(
+            select(func.count(models.Batch.id))
+            .where(models.Batch.status.notin_(["Completed", "Closed", "completed", "closed"]))
+        )
+        result["batches"] = batch_q.scalar() or 0
+
+        # Pending data entry cases
+        de_q = await db.execute(
+            select(func.count(models.Case.id))
+            .where(models.Case.status.in_(["Pending", "In Progress", "pending"]))
+        )
+        result["data_entry"] = de_q.scalar() or 0
+
+        # QC pending
+        qc_q = await db.execute(
+            select(func.count(models.Case.id))
+            .where(models.Case.qc_status.in_(["Pending", "pending", None]))
+            .where(models.Case.status == "Completed")
+        )
+        result["qc_pending"] = qc_q.scalar() or 0
+
+        # Finalized today
+        today = datetime.utcnow().date()
+        fin_q = await db.execute(
+            select(func.count(models.Case.id))
+            .where(models.Case.status.in_(["Finalized", "finalized"]))
+            .where(func.date(models.Case.updated_at) == today)
+        )
+        result["finalized"] = fin_q.scalar() or 0
+
+        # Candidate invitations pending (link not yet shared)
+        inv_q = await db.execute(
+            select(func.count(models.CandidateInvitation.id))
+            .where(models.CandidateInvitation.status == "PENDING")
+        )
+        result["invitations"] = inv_q.scalar() or 0
+
+    except Exception as e:
+        logger.warning(f"sidebar-counts partial error: {e}")
+
+    return result
+
+
 @router.get("", response_model=schemas.DashboardStats)
 async def get_dashboard_stats(
     from_date: Optional[str] = None,
