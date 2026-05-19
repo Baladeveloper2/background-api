@@ -94,14 +94,14 @@ async def read_batches_summary(
     case_counts = select(
         models.Batch.id.label("batch_uuid"),
         func.count(models.Case.id).label("actual_case_count"),
-        func.sum(case((models.Case.status != models.CaseStatus.COMPLETED, 1), else_=0)).label("total_pending_count"),
+        func.sum(case((~models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']), 1), else_=0)).label("total_pending_count"),
         func.sum(case((models.Case.status == models.CaseStatus.PENDING, 1), else_=0)).label("pending_arrival_count"),
         func.sum(case((models.Case.status == models.CaseStatus.VERIFICATION, 1), else_=0)).label("verification_active_count"),
         func.sum(case((models.Case.status == models.CaseStatus.QC, 1), else_=0)).label("qc_active_count"),
         func.sum(case((models.Case.status == models.CaseStatus.QA_PENDING, 1), else_=0)).label("qa_pending_count"),
         func.sum(case((models.Case.status == models.CaseStatus.DOCUMENTS_SUBMITTED, 1), else_=0)).label("docs_submitted_count"),
         func.sum(case((models.Case.status == models.CaseStatus.LINK_SHARED, 1), else_=0)).label("link_shared_count"),
-        func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed_count"),
+        func.sum(case((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']), 1), else_=0)).label("completed_count"),
         func.sum(case((models.Case.status.in_([models.CaseStatus.VERIFICATION, models.CaseStatus.QC]), 1), else_=0)).label("in_progress_count"),
         func.max(models.Case.completed_date).label("completed_date")
     ).select_from(models.Case).join(

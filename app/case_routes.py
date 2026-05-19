@@ -32,7 +32,7 @@ def validate_case_completion(case_obj: models.Case):
     """
     Enterprise Validation Routine:
     Ensures a case cannot transition to COMPLETED until ALL associated verification 
-    modules achieve QC approval and host a final decision classification.
+    modules are completed by the assigned verifier.
     """
     if not case_obj.checks:
         return True
@@ -40,26 +40,16 @@ def validate_case_completion(case_obj: models.Case):
     incomplete_checks = []
     
     for chk in case_obj.checks:
-        q_stat = str(chk.qc_status or "PENDING_REVIEW").upper()
-        has_result = chk.final_result is not None
+        status_val = str(chk.status).upper()
+        is_completed = status_val in ["POSITIVE", "NEGATIVE", "DISCREPANCY", "GREEN", "RED", "AMBER", "STOP", "COMPLETED", "QC_VERIFIED", "QC_PENDING"]
         
-        # Standard Enterprise Check: Must be explicit approval + categorized result
-        is_enterprise_compliant = (q_stat == "APPROVED") and has_result
-        
-        # Backward-Compatibility & Manager-Override Check: 
-        # Allow checks to pass if they are already in a finalized legacy status, 
-        # OR if they have a result and are NOT rejected (Manager override during closure).
-        is_legacy_final = str(chk.status).upper() in ["GREEN", "RED", "AMBER", "STOP", "QC_VERIFIED", "COMPLETED", "POSITIVE", "NEGATIVE", "DISCREPANCY", "INSUFFICIENT", "INTERIM", "QC_PENDING", "PENDING_REVIEW"]
-        is_result_present_and_not_rejected = has_result and q_stat != "REJECTED"
-        
-        if not (is_enterprise_compliant or is_legacy_final or is_result_present_and_not_rejected):
-            incomplete_checks.append(f"{chk.check_type} (QC: {q_stat}, Result: {chk.final_result or 'None'})")
+        if not is_completed:
+            incomplete_checks.append(f"{chk.check_type} (Status: {chk.status})")
     
     if incomplete_checks:
         raise HTTPException(
             status_code=400,
-            detail=f"Operational Protocol Violation: Case {case_obj.case_ref_no} cannot be finalized. "
-                   f"The following modules must receive explicit QC Approval and Final Decision first: {', '.join(incomplete_checks)}."
+            detail=f"Cannot finalize case. Incomplete verification checks present: {', '.join(incomplete_checks)}. Complete these actions first."
         )
     return True
 
@@ -921,13 +911,15 @@ async def export_mis_data(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Generates structured MIS Excel report for cases."""
+    """Generates structured MIS Excel report for cases using a professionally styled template."""
     try:
         stmt = select(models.Case).options(
             joinedload(models.Case.candidate),
             joinedload(models.Case.customer),
             joinedload(models.Case.assigned_user),
-            selectinload(models.Case.checks)
+            selectinload(models.Case.checks),
+            selectinload(models.Case.verification_logs),
+            selectinload(models.Case.insufficiencies)
         )
         
         # Join Customer if client_name or search is used
@@ -948,8 +940,12 @@ async def export_mis_data(
             if customer_name:
                 stmt = stmt.filter(models.Customer.name == customer_name)
 
-        if status and status != 'ALL':
-            stmt = stmt.filter(models.Case.status == status)
+        if status and status.strip().upper() not in ('ALL', ''):
+            _FINAL = ['FINALIZED','COMPLETED','POSITIVE','NEGATIVE','DISCREPANCY','UNABLE TO VERIFY','HOLD','INSUFFICIENT','QC_VERIFIED','CLOSED']
+            if status.strip().upper() in ('COMPLETED', 'FINALIZED'):
+                stmt = stmt.filter(models.Case.status.in_(_FINAL))
+            else:
+                stmt = stmt.filter(models.Case.status == status)
         
         if search:
             stmt = stmt.join(models.Candidate).filter(or_(
@@ -970,92 +966,331 @@ async def export_mis_data(
 
         stmt = stmt.order_by(models.Case.received_date.desc())
         res = await db.execute(stmt)
-        # Using yield_per for memory efficiency if the driver supports it
-        cases_gen = res.unique().scalars()
+        cases_gen = res.unique().scalars().all()
+
+        # Load the MIS Format.xlsx template file
+        import openpyxl
+        from copy import copy
+        
+        template_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "frontend", "src", "assets", "MIS Format.xlsx"
+        )
+        
+        if not os.path.exists(template_path):
+            # Graceful fallback to working directory or local asset folder
+            template_path = "MIS Format.xlsx"
+
+        workbook = openpyxl.load_workbook(template_path)
+
+        def copy_style(src_cell, dest_cell):
+            if src_cell.has_style:
+                dest_cell.font = copy(src_cell.font)
+                dest_cell.fill = copy(src_cell.fill)
+                dest_cell.border = copy(src_cell.border)
+                dest_cell.alignment = copy(src_cell.alignment)
+                dest_cell.number_format = src_cell.number_format
+
+        def apply_row_styles(ws, ref_row_idx, target_row_idx):
+            if target_row_idx == ref_row_idx:
+                return
+            for col_idx in range(1, ws.max_column + 1):
+                src_cell = ws.cell(row=ref_row_idx, column=col_idx)
+                dest_cell = ws.cell(row=target_row_idx, column=col_idx)
+                copy_style(src_cell, dest_cell)
+
+        # -------------------------------------------------------------
+        # SHEET 1: Case wise MIS
+        # -------------------------------------------------------------
+        ws1 = workbook["Case wise MIS"]
+        
+        # Clear existing mock/old data starting from row 2
+        for r in range(2, ws1.max_row + 1):
+            for col in range(1, ws1.max_column + 1):
+                ws1.cell(row=r, column=col).value = None
+
+        row_idx1 = 2
+        for idx, c in enumerate(cases_gen, start=1):
+            apply_row_styles(ws1, 2, row_idx1)
+            
+            # Extract insufficiency timelines
+            raised_date = None
+            raised_remarks = []
+            cleared_date = None
+            cleared_remarks = []
+            for ins in (c.insufficiencies or []):
+                if ins.created_at:
+                    if not raised_date or ins.created_at < raised_date:
+                        raised_date = ins.created_at
+                    raised_remarks.append(ins.message or "")
+                if ins.is_resolved and ins.resolved_at:
+                    if not cleared_date or ins.resolved_at > cleared_date:
+                        cleared_date = ins.resolved_at
+                    if ins.resolved_remarks:
+                        cleared_remarks.append(ins.resolved_remarks)
+
+            # Extract log-based event timelines
+            interim_date = None
+            interim_remarks = []
+            stop_date = None
+            stop_remarks = []
+            amber_date = None
+            amber_remarks = []
+            negative_remarks = []
+            reinitiate_date = None
+            reinitiate_remarks = []
+            reinitiate_completed_date = None
+            reinitiate_completed_remarks = []
+
+            for log in (c.verification_logs or []):
+                action_lower = str(log.action or "").lower()
+                remarks_lower = str(log.remarks or "").lower()
+                
+                # Interim
+                if log.new_status == "INTERIM" or "interim" in action_lower or "interim" in remarks_lower:
+                    if not interim_date or log.created_at < interim_date:
+                        interim_date = log.created_at
+                    if log.remarks:
+                        interim_remarks.append(log.remarks)
+                
+                # Stop Check
+                if log.new_status == "STOP" or "stop" in action_lower or "stop" in remarks_lower:
+                    if not stop_date or log.created_at < stop_date:
+                        stop_date = log.created_at
+                    if log.remarks:
+                        stop_remarks.append(log.remarks)
+
+                # Amber
+                if log.new_status == "AMBER" or "amber" in action_lower or "amber" in remarks_lower:
+                    if not amber_date or log.created_at < amber_date:
+                        amber_date = log.created_at
+                    if log.remarks:
+                        amber_remarks.append(log.remarks)
+
+                # Negative
+                if log.new_status == "NEGATIVE" or "negative" in action_lower or "negative" in remarks_lower:
+                    if log.remarks:
+                        negative_remarks.append(log.remarks)
+
+                # Re-initiated
+                if "reinitiate" in action_lower or "re-initiate" in action_lower or "reinitiated" in remarks_lower or "re-initiated" in remarks_lower:
+                    if not reinitiate_date or log.created_at < reinitiate_date:
+                        reinitiate_date = log.created_at
+                    if log.remarks:
+                        reinitiate_remarks.append(log.remarks)
+
+                # Re-initiation Completed
+                if ("reinitiate" in remarks_lower or "re-initiate" in remarks_lower) and log.new_status == "COMPLETED":
+                    if not reinitiate_completed_date or log.created_at < reinitiate_completed_date:
+                        reinitiate_completed_date = log.created_at
+                    if log.remarks:
+                        reinitiate_completed_remarks.append(log.remarks)
+
+            if not negative_remarks and c.final_report_status == 'NEGATIVE' and c.qc_remarks:
+                negative_remarks.append(c.qc_remarks)
+
+            ws1.cell(row=row_idx1, column=1, value=idx)
+            ws1.cell(row=row_idx1, column=2, value=c.received_date.replace(tzinfo=None) if c.received_date else None)
+            ws1.cell(row=row_idx1, column=3, value=c.case_ref_no or "")
+            ws1.cell(row=row_idx1, column=4, value=c.candidate.client_emp_code if c.candidate else "")
+            ws1.cell(row=row_idx1, column=5, value=c.candidate.name if c.candidate else "")
+            ws1.cell(row=row_idx1, column=6, value=c.status or "")
+            ws1.cell(row=row_idx1, column=7, value=c.completed_date.replace(tzinfo=None) if c.completed_date else None)
+            ws1.cell(row=row_idx1, column=8, value=raised_date.replace(tzinfo=None) if raised_date else None)
+            ws1.cell(row=row_idx1, column=9, value="; ".join(raised_remarks) if raised_remarks else "")
+            ws1.cell(row=row_idx1, column=10, value=cleared_date.replace(tzinfo=None) if cleared_date else None)
+            ws1.cell(row=row_idx1, column=11, value="; ".join(cleared_remarks) if cleared_remarks else "")
+            ws1.cell(row=row_idx1, column=12, value=interim_date.replace(tzinfo=None) if interim_date else None)
+            ws1.cell(row=row_idx1, column=13, value="; ".join(interim_remarks) if interim_remarks else "")
+            ws1.cell(row=row_idx1, column=14, value=stop_date.replace(tzinfo=None) if stop_date else None)
+            ws1.cell(row=row_idx1, column=15, value="; ".join(stop_remarks) if stop_remarks else "")
+            ws1.cell(row=row_idx1, column=16, value=amber_date.replace(tzinfo=None) if amber_date else None)
+            ws1.cell(row=row_idx1, column=17, value="; ".join(amber_remarks) if amber_remarks else "")
+            ws1.cell(row=row_idx1, column=18, value="; ".join(negative_remarks) if negative_remarks else "")
+            ws1.cell(row=row_idx1, column=19, value=reinitiate_date.replace(tzinfo=None) if reinitiate_date else None)
+            ws1.cell(row=row_idx1, column=20, value="; ".join(reinitiate_remarks) if reinitiate_remarks else "")
+            ws1.cell(row=row_idx1, column=21, value=reinitiate_completed_date.replace(tzinfo=None) if reinitiate_completed_date else None)
+            ws1.cell(row=row_idx1, column=22, value="; ".join(reinitiate_completed_remarks) if reinitiate_completed_remarks else "")
+
+            row_idx1 += 1
+
+        # -------------------------------------------------------------
+        # SHEET 2: Check wise MIS
+        # -------------------------------------------------------------
+        ws2 = workbook["Check wise MIS"]
+        
+        # Clear existing mock/old data starting from row 4
+        for r in range(4, ws2.max_row + 1):
+            for col in range(1, ws2.max_column + 1):
+                ws2.cell(row=r, column=col).value = None
+
+        row_idx2 = 4
+        for idx, c in enumerate(cases_gen, start=1):
+            apply_row_styles(ws2, 4, row_idx2)
+
+            # Columns 1 to 20 are the same as Case wise MIS
+            raised_date = None
+            raised_remarks = []
+            cleared_date = None
+            cleared_remarks = []
+            for ins in (c.insufficiencies or []):
+                if ins.created_at:
+                    if not raised_date or ins.created_at < raised_date:
+                        raised_date = ins.created_at
+                    raised_remarks.append(ins.message or "")
+                if ins.is_resolved and ins.resolved_at:
+                    if not cleared_date or ins.resolved_at > cleared_date:
+                        cleared_date = ins.resolved_at
+                    if ins.resolved_remarks:
+                        cleared_remarks.append(ins.resolved_remarks)
+
+            interim_date = None
+            interim_remarks = []
+            stop_date = None
+            stop_remarks = []
+            amber_date = None
+            amber_remarks = []
+            negative_remarks = []
+            reinitiate_date = None
+            reinitiate_remarks = []
+            reinitiate_completed_date = None
+            reinitiate_completed_remarks = []
+
+            for log in (c.verification_logs or []):
+                action_lower = str(log.action or "").lower()
+                remarks_lower = str(log.remarks or "").lower()
+                
+                if log.new_status == "INTERIM" or "interim" in action_lower or "interim" in remarks_lower:
+                    if not interim_date or log.created_at < interim_date:
+                        interim_date = log.created_at
+                    if log.remarks:
+                        interim_remarks.append(log.remarks)
+                
+                if log.new_status == "STOP" or "stop" in action_lower or "stop" in remarks_lower:
+                    if not stop_date or log.created_at < stop_date:
+                        stop_date = log.created_at
+                    if log.remarks:
+                        stop_remarks.append(log.remarks)
+
+                if log.new_status == "AMBER" or "amber" in action_lower or "amber" in remarks_lower:
+                    if not amber_date or log.created_at < amber_date:
+                        amber_date = log.created_at
+                    if log.remarks:
+                        amber_remarks.append(log.remarks)
+
+                if log.new_status == "NEGATIVE" or "negative" in action_lower or "negative" in remarks_lower:
+                    if log.remarks:
+                        negative_remarks.append(log.remarks)
+
+                if "reinitiate" in action_lower or "re-initiate" in action_lower or "reinitiated" in remarks_lower or "re-initiated" in remarks_lower:
+                    if not reinitiate_date or log.created_at < reinitiate_date:
+                        reinitiate_date = log.created_at
+                    if log.remarks:
+                        reinitiate_remarks.append(log.remarks)
+
+                if ("reinitiate" in remarks_lower or "re-initiate" in remarks_lower) and log.new_status == "COMPLETED":
+                    if not reinitiate_completed_date or log.created_at < reinitiate_completed_date:
+                        reinitiate_completed_date = log.created_at
+                    if log.remarks:
+                        reinitiate_completed_remarks.append(log.remarks)
+
+            if not negative_remarks and c.final_report_status == 'NEGATIVE' and c.qc_remarks:
+                negative_remarks.append(c.qc_remarks)
+
+            ws2.cell(row=row_idx2, column=1, value=idx)
+            ws2.cell(row=row_idx2, column=2, value=c.received_date.replace(tzinfo=None) if c.received_date else None)
+            ws2.cell(row=row_idx2, column=3, value=c.case_ref_no or "")
+            ws2.cell(row=row_idx2, column=4, value=c.candidate.client_emp_code if c.candidate else "")
+            ws2.cell(row=row_idx2, column=5, value=c.candidate.name if c.candidate else "")
+            ws2.cell(row=row_idx2, column=6, value=c.status or "")
+            ws2.cell(row=row_idx2, column=7, value=c.completed_date.replace(tzinfo=None) if c.completed_date else None)
+            ws2.cell(row=row_idx2, column=8, value=raised_date.replace(tzinfo=None) if raised_date else None)
+            ws2.cell(row=row_idx2, column=9, value="; ".join(raised_remarks) if raised_remarks else "")
+            ws2.cell(row=row_idx2, column=10, value=cleared_date.replace(tzinfo=None) if cleared_date else None)
+            ws2.cell(row=row_idx2, column=11, value="; ".join(cleared_remarks) if cleared_remarks else "")
+            ws2.cell(row=row_idx2, column=12, value=interim_date.replace(tzinfo=None) if interim_date else None)
+            ws2.cell(row=row_idx2, column=13, value="; ".join(interim_remarks) if interim_remarks else "")
+            ws2.cell(row=row_idx2, column=14, value=stop_date.replace(tzinfo=None) if stop_date else None)
+            ws2.cell(row=row_idx2, column=15, value="; ".join(stop_remarks) if stop_remarks else "")
+            ws2.cell(row=row_idx2, column=16, value=amber_date.replace(tzinfo=None) if amber_date else None)
+            ws2.cell(row=row_idx2, column=17, value="; ".join(amber_remarks) if amber_remarks else "")
+            ws2.cell(row=row_idx2, column=18, value="; ".join(negative_remarks) if negative_remarks else "")
+            ws2.cell(row=row_idx2, column=19, value=reinitiate_date.replace(tzinfo=None) if reinitiate_date else None)
+            ws2.cell(row=row_idx2, column=20, value="; ".join(reinitiate_remarks) if reinitiate_remarks else "")
+
+            # Specific verification check mapping
+            ad = c.candidate.address_details if c.candidate and c.candidate.address_details else {}
+            
+            # Address Check (Col 21, Col 22)
+            addr_check = next((chk for chk in (c.checks or []) if 'address' in str(chk.check_type).lower()), None)
+            ws2.cell(row=row_idx2, column=21, value="Permanent")
+            ws2.cell(row=row_idx2, column=22, value=addr_check.status if addr_check else "N/A")
+
+            # Criminal Check (Col 23, Col 24)
+            crim_check = next((chk for chk in (c.checks or []) if 'criminal' in str(chk.check_type).lower()), None)
+            ws2.cell(row=row_idx2, column=23, value="")
+            ws2.cell(row=row_idx2, column=24, value=crim_check.status if crim_check else "N/A")
+
+            # Employments (Col 25 to 33)
+            employments = ad.get("employments", []) if isinstance(ad.get("employments"), list) else []
+            emp_checks = [chk for chk in (c.checks or []) if 'employment' in str(chk.check_type).lower()]
+            
+            # Employment 1
+            emp1_name = employments[0].get("employer_name") if len(employments) > 0 else ""
+            emp1_chk = emp_checks[0] if len(emp_checks) > 0 else None
+            ws2.cell(row=row_idx2, column=25, value=emp1_name)
+            ws2.cell(row=row_idx2, column=26, value=emp1_name)
+            ws2.cell(row=row_idx2, column=27, value=emp1_chk.status if emp1_chk else "N/A")
+
+            # Employment 2
+            emp2_name = employments[1].get("employer_name") if len(employments) > 1 else ""
+            emp2_chk = emp_checks[1] if len(emp_checks) > 1 else None
+            ws2.cell(row=row_idx2, column=28, value=emp2_name)
+            ws2.cell(row=row_idx2, column=29, value=emp2_name)
+            ws2.cell(row=row_idx2, column=30, value=emp2_chk.status if emp2_chk else "N/A")
+
+            # Employment 3
+            emp3_name = employments[2].get("employer_name") if len(employments) > 2 else ""
+            emp3_chk = emp_checks[2] if len(emp_checks) > 2 else None
+            ws2.cell(row=row_idx2, column=31, value=emp3_name)
+            ws2.cell(row=row_idx2, column=32, value=emp3_name)
+            ws2.cell(row=row_idx2, column=33, value=emp3_chk.status if emp3_chk else "N/A")
+
+            # Educations (Col 34 to 39)
+            educations = ad.get("educations", []) if isinstance(ad.get("educations"), list) else []
+            edu_checks = [chk for chk in (c.checks or []) if 'education' in str(chk.check_type).lower()]
+
+            # Education 1
+            edu1_course = educations[0].get("course") if len(educations) > 0 else ""
+            edu1_chk = edu_checks[0] if len(edu_checks) > 0 else None
+            ws2.cell(row=row_idx2, column=34, value=edu1_course)
+            ws2.cell(row=row_idx2, column=35, value=edu1_course)
+            ws2.cell(row=row_idx2, column=36, value=edu1_chk.status if edu1_chk else "N/A")
+
+            # Education 2
+            edu2_course = educations[1].get("course") if len(educations) > 1 else ""
+            edu2_chk = edu_checks[1] if len(edu_checks) > 1 else None
+            ws2.cell(row=row_idx2, column=37, value=edu2_course)
+            ws2.cell(row=row_idx2, column=38, value=edu2_course)
+            ws2.cell(row=row_idx2, column=39, value=edu2_chk.status if edu2_chk else "N/A")
+
+            # Identity ID1 (Col 40 to 42)
+            identities = ad.get("identities", []) if isinstance(ad.get("identities"), list) else []
+            id_checks = [chk for chk in (c.checks or []) if 'identity' in str(chk.check_type).lower()]
+            id1_type = "PAN"
+            if len(identities) > 0:
+                id1_type = identities[0].get("id_type") or "PAN"
+            elif c.candidate and c.candidate.identity_type:
+                id1_type = c.candidate.identity_type
+            id1_chk = id_checks[0] if len(id_checks) > 0 else None
+            ws2.cell(row=row_idx2, column=40, value=id1_type)
+            ws2.cell(row=row_idx2, column=41, value=id1_type)
+            ws2.cell(row=row_idx2, column=42, value=id1_chk.status if id1_chk else "N/A")
+
+            row_idx2 += 1
 
         output = io.BytesIO()
-        import xlsxwriter
-        workbook = xlsxwriter.Workbook(output, {'constant_memory': True, 'in_memory': True})
-        worksheet = workbook.add_worksheet('Case MIS')
-        
-        # Headers expanded for full MIS compliance
-        headers = [
-            "Case ID", "Candidate Name", "Client Name", "Status", "Received Date", "Completed Date", 
-            "Assigned To", "TAT (Days)", "SLA Status", "In-TAT Days", "Out-TAT Days",
-            "Email", "Phone", "Employee ID", "Department", "Designation"
-        ]
-        
-        # Add columns for each possible check type (Dynamic mapping)
-        check_types = [
-            "Address", "Education", "Employment", "Criminal", "Identity", 
-            "Drug", "Credit", "Global Database", "Reference", "Social Media"
-        ]
-        for ct in check_types:
-            headers.extend([f"{ct} Status", f"{ct} Remarks", f"{ct} Date"])
-            
-        for col, header in enumerate(headers):
-            worksheet.write(0, col, header)
-
-        row_idx = 1
-        from datetime import timezone
-        now_dt = datetime.now(timezone.utc)
-
-        for c in cases_gen:
-            # Calculate In-TAT/Out-TAT
-            total_days = 0
-            if c.received_date:
-                r_date = c.received_date
-                if r_date.tzinfo is None: r_date = r_date.replace(tzinfo=timezone.utc)
-                    
-                e_date = c.completed_date or now_dt
-                if e_date.tzinfo is None: e_date = e_date.replace(tzinfo=timezone.utc)
-                    
-                total_days = (e_date.date() - r_date.date()).days + 1
-                total_days = max(1, total_days)
-            
-            allowed = c.tat_days or 10
-            in_tat_days = total_days if total_days <= allowed else allowed
-            out_tat_days = 0 if total_days <= allowed else total_days - allowed
-
-            worksheet.write(row_idx, 0, c.case_ref_no)
-            worksheet.write(row_idx, 1, c.candidate.name if c.candidate else "N/A")
-            worksheet.write(row_idx, 2, c.customer.name if c.customer else "N/A")
-            worksheet.write(row_idx, 3, c.status)
-            worksheet.write(row_idx, 4, c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A")
-            worksheet.write(row_idx, 5, c.completed_date.strftime("%Y-%m-%d %H:%M") if c.completed_date else "In Progress")
-            worksheet.write(row_idx, 6, c.assigned_user.full_name if c.assigned_user else "Unallocated")
-            worksheet.write(row_idx, 7, allowed)
-            worksheet.write(row_idx, 8, "In-TAT" if c.is_in_tat == 1 else "Out-TAT")
-            worksheet.write(row_idx, 9, in_tat_days)
-            worksheet.write(row_idx, 10, out_tat_days)
-            
-            # Candidate Metadata
-            worksheet.write(row_idx, 11, c.candidate.email if c.candidate else "N/A")
-            worksheet.write(row_idx, 12, c.candidate.phone if c.candidate else "N/A")
-            worksheet.write(row_idx, 13, c.candidate.client_emp_code if c.candidate else "N/A")
-            # Department/Designation from address_details if available
-            ad = c.candidate.address_details if c.candidate and c.candidate.address_details else {}
-            worksheet.write(row_idx, 14, ad.get("department", "N/A"))
-            worksheet.write(row_idx, 15, ad.get("designation", "N/A"))
-            
-            # Check-wise Status and Remarks
-            check_map = {chk.check_type.lower(): chk for chk in (c.checks or [])}
-            col_offset = 16
-            for ct in check_types:
-                chk = check_map.get(ct.lower())
-                if chk:
-                    worksheet.write(row_idx, col_offset, chk.status)
-                    worksheet.write(row_idx, col_offset + 1, chk.verifier_remarks or "")
-                    worksheet.write(row_idx, col_offset + 2, chk.verified_date.strftime("%Y-%m-%d") if chk.verified_date else "")
-                else:
-                    worksheet.write(row_idx, col_offset, "N/A")
-                    worksheet.write(row_idx, col_offset + 1, "")
-                    worksheet.write(row_idx, col_offset + 2, "")
-                col_offset += 3
-                
-            row_idx += 1
-
-        workbook.close()
+        workbook.save(output)
         output.seek(0)
         
         filename = f"MIS_Export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -1120,11 +1355,10 @@ async def get_strategic_mis(
             for chk in c.checks:
                 status_label = "In Progress"
                 s = str(chk.status).upper()
-                if s == "GREEN": status_label = "Positive"
-                elif s == "RED": status_label = "Negative"
+                if s in ["GREEN", "POSITIVE", "COMPLETED", "VERIFIED", "QC_VERIFIED"]: status_label = "Positive"
+                elif s in ["RED", "NEGATIVE"]: status_label = "Negative"
                 elif s == "AMBER": status_label = "Amber"
                 elif s == "INTERIM": status_label = "Interim"
-                elif s in ["COMPLETED", "VERIFIED", "QC_VERIFIED"]: status_label = "Positive"
                 
                 # Normalize technical type to report key
                 tech_type = chk.check_type.lower()
@@ -1199,7 +1433,6 @@ async def get_case_strategic_details(
             joinedload(models.Case.candidate),
             joinedload(models.Case.customer),
             joinedload(models.Case.assigned_user),
-            joinedload(models.Case.qc_user),
             selectinload(models.Case.checks).selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
             selectinload(models.Case.checks).selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
             selectinload(models.Case.checks).selectinload(models.VerificationCheck.assigned_verifier),
@@ -1225,11 +1458,10 @@ async def get_case_strategic_details(
         for chk in c.checks:
             status_label = "In Progress"
             s = str(chk.status).upper()
-            if s == "GREEN": status_label = "Positive"
-            elif s == "RED": status_label = "Negative"
+            if s in ["GREEN", "POSITIVE", "COMPLETED", "VERIFIED", "QC_VERIFIED"]: status_label = "Positive"
+            elif s in ["RED", "NEGATIVE"]: status_label = "Negative"
             elif s == "AMBER": status_label = "Amber"
             elif s == "INTERIM": status_label = "Interim"
-            elif s in ["COMPLETED", "VERIFIED", "QC_VERIFIED"]: status_label = "Positive"
             
             tech_type = chk.check_type.lower()
             report_key = tech_type
@@ -1419,7 +1651,7 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
                 selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
                 selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
                 selectinload(models.VerificationCheck.assigned_verifier),
-                selectinload(models.VerificationCheck.qc_verifier)
+                selectinload(models.VerificationCheck.finalized_user)
             )
         ).filter(models.Case.id == db_case.id)
     )
@@ -1518,7 +1750,7 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
             selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
             selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
             selectinload(models.VerificationCheck.assigned_verifier),
-            selectinload(models.VerificationCheck.qc_verifier)
+            selectinload(models.VerificationCheck.finalized_user)
         )
     ).filter(models.Case.id == db_case.id)
     res = await db.execute(stmt)
@@ -1532,27 +1764,38 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
 
 @router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def get_allocation_stats(db: AsyncSession = Depends(get_read_db)):
-    # Strictly count cases that are READY for allocation
+    FINAL_STATUSES = [
+        'FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE',
+        'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT',
+        'QC_VERIFIED', 'CLOSED'
+    ]
+
+    # Cases not yet assigned to anyone — covers all pre-assignment statuses
     unallocated_stmt = select(func.count(models.Case.id)).filter(
-        models.Case.status == 'PENDING'
+        models.Case.assigned_to == None,
+        models.Case.status.notin_(FINAL_STATUSES)
     )
-    
-    # Strictly count cases that are ACTIVELY in the verification pipeline
+
+    # Cases actively being worked on by a verifier
     allocated_stmt = select(func.count(models.Case.id)).filter(
-        models.Case.status.in_(['VERIFICATION', 'QC', 'QC_PENDING', 'QA_PENDING'])
+        models.Case.assigned_to != None,
+        models.Case.status.notin_(FINAL_STATUSES)
     )
-    
-    completed_stmt = select(func.count(models.Case.id)).filter(models.Case.status.in_(['COMPLETED', 'completed', 'Completed']))
-    
+
+    # All terminally finalized cases
+    completed_stmt = select(func.count(models.Case.id)).filter(
+        models.Case.status.in_(FINAL_STATUSES)
+    )
+
     unallocated_res = await db.execute(unallocated_stmt)
-    allocated_res = await db.execute(allocated_stmt)
-    completed_res = await db.execute(completed_stmt)
-    
+    allocated_res   = await db.execute(allocated_stmt)
+    completed_res   = await db.execute(completed_stmt)
+
     return {
-        "unallocated": (unallocated_res.scalar() or 0) + 1,
-        "allocated": allocated_res.scalar() or 0,
-        "completed": completed_res.scalar() or 0,
-        "active_verifiers": 0 
+        "unallocated":      unallocated_res.scalar() or 0,
+        "allocated":        allocated_res.scalar() or 0,
+        "completed":        completed_res.scalar() or 0,
+        "active_verifiers": 0
     }
 
 @router.get("/recommend-allocation")
@@ -1711,13 +1954,12 @@ async def read_cases(
         selectinload(models.Case.customer),
         selectinload(models.Case.batch),
         selectinload(models.Case.assigned_user).joinedload(models.User.role_rel),
-        selectinload(models.Case.qa_user),
-        selectinload(models.Case.qc_user),
+        selectinload(models.Case.finalized_user),
         selectinload(models.Case.checks).options(
             selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
             selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
             selectinload(models.VerificationCheck.assigned_verifier),
-            selectinload(models.VerificationCheck.qc_verifier)
+            selectinload(models.VerificationCheck.finalized_user)
         ),
         selectinload(models.Case.verification_logs).joinedload(models.VerificationLog.performer),
         selectinload(models.Case.insufficiencies).options(joinedload(models.Insufficiency.check))
@@ -1768,21 +2010,34 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(personal_filter)
     
     # 3. Dynamic Filtering
+    ALL_FINAL_STATUSES = [
+        'FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE',
+        'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT',
+        'QC_VERIFIED', 'CLOSED'
+    ]
     if status and str(status).strip().upper() not in ['ALL', '']:
-        if status == 'VERIFICATION':
+        status_up = str(status).strip().upper()
+        if status_up == 'VERIFICATION':
             # WIP: strictly only active verification stage, not pending intake
             s_filter = models.Case.status == 'VERIFICATION'
-        elif status == 'QC':
+        elif status_up == 'QC':
             # QC Active Pipeline: include all stages including verified but not yet finalized COMPLETED
             s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QA_PENDING', 'QC_VERIFIED'])
+        elif status_up in ('COMPLETED', 'FINALIZED'):
+            # Treat COMPLETED/FINALIZED as an alias for ALL terminal verdict statuses
+            s_filter = models.Case.status.in_(ALL_FINAL_STATUSES)
         else:
             s_filter = models.Case.status == status
             
         stmt = stmt.filter(s_filter)
         base_count_stmt = base_count_stmt.filter(s_filter)
     else:
-        # If 'ALL' or no specific status, exclude cases that are still in self-onboarding/data-entry phase
-        exclude_filter = ~models.Case.status.in_([models.CaseStatus.LINK_SHARED, models.CaseStatus.DOCUMENTS_SUBMITTED])
+        # Exclude old self-onboarding-only statuses (literal strings, not enum aliases,
+        # because the enum aliases now resolve to ASSIGNED/IN_PROGRESS which would
+        # incorrectly exclude active cases from all queries).
+        exclude_filter = ~models.Case.status.in_([
+            'LINK_SHARED', 'DOCUMENTS_SUBMITTED'
+        ])
         stmt = stmt.filter(exclude_filter)
         base_count_stmt = base_count_stmt.filter(exclude_filter)
     if batch_id:
@@ -1813,21 +2068,29 @@ async def read_cases(
         stmt = stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
         base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
     if assigned is not None:
+        _FINAL_S = ['FINALIZED','COMPLETED','POSITIVE','NEGATIVE','DISCREPANCY','UNABLE TO VERIFY','HOLD','INSUFFICIENT','QC_VERIFIED','CLOSED']
         if assigned:
-            # Active Allocations: Strictly cases in the verification/QC pipeline
-            active_filter = [models.Case.status.in_(['VERIFICATION', 'QC', 'QC_PENDING', 'QA_PENDING'])]
-            stmt = stmt.filter(*active_filter)
-            base_count_stmt = base_count_stmt.filter(*active_filter)
+            # Active Allocations: cases that have an assigned verifier and are not yet finalized
+            active_filter = and_(
+                models.Case.assigned_to != None,
+                models.Case.status.notin_(_FINAL_S)
+            )
+            stmt = stmt.filter(active_filter)
+            base_count_stmt = base_count_stmt.filter(active_filter)
         else:
-            # Unassigned: Strictly cases ready for assignment (Pending)
-            unassigned_filter = [models.Case.status == 'PENDING']
-            stmt = stmt.filter(*unassigned_filter)
-            base_count_stmt = base_count_stmt.filter(*unassigned_filter)
+            # Unassigned: cases with no verifier and not yet finalized
+            unassigned_filter = and_(
+                models.Case.assigned_to == None,
+                models.Case.status.notin_(_FINAL_S)
+            )
+            stmt = stmt.filter(unassigned_filter)
+            base_count_stmt = base_count_stmt.filter(unassigned_filter)
     
     if exclude_completed:
-        comp_filter = [models.Case.status.notin_(['COMPLETED', 'completed', 'Completed'])]
-        stmt = stmt.filter(*comp_filter)
-        base_count_stmt = base_count_stmt.filter(*comp_filter)
+        _EXCL = ['FINALIZED','COMPLETED','POSITIVE','NEGATIVE','DISCREPANCY','UNABLE TO VERIFY','HOLD','INSUFFICIENT','QC_VERIFIED','CLOSED']
+        comp_filter = models.Case.status.notin_(_EXCL)
+        stmt = stmt.filter(comp_filter)
+        base_count_stmt = base_count_stmt.filter(comp_filter)
 
     if from_date:
         try:
@@ -1999,10 +2262,10 @@ async def get_report_stats(customer_id: Optional[str] = None, db: AsyncSession =
     total_res = await db.execute(select(func.count(models.Case.id)).select_from(base_stmt.subquery()))
     total = total_res.scalar() or 0
     
-    comp_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED).select_from(base_stmt.subquery()))
+    comp_res = await db.execute(select(func.count(models.Case.id)).filter(models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])).select_from(base_stmt.subquery()))
     completed = comp_res.scalar() or 0
     
-    tat_res = await db.execute(select(func.avg(models.Case.tat_days)).filter(models.Case.status == models.CaseStatus.COMPLETED).select_from(base_stmt.subquery()))
+    tat_res = await db.execute(select(func.avg(models.Case.tat_days)).filter(models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])).select_from(base_stmt.subquery()))
     avg_tat = tat_res.scalar() or 0
 
     return {
@@ -2021,13 +2284,12 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
             selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
             selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
             selectinload(models.VerificationCheck.assigned_verifier),
-            selectinload(models.VerificationCheck.qc_verifier)
+            selectinload(models.VerificationCheck.finalized_user)
         ),
         selectinload(models.Case.verification_logs).joinedload(models.VerificationLog.performer),
         joinedload(models.Case.batch),
         joinedload(models.Case.assigned_user).joinedload(models.User.role_rel),
-        joinedload(models.Case.qa_user),
-        joinedload(models.Case.qc_user),
+        joinedload(models.Case.finalized_user),
         selectinload(models.Case.insufficiencies).options(joinedload(models.Insufficiency.check))
     ).filter(models.Case.id == case_id)
     res = await db.execute(stmt)
@@ -2443,6 +2705,21 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
     if update_data.get("status") == models.CaseStatus.COMPLETED and db_case.status != models.CaseStatus.COMPLETED:
         validate_case_completion(db_case)
         db_case.completed_date = manual_completed_date or datetime.utcnow()
+        # Propagate completion to checks
+        for chk in db_case.checks:
+            if str(chk.status).upper() in ["QC_PENDING", "VERIFICATION", "INTERIM"]:
+                if chk.final_result:
+                    res_val = str(chk.final_result).upper()
+                    if res_val == "POSITIVE":
+                        chk.status = "GREEN"
+                    elif res_val == "NEGATIVE":
+                        chk.status = "RED"
+                    elif res_val == "DISCREPANCY":
+                        chk.status = "AMBER"
+                    else:
+                        chk.status = res_val
+                else:
+                    chk.status = "GREEN"
         # TAT Performance tracking
         if db_case.batch_id and db_case.received_date:
             res_batch = await db.execute(select(models.Batch).filter(models.Batch.id == db_case.batch_id))
@@ -2617,6 +2894,22 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
             # Capture final result for notification (checking both result and status fields)
             f_result = update_data.get("final_report_status") or update_data.get("final_result") or db_case.final_report_status or "POSITIVE"
             
+            # Sync final result status to checks
+            for chk in db_case.checks:
+                if str(chk.status).upper() in ["QC_PENDING", "VERIFICATION", "INTERIM"]:
+                    if chk.final_result:
+                        res_val = str(chk.final_result).upper()
+                        if res_val == "POSITIVE":
+                            chk.status = "GREEN"
+                        elif res_val == "NEGATIVE":
+                            chk.status = "RED"
+                        elif res_val == "DISCREPANCY":
+                            chk.status = "AMBER"
+                        else:
+                            chk.status = res_val
+                    else:
+                        chk.status = "GREEN"
+
             # Ensure final_result column is also synced
             db_case.final_result = f_result
             db_case.final_report_status = f_result
@@ -2645,7 +2938,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
                 selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
                 selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
                 selectinload(models.VerificationCheck.assigned_verifier),
-                selectinload(models.VerificationCheck.qc_verifier)
+                selectinload(models.VerificationCheck.finalized_user)
             )
         ).filter(models.Case.id == db_case.id)
     )
@@ -2814,6 +3107,100 @@ async def generate_report_async(case_id: str, request: Request, current_user: mo
         "task_id": task.id,
         "status": "QUEUED"
     }
+
+@router.post("/{case_id}/finalize-case", response_model=schemas.CaseRead, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
+@router.post("/finalize-case", response_model=schemas.CaseRead, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
+async def finalize_case(
+    case_id: Optional[str] = None,
+    data: Optional[schemas.FinalizeCaseRequest] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    target_case_id = case_id or (data.case_id if data else None)
+    if not target_case_id:
+        raise HTTPException(status_code=400, detail="Case ID is required.")
+        
+    stmt = select(models.Case).options(
+        selectinload(models.Case.checks).selectinload(models.VerificationCheck.documents),
+        joinedload(models.Case.candidate),
+        joinedload(models.Case.customer)
+    ).filter(models.Case.id == target_case_id)
+    res = await db.execute(stmt)
+    db_case = res.unique().scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=404, detail="Case not found.")
+        
+    # Tenancy check
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+        
+    # 1. Validate all checks are complete
+    validate_case_completion(db_case)
+    
+    # 2. Determine Case-level final_result
+    if data and data.final_result:
+        overall_result = data.final_result.upper()
+    else:
+        check_results = []
+        for chk in db_case.checks:
+            res_val = (chk.final_result or chk.status or "").upper()
+            check_results.append(res_val)
+            
+        if any(r in ["NEGATIVE", "RED", "REJECTED"] for r in check_results):
+            overall_result = "NEGATIVE"
+        elif any(r in ["DISCREPANCY", "AMBER", "YELLOW", "UNABLE_TO_VERIFY"] for r in check_results):
+            overall_result = "DISCREPANCY"
+        else:
+            overall_result = "POSITIVE"
+        
+    # 3. Transition status and set metadata
+    db_case.status = overall_result
+    db_case.final_result = overall_result
+    db_case.final_report_status = overall_result
+    db_case.finalized_by = current_user.id
+    db_case.finalized_at = datetime.utcnow()
+    db_case.completed_date = datetime.utcnow()
+    
+    if data and data.remarks:
+        db_case.final_remarks = data.remarks
+        
+    # Save & Log
+    db.add(db_case)
+    await db.commit()
+    
+    await create_audit_log(db, current_user.id, "CASE_FINALIZED", f"Case {db_case.case_ref_no} finalized with result: {overall_result}", resource_id=target_case_id)
+    
+    # Trigger notifications
+    try:
+        await notification_utils.notify_case_closed(
+            db, target_case_id, db_case.case_ref_no, db_case.candidate.name if db_case.candidate else "", overall_result
+        )
+    except Exception as notif_err:
+        logger.error(f"Error sending case closed notification: {notif_err}")
+        
+    # Broadcast to workforce dashboard
+    try:
+        await manager.broadcast({"type": "WORKFORCE_UPDATE", "source": "finalize_case"})
+    except Exception as bc_err:
+        logger.error(f"Error broadcasting workforce update: {bc_err}")
+        
+    # Invalidate caches
+    try:
+        await invalidate_dashboard_cache()
+    except Exception as cache_err:
+        logger.error(f"Error invalidating dashboard cache: {cache_err}")
+        
+    # Reload case for returning schemas.CaseRead
+    stmt_reload = select(models.Case).options(
+        selectinload(models.Case.checks).selectinload(models.VerificationCheck.documents),
+        joinedload(models.Case.candidate),
+        joinedload(models.Case.customer)
+    ).filter(models.Case.id == target_case_id)
+    res_reload = await db.execute(stmt_reload)
+    db_case_reloaded = res_reload.unique().scalar_one()
+    
+    return db_case_reloaded
 
 @router.post("/bulk-allocate")
 async def bulk_allocate(data: schemas.BulkAllocateRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):

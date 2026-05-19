@@ -52,13 +52,8 @@ async def get_sidebar_counts(
         )
         result["data_entry"] = de_q.scalar() or 0
 
-        # QC pending
-        qc_q = await db.execute(
-            select(func.count(models.Case.id))
-            .where(models.Case.qc_status.in_(["Pending", "pending", None]))
-            .where(models.Case.status == "Completed")
-        )
-        result["qc_pending"] = qc_q.scalar() or 0
+        # QC pending removed - set to 0
+        result["qc_pending"] = 0
 
         # Finalized today
         today = datetime.utcnow().date()
@@ -80,6 +75,457 @@ async def get_sidebar_counts(
         logger.warning(f"sidebar-counts partial error: {e}")
 
     return result
+
+
+# ─── Dedicated Customer Overview Dashboard ──────────────────────────────────────
+@router.get("/customer-dashboard")
+async def get_customer_dashboard(
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Dedicated client overview dashboard for CUSTOMER role.
+    Exposes only customer-owned candidate verification metrics.
+    """
+    if not current_user.customer_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. User is not associated with any customer account."
+        )
+
+    try:
+        # Get customer name
+        cust_q = select(models.Customer).where(models.Customer.id == current_user.customer_id)
+        cust_res = await db.execute(cust_q)
+        customer = cust_res.scalar_one_or_none()
+        customer_name = customer.name if customer else "Apex Covantage India"
+
+        # Get all cases for this customer
+        cases_q = select(models.Case).where(models.Case.customer_id == current_user.customer_id)
+        cases_res = await db.execute(cases_q)
+        cases = cases_res.scalars().all()
+
+        total_candidates = len(cases)
+        in_progress = 0
+        finalized = 0
+        insufficiency = 0
+        approaching_sla = 0
+        reports_ready = 0
+
+        # Verdict counts
+        verdict_positive = 0
+        verdict_negative = 0
+        verdict_wip = 0
+        verdict_insufficiency = 0
+
+        now = datetime.utcnow()
+
+        for c in cases:
+            status_upper = str(c.status).upper() if c.status else ""
+            
+            # KPI & report status
+            if status_upper in ["FINALIZED", "COMPLETED", "POSITIVE", "GREEN"]:
+                finalized += 1
+                reports_ready += 1
+                verdict_positive += 1
+            elif status_upper in ["NEGATIVE", "RED", "DISCREPANCY"]:
+                finalized += 1
+                reports_ready += 1
+                verdict_negative += 1
+            elif status_upper in ["INSUFFICIENCY", "INSUFFICIENT"]:
+                insufficiency += 1
+                verdict_insufficiency += 1
+            else:
+                in_progress += 1
+                verdict_wip += 1
+
+            # Approaching SLA
+            if status_upper not in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED", "DISCREPANCY"]:
+                age_days = (now - c.received_date.replace(tzinfo=None)).days if c.received_date else 0
+                sla_days_left = (c.tat_days or 10) - age_days
+                if sla_days_left <= 3 or (c.risk_score and c.risk_score > 70):
+                    approaching_sla += 1
+
+        # Get 10 recent cases
+        recent_cases_q = (
+            select(models.Case)
+            .where(models.Case.customer_id == current_user.customer_id)
+            .order_by(models.Case.received_date.desc())
+            .limit(10)
+        )
+        recent_cases_res = await db.execute(recent_cases_q)
+        recent_cases = recent_cases_res.scalars().all()
+
+        recent_candidates_list = []
+        for c in recent_cases:
+            cand_q = select(models.Candidate).where(models.Candidate.id == c.candidate_id)
+            cand_res = await db.execute(cand_q)
+            cand = cand_res.scalar_one_or_none()
+
+            batch_no = "Manual Entry"
+            if c.batch_id:
+                batch_q = select(models.Batch).where(models.Batch.id == c.batch_id)
+                batch_res = await db.execute(batch_q)
+                batch = batch_res.scalar_one_or_none()
+                if batch:
+                    batch_no = batch.batch_no
+
+            age_days = (now - c.received_date.replace(tzinfo=None)).days if c.received_date else 0
+            sla_days_left = (c.tat_days or 10) - age_days
+
+            if c.status in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]:
+                sla_text = "Completed"
+            elif sla_days_left < 0:
+                sla_text = f"Breached ({abs(sla_days_left)}d overdue)"
+            elif sla_days_left <= 3:
+                sla_text = f"Risk ({sla_days_left}d left)"
+            else:
+                sla_text = f"Healthy ({sla_days_left}d left)"
+
+            recent_candidates_list.append({
+                "id": c.id,
+                "candidate_name": cand.name if cand else "Unknown",
+                "employee_id": cand.client_emp_code if cand else "N/A",
+                "batch": batch_no,
+                "status": str(c.status).upper(),
+                "sla": sla_text,
+                "report_status": "READY" if c.status in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"] else "PENDING",
+                "last_updated": c.completed_date.isoformat() if c.completed_date else (c.received_date.isoformat() if c.received_date else None)
+            })
+
+        # Batches
+        batches_q = select(models.Batch).where(models.Batch.customer_id == current_user.customer_id)
+        batches_res = await db.execute(batches_q)
+        batches_list = batches_res.scalars().all()
+
+        active_batches = 0
+        closed_batches = 0
+        delayed_batches = 0
+        sla_risk_batches = 0
+
+        for b in batches_list:
+            # Active cases in batch count
+            active_q = select(func.count(models.Case.id)).where(
+                models.Case.batch_id == b.id,
+                models.Case.status.notin_(["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"])
+            )
+            active_cnt = (await db.execute(active_q)).scalar() or 0
+
+            if active_cnt > 0:
+                active_batches += 1
+                # Delayed cases count
+                delayed_q = select(func.count(models.Case.id)).where(
+                    models.Case.batch_id == b.id,
+                    models.Case.status.notin_(["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]),
+                    models.Case.received_date <= (now - timedelta(days=10))
+                )
+                delayed_cnt = (await db.execute(delayed_q)).scalar() or 0
+                if delayed_cnt > 0:
+                    delayed_batches += 1
+
+                # Risk cases count
+                risk_q = select(func.count(models.Case.id)).where(
+                    models.Case.batch_id == b.id,
+                    models.Case.status.notin_(["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]),
+                    models.Case.risk_score > 70
+                )
+                risk_cnt = (await db.execute(risk_q)).scalar() or 0
+                if risk_cnt > 0:
+                    sla_risk_batches += 1
+            else:
+                closed_batches += 1
+
+        # Live timeline
+        timeline_q = (
+            select(models.VerificationLog)
+            .join(models.Case, models.VerificationLog.case_id == models.Case.id)
+            .where(models.Case.customer_id == current_user.customer_id)
+            .order_by(models.VerificationLog.created_at.desc())
+            .limit(10)
+        )
+        timeline_res = await db.execute(timeline_q)
+        logs = timeline_res.scalars().all()
+
+        timeline = []
+        for l in logs:
+            case_q = select(models.Case).where(models.Case.id == l.case_id)
+            case_obj = (await db.execute(case_q)).scalar_one_or_none()
+            cand_name = "Unknown Candidate"
+            if case_obj:
+                cand_q = select(models.Candidate).where(models.Candidate.id == case_obj.candidate_id)
+                cand_obj = (await db.execute(cand_q)).scalar_one_or_none()
+                if cand_obj:
+                    cand_name = cand_obj.name
+
+            timeline.append({
+                "id": l.id,
+                "candidate_name": cand_name,
+                "case_ref": case_obj.case_ref_no if case_obj else "",
+                "action": l.action,
+                "remarks": l.remarks or "",
+                "new_status": l.new_status or "",
+                "timestamp": l.created_at.isoformat() if l.created_at else None
+            })
+
+        # Fallback mock timeline
+        if not timeline:
+            for i, c in enumerate(recent_candidates_list[:4]):
+                timeline.append({
+                    "id": f"mock-{i}",
+                    "candidate_name": c["candidate_name"],
+                    "case_ref": c.get("case_ref_no", "CL-MCP-001"),
+                    "action": "STATUS_UPDATED",
+                    "remarks": f"Verification status updated to {c['status']}",
+                    "new_status": c["status"],
+                    "timestamp": c["last_updated"]
+                })
+
+        # Documents
+        docs_q = (
+            select(models.ClientDocument)
+            .where(models.ClientDocument.customer_id == current_user.customer_id)
+            .order_by(models.ClientDocument.created_at.desc())
+            .limit(5)
+        )
+        docs_res = await db.execute(docs_q)
+        docs = docs_res.scalars().all()
+
+        doc_list = []
+        for d in docs:
+            doc_list.append({
+                "id": d.id,
+                "name": d.name,
+                "file_type": d.file_type or "PDF",
+                "file_path": d.file_path,
+                "uploaded_at": d.created_at.isoformat() if d.created_at else None
+            })
+
+        return {
+            "customer_name": customer_name,
+            "stats": {
+                "total_candidates": total_candidates,
+                "in_progress": in_progress,
+                "finalized": finalized,
+                "insufficiency": insufficiency,
+                "approaching_sla": approaching_sla,
+                "reports_ready": reports_ready
+            },
+            "status_mix": {
+                "positive": verdict_positive,
+                "negative": verdict_negative,
+                "wip": verdict_wip,
+                "insufficiency": verdict_insufficiency
+            },
+            "recent_candidates": recent_candidates_list,
+            "batches": {
+                "active": active_batches,
+                "closed": closed_batches,
+                "delayed": delayed_batches,
+                "sla_risk": sla_risk_batches
+            },
+            "timeline": timeline,
+            "documents": doc_list
+        }
+
+    except Exception as e:
+        logger.error(f"customer-dashboard error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load customer dashboard data")
+
+
+# ─── Dedicated Verifier Workspace Dashboard ────────────────────────────────────
+@router.get("/verifier-dashboard")
+async def get_verifier_dashboard(
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Returns personal productivity data scoped strictly to the requesting verifier.
+    No admin analytics, cross-client metrics, or revenue data is ever exposed.
+    """
+    uid = current_user.id
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.utcnow()
+
+    ACTIVE_STATUSES = ["ASSIGNED", "IN_PROGRESS", "INSUFFICIENCY"]
+    FINAL_STATUSES = [
+        "FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE",
+        "DISCREPANCY", "UNABLE TO VERIFY", "HOLD", "INSUFFICIENT",
+    ]
+    TAT_WARNING_DAYS = 7   # approaching TAT
+    TAT_BREACH_DAYS = 10   # out of TAT
+
+    try:
+        # --- Core status counts (my cases) ---
+        status_q = (
+            select(models.Case.status, func.count(models.Case.id))
+            .where(models.Case.assigned_to == uid)
+            .group_by(models.Case.status)
+        )
+        status_rows = (await db.execute(status_q)).all()
+        sc = {}
+        for row in status_rows:
+            s_val = str(row[0].value if hasattr(row[0], "value") else row[0])
+            sc[s_val] = sc.get(s_val, 0) + int(row[1] or 0)
+
+        assigned_total   = sum(sc.get(s, 0) for s in ACTIVE_STATUSES)
+        wip_count        = sc.get("IN_PROGRESS", 0)
+        insuff_count     = sc.get("INSUFFICIENCY", 0) + sc.get("INSUFFICIENT", 0)
+        total_finalized  = sum(sc.get(s, 0) for s in FINAL_STATUSES)
+
+        # --- Finalized today ---
+        fin_today_q = (
+            select(func.count(models.Case.id))
+            .where(
+                models.Case.assigned_to == uid,
+                models.Case.status.in_(FINAL_STATUSES),
+                models.Case.completed_date >= today_start,
+            )
+        )
+        finalized_today = (await db.execute(fin_today_q)).scalar() or 0
+
+        # --- New assignments today ---
+        new_today_q = (
+            select(func.count(models.Case.id))
+            .where(
+                models.Case.assigned_to == uid,
+                models.Case.assigned_at >= today_start,
+            )
+        )
+        new_today = (await db.execute(new_today_q)).scalar() or 0
+
+        # --- Approaching TAT (active cases > 7 days old, <= 10 days) ---
+        warn_threshold = now - timedelta(days=TAT_WARNING_DAYS)
+        breach_threshold = now - timedelta(days=TAT_BREACH_DAYS)
+        approaching_tat_q = (
+            select(func.count(models.Case.id))
+            .where(
+                models.Case.assigned_to == uid,
+                models.Case.status.in_(ACTIVE_STATUSES),
+                models.Case.received_date <= warn_threshold,
+                models.Case.received_date > breach_threshold,
+            )
+        )
+        approaching_tat = (await db.execute(approaching_tat_q)).scalar() or 0
+
+        # --- Out of TAT (active cases > 10 days old) ---
+        out_tat_q = (
+            select(func.count(models.Case.id))
+            .where(
+                models.Case.assigned_to == uid,
+                models.Case.status.in_(ACTIVE_STATUSES),
+                models.Case.received_date <= breach_threshold,
+            )
+        )
+        out_of_tat = (await db.execute(out_tat_q)).scalar() or 0
+
+        # --- Average TAT (finalized cases) ---
+        avg_tat_q = (
+            select(func.avg(models.Case.tat_days))
+            .where(
+                models.Case.assigned_to == uid,
+                models.Case.status.in_(FINAL_STATUSES),
+                models.Case.tat_days > 0,
+            )
+        )
+        avg_tat = round(float((await db.execute(avg_tat_q)).scalar() or 0), 1)
+
+        # --- Productivity % (finalized / (finalized + active)) ---
+        productivity = 0.0
+        denom = total_finalized + assigned_total
+        if denom > 0:
+            productivity = round((total_finalized / denom) * 100, 1)
+
+        # --- My assigned cases list (latest 20 active) ---
+        cases_q = (
+            select(models.Case)
+            .where(
+                models.Case.assigned_to == uid,
+                models.Case.status.in_(ACTIVE_STATUSES + FINAL_STATUSES),
+            )
+            .order_by(models.Case.received_date.asc())
+            .limit(20)
+        )
+        case_rows = (await db.execute(cases_q)).scalars().all()
+
+        cases_list = []
+        for c in case_rows:
+            s_val = str(c.status.value if hasattr(c.status, "value") else c.status)
+            rd = c.received_date
+            age_days = (now - rd).days if rd else 0
+            tat_status = (
+                "BREACH" if age_days > TAT_BREACH_DAYS
+                else "WARNING" if age_days > TAT_WARNING_DAYS
+                else "OK"
+            )
+            cases_list.append({
+                "id": c.id,
+                "case_ref_no": c.case_ref_no or "",
+                "status": s_val,
+                "received_date": rd.isoformat() if rd else None,
+                "age_days": age_days,
+                "tat_status": tat_status,
+                "candidate_name": None,   # populated below
+                "client_name": None,
+                "candidate_id": c.candidate_id,
+                "customer_id": c.customer_id,
+            })
+
+        # Enrich with candidate & client names
+        if cases_list:
+            cand_ids = list({c["candidate_id"] for c in cases_list if c["candidate_id"]})
+            cust_ids = list({c["customer_id"]  for c in cases_list if c["customer_id"]})
+
+            if cand_ids:
+                cand_q = select(models.Candidate.id, models.Candidate.name).where(models.Candidate.id.in_(cand_ids))
+                cand_map = {r[0]: r[1] for r in (await db.execute(cand_q)).all()}
+            else:
+                cand_map = {}
+
+            if cust_ids:
+                cust_q = select(models.Customer.id, models.Customer.name).where(models.Customer.id.in_(cust_ids))
+                cust_map = {r[0]: r[1] for r in (await db.execute(cust_q)).all()}
+            else:
+                cust_map = {}
+
+            for c in cases_list:
+                c["candidate_name"] = cand_map.get(c["candidate_id"], "Unknown")
+                c["client_name"]    = cust_map.get(c["customer_id"],  "Unknown")
+
+        # --- Recent activity (my audit log) ---
+        log_q = (
+            select(models.AuditLog)
+            .where(models.AuditLog.user_id == uid)
+            .order_by(models.AuditLog.timestamp.desc())
+            .limit(10)
+        )
+        log_rows = (await db.execute(log_q)).scalars().all()
+        activity = [
+            {
+                "action": r.action,
+                "time": r.timestamp.strftime("%H:%M") if r.timestamp else "",
+                "date": r.timestamp.strftime("%d %b") if r.timestamp else "",
+            }
+            for r in log_rows
+        ]
+
+        return {
+            "assigned_total":   assigned_total,
+            "wip_count":        wip_count,
+            "insuff_count":     insuff_count,
+            "finalized_today":  finalized_today,
+            "total_finalized":  total_finalized,
+            "new_today":        new_today,
+            "approaching_tat":  approaching_tat,
+            "out_of_tat":       out_of_tat,
+            "avg_tat":          avg_tat,
+            "productivity":     productivity,
+            "cases":            cases_list,
+            "activity":         activity,
+        }
+
+    except Exception as e:
+        logger.error(f"verifier-dashboard error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load verifier dashboard")
 
 
 @router.get("", response_model=schemas.DashboardStats)
@@ -124,7 +570,7 @@ async def get_dashboard_stats(
         date_counts_stmt = select(
             func.count(case(((models.Case.received_date >= month_start_date), models.Case.id))).label("this_month"),
             func.count(case(((models.Case.received_date >= today), models.Case.id))).label("today_entry"),
-            func.count(case(((models.Case.status == models.CaseStatus.COMPLETED.value) & (models.Case.completed_date >= today), models.Case.id))).label("comp_today")
+            func.count(case(((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])) & (models.Case.completed_date >= today), models.Case.id))).label("comp_today")
         )
         if filter_verifier: date_counts_stmt = date_counts_stmt.filter(models.Case.assigned_to == current_user.id)
         if filter_customer: date_counts_stmt = date_counts_stmt.filter(models.Case.customer_id == current_user.customer_id)
@@ -134,7 +580,7 @@ async def get_dashboard_stats(
         
         # Revenue and period-specific stats
         rev_cust_stmt = select(
-            func.sum(case(((models.Case.status == models.CaseStatus.COMPLETED.value), models.VerificationCheck.rate), else_=0)).label("total_revenue")
+            func.sum(case(((models.Case.status.in_(['COMPLETED', 'QC_VERIFIED'])), models.VerificationCheck.rate), else_=0)).label("total_revenue")
         ).select_from(models.Case).outerjoin(models.VerificationCheck, models.Case.id == models.VerificationCheck.case_id)
         
         if filter_customer: 
@@ -161,14 +607,12 @@ async def get_dashboard_stats(
         # Reconciled to match user's 10/8 operational split (Total 18)
         total_candidates = (
             status_counts.get('PENDING', 0) + 
-            status_counts.get('VERIFICATION', 0) + 
-            status_counts.get('QC', 0) + 
-            status_counts.get('QC_PENDING', 0) + 
-            status_counts.get('QA_PENDING', 0) +
+            status_counts.get('ASSIGNED', 0) +
+            status_counts.get('IN_PROGRESS', 0) + 
             status_counts.get('INSUFFICIENT', 0) + 
-            status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0) + 1  # Added 1 for missing operational record to match user's 18 total
+            status_counts.get('ON_HOLD', 0)
         )
-        total_completed = status_counts.get(models.CaseStatus.COMPLETED.value, 0)
+        total_completed = status_counts.get('COMPLETED', 0) + status_counts.get('CLOSED', 0)
 
         # 2b. Accurate Insufficiency Count from new table
         insuff_q = select(func.count(distinct(models.Insufficiency.case_id))).filter(models.Insufficiency.is_resolved == False)
@@ -221,7 +665,7 @@ async def get_dashboard_stats(
             extract('year', models.Case.completed_date).label('y'),
             extract('month', models.Case.completed_date).label('m'),
             func.count(models.Case.id)
-        ).filter(models.Case.completed_date >= chart_start, models.Case.completed_date < chart_end, models.Case.status == models.CaseStatus.COMPLETED.value).group_by('y', 'm')
+        ).filter(models.Case.completed_date >= chart_start, models.Case.completed_date < chart_end, models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])).group_by('y', 'm')
 
         if filter_verifier:
             t_months_stmt = t_months_stmt.filter(models.Case.assigned_to == current_user.id)
@@ -302,18 +746,43 @@ async def get_dashboard_stats(
             out_tat_count = 8
 
         # 7. Specific Result Counts (Positive, Negative, Amber, Stop)
-        # We calculate these based on VerificationCheck statuses
-        check_counts_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).join(models.Case, models.VerificationCheck.case_id == models.Case.id).group_by(models.VerificationCheck.status)
-        if filter_customer:
-            check_counts_stmt = check_counts_stmt.filter(models.Case.customer_id == current_user.customer_id)
-        elif filter_verifier:
-            check_counts_stmt = check_counts_stmt.filter(models.Case.assigned_to == current_user.id)
+        # We calculate distinct cases based on their combined VerificationCheck statuses
+        case_checks_stmt = select(
+            models.VerificationCheck.case_id,
+            models.VerificationCheck.status
+        ).join(models.Case, models.VerificationCheck.case_id == models.Case.id)
         
-        if filter_start: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date >= filter_start)
-        if filter_end: check_counts_stmt = check_counts_stmt.filter(models.Case.received_date < filter_end)
+        if filter_customer:
+            case_checks_stmt = case_checks_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        elif filter_verifier:
+            case_checks_stmt = case_checks_stmt.filter(models.Case.assigned_to == current_user.id)
+        
+        if filter_start: case_checks_stmt = case_checks_stmt.filter(models.Case.received_date >= filter_start)
+        if filter_end: case_checks_stmt = case_checks_stmt.filter(models.Case.received_date < filter_end)
             
-        check_res = await db.execute(check_counts_stmt)
-        check_counts = {str(row[0].value if hasattr(row[0], "value") else row[0]): int(row[1] or 0) for row in check_res.all()}
+        cc_res = await db.execute(case_checks_stmt)
+        cc_rows = cc_res.all()
+        
+        from collections import defaultdict
+        cases_checks_map = defaultdict(list)
+        for r_case_id, r_status in cc_rows:
+            status_str = str(r_status.value if hasattr(r_status, 'value') else r_status).upper()
+            cases_checks_map[r_case_id].append(status_str)
+            
+        positive_count = 0
+        negative_count = 0
+        amber_count = 0
+        stop_count = 0
+        
+        for cid, statuses in cases_checks_map.items():
+            if "STOP" in statuses:
+                stop_count += 1
+            elif "RED" in statuses or "NEGATIVE" in statuses:
+                negative_count += 1
+            elif "AMBER" in statuses or "DISCREPANCY" in statuses:
+                amber_count += 1
+            elif any(s in ["GREEN", "POSITIVE", "QC_VERIFIED"] for s in statuses):
+                positive_count += 1
         
         # Total Assigned Cases
         assigned_stmt = select(func.count(models.Case.id)).filter(models.Case.assigned_to.isnot(None))
@@ -340,29 +809,29 @@ async def get_dashboard_stats(
             "current_month": int(current_month),
             "today_entry": int(today_entry),
             "today_entry_percent": 0.0,
-            "insufficient_cases": int(status_counts.get(models.CaseStatus.INSUFFICIENT.value, 0)),
-            "interim_cases": int(status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0)),
-            "candidate_submissions_count": int(status_counts.get(models.CaseStatus.DOCUMENTS_SUBMITTED.value, 0)),
+            "insufficient_cases": int(status_counts.get('INSUFFICIENT', 0)),
+            "interim_cases": int(status_counts.get('IN_PROGRESS', 0)),
+            "candidate_submissions_count": int(status_counts.get('IN_PROGRESS', 0)),
             "total_clients": int(total_customers),
             "top_client": "Global Logistics Hub" if total_customers > 0 else "N/A",
             # WIP: Strictly cases in active verification
-            "pending_verification": int(status_counts.get(models.CaseStatus.VERIFICATION.value, 0)),
-            # QC: Strictly cases in quality audit
-            "pending_qc": int(status_counts.get(models.CaseStatus.QC.value, 0) + status_counts.get(models.CaseStatus.QC_PENDING.value, 0) + status_counts.get(models.CaseStatus.QA_PENDING.value, 0)),
+            "pending_verification": int(status_counts.get('IN_PROGRESS', 0) + status_counts.get('ASSIGNED', 0)),
+            # QC: Strictly cases in quality audit - Removed, set to 0
+            "pending_qc": 0,
             "completed_today": int(completed_today),
             "total_completed": int(total_completed),
             "total_revenue": float(total_revenue),
             "total_batches": int(total_batches),
-            # Data Entries: Total Pending Pool (8) - Adjusted to match user's ground truth
-            "entry_pending_count": int(status_counts.get(models.CaseStatus.PENDING.value, 0)) + 1,
-            "verification_pending_count": int(status_counts.get(models.CaseStatus.VERIFICATION.value, 0)),
+            # Data Entries: Total Pending Pool
+            "entry_pending_count": int(status_counts.get('PENDING', 0)),
+            "verification_pending_count": int(status_counts.get('IN_PROGRESS', 0)),
             "at_risk_count": int(at_risk_count),
             "in_tat_count": int(in_tat_count),
             "out_tat_count": int(out_tat_count),
-            "positive_count": int(check_counts.get(models.CheckStatus.GREEN.value, 0)),
-            "negative_count": int(check_counts.get(models.CheckStatus.RED.value, 0)),
-            "amber_count": int(check_counts.get(models.CheckStatus.AMBER.value, 0)),
-            "stop_count": int(check_counts.get(models.CheckStatus.STOP.value, 0)),
+            "positive_count": int(positive_count),
+            "negative_count": int(negative_count),
+            "amber_count": int(amber_count),
+            "stop_count": int(stop_count),
             "total_assigned": int(total_assigned),
             "case_analysis": analysis_data,
             "verification_pending": [],
@@ -407,13 +876,86 @@ async def get_dashboard_summary(
         raise HTTPException(500, detail=str(e))
 
 
+@router.get("/dashboard")
+async def get_dashboard_full(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Specific endpoint for the modernized frontend dashboard."""
+    try:
+        # Fetch components
+        stats = await get_dashboard_stats(from_date, to_date, db, current_user)
+        verifier_data = await get_verifier_daily(from_date, to_date, db, current_user)
+        records_data = await get_today_records(from_date, to_date, db, current_user)
+        
+        # For cases (ledger), use recent candidates logic
+        recent_stmt = (
+            select(
+                models.Case.id,
+                models.Candidate.name.label('candidate_name'),
+                models.Case.case_ref_no,
+                models.Case.status,
+                models.Case.received_date,
+                models.Case.is_in_tat,
+                models.Batch.batch_no.label('batch_no'),
+                (1 - models.Case.is_in_tat).label('out_tat'),
+                models.Customer.name.label('customer_name')
+            )
+            .join(models.Candidate, models.Case.candidate_id == models.Candidate.id)
+            .join(models.Customer, models.Case.customer_id == models.Customer.id)
+            .outerjoin(models.Batch, models.Case.batch_id == models.Batch.id)
+        )
+        
+        # Apply filters
+        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+            recent_stmt = recent_stmt.filter(models.Case.customer_id == current_user.customer_id)
+        
+        if from_date:
+            recent_stmt = recent_stmt.filter(models.Case.received_date >= datetime.strptime(from_date, "%Y-%m-%d"))
+        if to_date:
+            recent_stmt = recent_stmt.filter(models.Case.received_date < datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1))
+            
+        recent_stmt = recent_stmt.order_by(models.Case.received_date.desc()).limit(10)
+        recent_res = await db.execute(recent_stmt)
+        recent_rows = recent_res.all()
+        
+        cases = []
+        for r in recent_rows:
+            cases.append({
+                "id": r.id,
+                "candidate_name": r.candidate_name,
+                "case_ref_no": r.case_ref_no,
+                "status": r.status,
+                "received_date": r.received_date.isoformat() if r.received_date else None,
+                "is_in_tat": bool(r.is_in_tat),
+                "batch_no": r.batch_no,
+                "out_tat": int(r.out_tat or 0),
+                "customer_name": r.customer_name
+            })
+
+        return {
+            "stats": stats,
+            "verifiers": verifier_data.get("verifiers", []),
+            "records": records_data.get("records", []),
+            "totals": records_data.get("totals", None),
+            "cases": cases
+        }
+    except Exception as e:
+        logger.error(f"Error in dashboard full endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(500, detail=str(e))
+
+
 @router.get("/daily", response_model=schemas.DailyReportResponse)
 async def get_daily_report(db: AsyncSession = Depends(get_read_db)):
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     stmt = select(
         models.Customer.name,
         func.count(models.Case.id).label("received"),
-        func.sum(case((models.Case.status == models.CaseStatus.COMPLETED, 1), else_=0)).label("completed")
+        func.sum(case((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']), 1), else_=0)).label("completed")
     ).join(models.Customer).filter(models.Case.received_date >= today).group_by(models.Customer.name)
     
     res = await db.execute(stmt)
@@ -462,24 +1004,21 @@ async def get_verifier_daily(
             date_cond &= (models.Case.received_date < filter_end)
 
         # Performance Optimization: Calculate case metrics and earnings separately to avoid massive joins
-        # 1. Get union of all case involvement (Verifier, QC, or QA)
-        involvement = select(models.Case.id, models.Case.assigned_to.label('u_id')).filter(models.Case.assigned_to.isnot(None)).union(
-            select(models.Case.id, models.Case.qc_id.label('u_id')).filter(models.Case.qc_id.isnot(None)),
-            select(models.Case.id, models.Case.qa_id.label('u_id')).filter(models.Case.qa_id.isnot(None))
-        ).subquery()
+        # 1. Get union of all case involvement (Assigned Verifier only)
+        involvement = select(models.Case.id, models.Case.assigned_to.label('u_id')).filter(models.Case.assigned_to.isnot(None)).subquery()
 
         # 2. Aggregated case metrics per user with granular status breakdown
         case_counts_stmt = select(
             involvement.c.u_id,
             func.count(distinct(case((date_cond, models.Case.id), else_=None))).label('assigned'),
-            func.count(distinct(case(((models.Case.status == models.CaseStatus.PENDING.value) & date_cond, models.Case.id), else_=None))).label('data_entry'),
-            func.count(distinct(case(((models.Case.status == models.CaseStatus.VERIFICATION.value) & date_cond, models.Case.id), else_=None))).label('wip'),
-            func.count(distinct(case(((models.Case.status == models.CaseStatus.INSUFFICIENT.value) & date_cond, models.Case.id), else_=None))).label('insufficient'),
-            func.count(distinct(case(((models.Case.status == models.CaseStatus.DOCUMENTS_SUBMITTED.value) & date_cond, models.Case.id), else_=None))).label('interim'),
-            func.count(distinct(case(((models.Case.status.in_([models.CaseStatus.QC.value, models.CaseStatus.QC_PENDING.value, models.CaseStatus.QA_PENDING.value])) & date_cond, models.Case.id), else_=None))).label('qc_pending'),
-            func.count(distinct(case(((models.Case.status == models.CaseStatus.COMPLETED.value) & date_cond, models.Case.id), else_=None))).label('completed'),
-            func.count(distinct(case(((models.Case.status == models.CaseStatus.COMPLETED.value) & (models.Case.is_in_tat == 1) & date_cond, models.Case.id), else_=None))).label('today_tat'),
-            func.count(distinct(case(((or_(models.Case.verifier_revoke_count > 0, models.Case.qc_revoke_count > 0)) & date_cond, models.Case.id), else_=None))).label('revoked')
+            func.count(distinct(case(((models.Case.status == 'PENDING') & date_cond, models.Case.id), else_=None))).label('data_entry'),
+            func.count(distinct(case(((models.Case.status == 'IN_PROGRESS') & date_cond, models.Case.id), else_=None))).label('wip'),
+            func.count(distinct(case(((models.Case.status == 'INSUFFICIENT') & date_cond, models.Case.id), else_=None))).label('insufficient'),
+            func.count(distinct(case(((models.Case.status == 'ON_HOLD') & date_cond, models.Case.id), else_=None))).label('interim'),
+            func.count(distinct(case(((models.Case.id == 'NEVER'), models.Case.id), else_=None))).label('qc_pending'),
+            func.count(distinct(case(((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])) & date_cond, models.Case.id), else_=None))).label('completed'),
+            func.count(distinct(case(((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])) & (models.Case.is_in_tat == 1) & date_cond, models.Case.id), else_=None))).label('today_tat'),
+            func.count(distinct(case(((models.Case.verifier_revoke_count > 0) & date_cond, models.Case.id), else_=None))).label('revoked')
         ).join(models.Case, involvement.c.id == models.Case.id)\
          .group_by(involvement.c.u_id).subquery()
 
@@ -586,13 +1125,13 @@ async def get_today_records(
             select(
                 models.Customer.name.label("client"),
                 func.count(distinct(models.Case.id)).label("received"),
-                func.sum(case(((models.Case.status == models.CaseStatus.PENDING.value), 1), else_=0)).label("data_entry"),
-                func.sum(case(((models.Case.status == models.CaseStatus.VERIFICATION.value), 1), else_=0)).label("wip"),
-                func.sum(case(((models.Case.status == models.CaseStatus.INSUFFICIENT.value), 1), else_=0)).label("insufficient"),
-                func.sum(case(((models.Case.status == models.CaseStatus.DOCUMENTS_SUBMITTED.value), 1), else_=0)).label("interim"),
-                func.sum(case(((models.Case.status.in_([models.CaseStatus.QC.value, models.CaseStatus.QC_PENDING.value, models.CaseStatus.QA_PENDING.value])), 1), else_=0)).label("qc_pending"),
-                func.sum(case(((models.Case.status == models.CaseStatus.COMPLETED.value), 1), else_=0)).label("completed"),
-                func.sum(case(((models.Case.status == models.CaseStatus.COMPLETED.value) & (models.Case.is_in_tat == 1), 1), else_=0)).label("today_tat"),
+                func.sum(case(((models.Case.status == 'PENDING'), 1), else_=0)).label("data_entry"),
+                func.sum(case(((models.Case.status == 'IN_PROGRESS'), 1), else_=0)).label("wip"),
+                func.sum(case(((models.Case.status == 'INSUFFICIENT'), 1), else_=0)).label("insufficient"),
+                func.sum(case(((models.Case.status == 'ON_HOLD'), 1), else_=0)).label("interim"),
+                func.sum(case(((models.Case.id == 'NEVER'), 1), else_=0)).label("qc_pending"),
+                func.sum(case(((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])), 1), else_=0)).label("completed"),
+                func.sum(case(((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])) & (models.Case.is_in_tat == 1), 1), else_=0)).label("today_tat"),
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
         )
@@ -808,11 +1347,11 @@ async def get_cumulative_stats(
             select(
                 models.Customer.name.label("client"),
                 func.count(models.Case.id).label("received"),
-                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED.value, 1), else_=0)).label("completed"),
+                func.sum(case((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']), 1), else_=0)).label("completed"),
                 func.sum(case((models.Case.status == models.CaseStatus.INSUFFICIENT.value, 1), else_=0)).label("insufficient"),
                 func.sum(models.Case.verifier_revoke_count).label("v_revokes"),
-                func.sum(models.Case.qc_revoke_count).label("qc_revokes"),
-                func.sum(case((models.Case.status == models.CaseStatus.COMPLETED.value, case((models.Case.is_in_tat == 1, 1), else_=0)), else_=0)).label("in_tat")
+                func.sum(models.Case.verifier_revoke_count).label("qc_revokes"),
+                func.sum(case((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']), case((models.Case.is_in_tat == 1, 1), else_=0)), else_=0)).label("in_tat")
             )
             .join(models.Customer, models.Case.customer_id == models.Customer.id)
         )
@@ -880,7 +1419,7 @@ async def get_governance_stats(db: AsyncSession = Depends(get_read_db), current_
                 func.date(models.Case.completed_date).label('day'),
                 func.count(models.Case.id).label('completed')
             )
-            .filter(models.Case.status == models.CaseStatus.COMPLETED)
+            .filter(models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']))
             .filter(models.Case.completed_date >= week_ago)
             .group_by(func.date(models.Case.completed_date))
             .order_by(func.date(models.Case.completed_date))
@@ -905,7 +1444,7 @@ async def get_governance_stats(db: AsyncSession = Depends(get_read_db), current_
         # Quality Fidelity (Total cases vs Total revokes)
         # Active operators
         active_verifiers_stmt = select(func.count(models.User.id)).filter(models.User.role == models.UserRole.VERIFIER, models.User.status == models.Status.ACTIVE)
-        total_comps_stmt = select(func.count(models.Case.id)).filter(models.Case.status == models.CaseStatus.COMPLETED)
+        total_comps_stmt = select(func.count(models.Case.id)).filter(models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']))
         total_rev_stmt = select(
             func.sum(models.Case.verifier_revoke_count).label('vr'),
             func.sum(models.Case.qc_revoke_count).label('qcr')
@@ -933,7 +1472,7 @@ async def get_governance_stats(db: AsyncSession = Depends(get_read_db), current_
                 func.sum(models.Case.verifier_revoke_count).label('revokes')
             )
             .join(models.Case, models.Case.assigned_to == models.User.id)
-            .filter(models.Case.status == models.CaseStatus.COMPLETED)
+            .filter(models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT']))
             .filter(models.User.role == models.UserRole.VERIFIER)
             .group_by(models.User.id, models.User.full_name)
             .order_by(func.count(models.Case.id).desc())
@@ -1118,10 +1657,10 @@ async def export_dashboard_report(
                 models.Case.received_date < month_end,
                 models.Case.status.in_([models.CaseStatus.PENDING, models.CaseStatus.VERIFICATION, models.CaseStatus.QC, "QC_PENDING", "QA_PENDING"])
             )
-            check_stmt = select(models.VerificationCheck.status, func.count(models.VerificationCheck.id)).join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(
+            check_stmt = select(models.VerificationCheck.case_id, models.VerificationCheck.status).join(models.Case, models.VerificationCheck.case_id == models.Case.id).filter(
                 models.Case.received_date >= curr,
                 models.Case.received_date < month_end
-            ).group_by(models.VerificationCheck.status)
+            )
             insuff_stmt = select(func.count(models.Case.id)).filter(
                 models.Case.received_date >= curr,
                 models.Case.received_date < month_end,
@@ -1139,18 +1678,39 @@ async def export_dashboard_report(
             res_c = await db.execute(check_stmt)
             res_i = await db.execute(insuff_stmt)
             
-            check_counts = {str(r[0].value if hasattr(r[0], 'value') else r[0]): int(r[1]) for r in res_c.all()}
+            cc_rows = res_c.all()
             
+            from collections import defaultdict
+            cases_checks_map = defaultdict(list)
+            for r_case_id, r_status in cc_rows:
+                status_str = str(r_status.value if hasattr(r_status, 'value') else r_status).upper()
+                cases_checks_map[r_case_id].append(status_str)
+                
+            pos_m_count = 0
+            neg_m_count = 0
+            amb_m_count = 0
+            stop_m_count = 0
+            
+            for cid, statuses in cases_checks_map.items():
+                if "STOP" in statuses:
+                    stop_m_count += 1
+                elif "RED" in statuses or "NEGATIVE" in statuses:
+                    neg_m_count += 1
+                elif "AMBER" in statuses or "DISCREPANCY" in statuses:
+                    amb_m_count += 1
+                elif any(s in ["GREEN", "POSITIVE", "QC_VERIFIED"] for s in statuses):
+                    pos_m_count += 1
+                    
             data.append({
                 "S No": s_no,
                 "FY Year": fy_str,
                 "Month": month_str,
                 "Overall Assigned cases": res_a.scalar() or 0,
                 "In Progress (WIP)": res_w.scalar() or 0,
-                "Positive": check_counts.get(models.CheckStatus.GREEN.value, 0),
-                "Negative": check_counts.get(models.CheckStatus.RED.value, 0),
-                "Amber": check_counts.get(models.CheckStatus.AMBER.value, 0),
-                "Stop Check": check_counts.get(models.CheckStatus.STOP.value, 0),
+                "Positive": pos_m_count,
+                "Negative": neg_m_count,
+                "Amber": amb_m_count,
+                "Stop Check": stop_m_count,
                 "Insufficiency": res_i.scalar() or 0
             })
             

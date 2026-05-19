@@ -213,10 +213,15 @@ class VerificationCheckUpdate(BaseModel):
     verifier_remarks: Optional[str] = None
     verified_date: Optional[datetime] = None
     
-    # QC-specific updates
+    # Finalization fields
+    finalized_by: Optional[str] = None
+    finalized_at: Optional[datetime] = None
+    final_remarks: Optional[str] = None
+    final_result: Optional[FinalResult] = None
+    
+    # Legacy QC-specific updates (compatibility)
     qc_verifier_id: Optional[str] = None
     qc_status: Optional[QCStatus] = None
-    final_result: Optional[FinalResult] = None
     qc_remarks: Optional[str] = None
     qc_reviewed_at: Optional[datetime] = None
 
@@ -255,11 +260,17 @@ class VerificationCheck(VerificationCheckBase):
     api_sync_status: str = "NOT_SYNCED"
     assigned_verifier_name: Optional[str] = None
     
-    # Enterprise QC Extension Fields
+    # Finalization Fields
+    finalized_by: Optional[str] = None
+    finalized_user_name: Optional[str] = None
+    finalized_at: Optional[datetime] = None
+    final_remarks: Optional[str] = None
+    final_result: Optional[str] = None
+    
+    # Legacy QC Extension Fields (compatibility)
     qc_verifier_id: Optional[str] = None
     qc_verifier_name: Optional[str] = None
-    qc_status: str = "PENDING_REVIEW"
-    final_result: Optional[str] = None
+    qc_status: str = "APPROVED"
     qc_remarks: Optional[str] = None
     qc_reviewed_at: Optional[datetime] = None
     
@@ -310,6 +321,13 @@ class CaseBase(BaseModel):
     status: CaseStatus = CaseStatus.PENDING
     tat_days: int = 0
     assigned_to: Optional[str] = None
+    
+    # Finalization fields
+    finalized_by: Optional[str] = None
+    finalized_at: Optional[datetime] = None
+    final_remarks: Optional[str] = None
+    
+    # Legacy QC Compatibility
     qa_id: Optional[str] = None
     qc_id: Optional[str] = None
     ai_summary: Optional[str] = None
@@ -322,7 +340,26 @@ class CaseBase(BaseModel):
     @classmethod
     def uppercase_case_status(cls, v: Any) -> Any:
         if isinstance(v, str):
-            return v.upper()
+            val = v.upper()
+            mapping = {
+                "PENDING": "ASSIGNED",
+                "INSUFFICIENT": "INSUFFICIENCY",
+                "COMPLETED": "FINALIZED",
+                "CLOSED": "FINALIZED",
+                "NEW": "ASSIGNED",
+                "LINK_SHARED": "ASSIGNED",
+                "IN_VERIFICATION": "IN_PROGRESS",
+                "QC_REVIEW": "FINALIZED",
+                "REOPENED": "IN_PROGRESS",
+                "CANCELLED": "FINALIZED",
+                "VERIFICATION": "IN_PROGRESS",
+                "QC": "FINALIZED",
+                "QA_PENDING": "FINALIZED",
+                "QC_PENDING": "FINALIZED",
+                "QC_VERIFIED": "FINALIZED",
+                "DOCUMENTS_SUBMITTED": "IN_PROGRESS"
+            }
+            return mapping.get(val, val)
         return v
 
 class CaseCreate(CaseBase):
@@ -339,6 +376,13 @@ class CaseUpdate(BaseModel):
     services: Optional[List[str]] = None
     check_rates: Optional[Dict[str, float]] = None
     assigned_to: Optional[str] = None
+    
+    # Finalization fields
+    finalized_by: Optional[str] = None
+    finalized_at: Optional[datetime] = None
+    final_remarks: Optional[str] = None
+
+    # Legacy compatibility fields
     qa_id: Optional[str] = None
     qc_id: Optional[str] = None
     assigned_at: Optional[datetime] = None
@@ -350,6 +394,32 @@ class CaseUpdate(BaseModel):
     final_result: Optional[str] = None
     final_report_status: Optional[str] = None
     qc_remarks: Optional[str] = None
+
+    @field_validator('status', mode='before')
+    @classmethod
+    def uppercase_case_status(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            val = v.upper()
+            mapping = {
+                "PENDING": "ASSIGNED",
+                "INSUFFICIENT": "INSUFFICIENCY",
+                "COMPLETED": "FINALIZED",
+                "CLOSED": "FINALIZED",
+                "NEW": "ASSIGNED",
+                "LINK_SHARED": "ASSIGNED",
+                "IN_VERIFICATION": "IN_PROGRESS",
+                "QC_REVIEW": "FINALIZED",
+                "REOPENED": "IN_PROGRESS",
+                "CANCELLED": "FINALIZED",
+                "VERIFICATION": "IN_PROGRESS",
+                "QC": "FINALIZED",
+                "QA_PENDING": "FINALIZED",
+                "QC_PENDING": "FINALIZED",
+                "QC_VERIFIED": "FINALIZED",
+                "DOCUMENTS_SUBMITTED": "IN_PROGRESS"
+            }
+            return mapping.get(val, val)
+        return v
 
 class CaseCreateExtended(BaseModel):
     batch_id: str
@@ -406,6 +476,7 @@ class CaseRead(Case):
     batch_no: Optional[str] = None
     assigned_user_name: Optional[str] = None
     assigned_user_role: Optional[str] = None
+    finalized_user_name: Optional[str] = None
     qa_user_name: Optional[str] = None
     qc_user_name: Optional[str] = None
     queue_age: Optional[str] = None
@@ -729,3 +800,8 @@ class QCFieldIssueRead(QCFieldIssueBase):
 
 class QCFieldIssueResolve(BaseModel):
     comment: Optional[str] = None
+
+class FinalizeCaseRequest(BaseModel):
+    case_id: str
+    remarks: Optional[str] = None
+    final_result: Optional[str] = None

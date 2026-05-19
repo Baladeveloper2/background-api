@@ -212,8 +212,7 @@ class Case(Base):
     batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True)
     status = Column(String(50), default=CaseStatus.PENDING, index=True)
     assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
-    qa_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
-    qc_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    finalized_by = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     received_date = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     assigned_at = Column(DateTime(timezone=True), nullable=True)
     link_shared_at = Column(DateTime(timezone=True), nullable=True)
@@ -221,7 +220,6 @@ class Case(Base):
     completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
     verifier_revoke_count = Column(Integer, default=0)
-    qc_revoke_count = Column(Integer, default=0)
     is_in_tat = Column(Integer, default=1)
     ai_summary = Column(Text, nullable=True)
     file_no = Column(String(50), nullable=True, index=True)
@@ -234,7 +232,7 @@ class Case(Base):
     # Global Verdict & Quality Audit Rollup
     final_result = Column(String(50), nullable=True) # Holistic Case Verdict
     final_report_status = Column(String(50), nullable=True) # POSITIVE, NEGATIVE, DISCREPANCY, INTERIM, INSUFFICIENT
-    qc_remarks = Column(Text, nullable=True) # Overall QC Remarks
+    final_remarks = Column(Text, nullable=True) # Overall Finalization Remarks
 
     __table_args__ = (
         Index("index_customer_status", "customer_id", "status"),
@@ -248,10 +246,44 @@ class Case(Base):
     customer = relationship("Customer", backref="cases")
     batch = relationship("Batch", backref="cases")
     assigned_user = relationship("User", foreign_keys=[assigned_to], backref="assigned_cases")
-    qa_user = relationship("User", foreign_keys=[qa_id], backref="qa_cases")
-    qc_user = relationship("User", foreign_keys=[qc_id], backref="qc_cases")
+    finalized_user = relationship("User", foreign_keys=[finalized_by], backref="finalized_cases")
     checks = relationship("VerificationCheck", back_populates="case", cascade="all, delete-orphan")
     insufficiencies = relationship("Insufficiency", back_populates="case", cascade="all, delete-orphan")
+
+    @property
+    def qc_remarks(self):
+        return self.final_remarks
+    @qc_remarks.setter
+    def qc_remarks(self, val):
+        self.final_remarks = val
+
+    @property
+    def qc_id(self):
+        return self.finalized_by
+    @qc_id.setter
+    def qc_id(self, val):
+        self.finalized_by = val
+
+    @property
+    def qa_id(self):
+        return self.finalized_by
+    @qa_id.setter
+    def qa_id(self, val):
+        self.finalized_by = val
+
+    @property
+    def qc_user(self):
+        return self.finalized_user
+    @qc_user.setter
+    def qc_user(self, val):
+        self.finalized_user = val
+
+    @property
+    def qa_user(self):
+        return self.finalized_user
+    @qa_user.setter
+    def qa_user(self, val):
+        self.finalized_user = val
 
 class VerificationCheck(Base):
     __tablename__ = "verification_checks"
@@ -271,24 +303,63 @@ class VerificationCheck(Base):
     api_sync_status = Column(String(100), default="NOT_SYNCED") # e.g. "SYNCED", "FAILED", "PENDING"
     assigned_verifier_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     
-    # Enterprise Enterprise QC Flow Extensions
-    qc_verifier_id = Column(String(36), ForeignKey("users.id"), nullable=True)
-    qc_status = Column(String(50), default="PENDING_REVIEW") 
+    finalized_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    finalized_at = Column(DateTime(timezone=True), nullable=True)
+    final_remarks = Column(Text, nullable=True)
     final_result = Column(String(50), nullable=True) # Maps to FinalResult Enum string values
-    qc_remarks = Column(Text, nullable=True)
-    qc_reviewed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     assigned_verifier = relationship("User", foreign_keys=[assigned_verifier_id])
-    qc_verifier = relationship("User", foreign_keys=[qc_verifier_id])
+    finalized_user = relationship("User", foreign_keys=[finalized_by])
     
     @property
     def assigned_verifier_name(self):
         return self.assigned_verifier.full_name if self.assigned_verifier else None
 
     @property
+    def finalized_user_name(self):
+        return self.finalized_user.full_name if self.finalized_user else None
+
+    # Legacy QC Compatibility Properties
+    @property
+    def qc_verifier_id(self):
+        return self.finalized_by
+    @qc_verifier_id.setter
+    def qc_verifier_id(self, val):
+        self.finalized_by = val
+
+    @property
+    def qc_status(self):
+        return "APPROVED"
+    @qc_status.setter
+    def qc_status(self, val):
+        pass
+
+    @property
+    def qc_remarks(self):
+        return self.final_remarks
+    @qc_remarks.setter
+    def qc_remarks(self, val):
+        self.final_remarks = val
+
+    @property
+    def qc_reviewed_at(self):
+        return self.finalized_at
+    @qc_reviewed_at.setter
+    def qc_reviewed_at(self, val):
+        self.finalized_at = val
+
+    @property
+    def qc_verifier(self):
+        return self.finalized_user
+    @qc_verifier.setter
+    def qc_verifier(self, val):
+        self.finalized_user = val
+
+    @property
     def qc_verifier_name(self):
-        return self.qc_verifier.full_name if self.qc_verifier else None
+        return self.finalized_user_name
+
     insufficiencies = relationship("Insufficiency", back_populates="check", cascade="all, delete-orphan")
     documents = relationship("VerificationDocument", back_populates="check", cascade="all, delete-orphan")
     logs = relationship("VerificationLog", back_populates="check", cascade="all, delete-orphan")

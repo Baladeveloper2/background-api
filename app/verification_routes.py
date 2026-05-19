@@ -53,7 +53,7 @@ async def create_verification_check(check: schemas.VerificationCheckCreate, db: 
         selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
         selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
         selectinload(models.VerificationCheck.assigned_verifier),
-        selectinload(models.VerificationCheck.qc_verifier)
+        selectinload(models.VerificationCheck.finalized_user)
     ).filter(models.VerificationCheck.id == db_check.id)
     res = await db.execute(stmt)
     db_check = res.scalar_one()
@@ -68,7 +68,7 @@ async def read_verification_checks(case_id: Optional[str] = None, type: Optional
         selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
         selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
         selectinload(models.VerificationCheck.assigned_verifier),
-        selectinload(models.VerificationCheck.qc_verifier)
+        selectinload(models.VerificationCheck.finalized_user)
     )
     if case_id:
         stmt = stmt.filter(models.VerificationCheck.case_id == case_id)
@@ -88,7 +88,7 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
         selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
         selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
         selectinload(models.VerificationCheck.assigned_verifier),
-        selectinload(models.VerificationCheck.qc_verifier)
+        selectinload(models.VerificationCheck.finalized_user)
     ).filter(models.VerificationCheck.id == check_id)
     res = await db.execute(stmt)
     db_check = res.scalar_one_or_none()
@@ -109,7 +109,7 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
         selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
         selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
         selectinload(models.VerificationCheck.assigned_verifier),
-        selectinload(models.VerificationCheck.qc_verifier)
+        selectinload(models.VerificationCheck.finalized_user)
     ).filter(models.VerificationCheck.id == check_id)
     res = await db.execute(stmt)
     db_check = res.scalar_one()
@@ -124,7 +124,7 @@ async def generate_verification_link(check_id: str, db: AsyncSession = Depends(g
         selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
         selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
         selectinload(models.VerificationCheck.assigned_verifier),
-        selectinload(models.VerificationCheck.qc_verifier)
+        selectinload(models.VerificationCheck.finalized_user)
     ).filter(models.VerificationCheck.id == check_id)
     res = await db.execute(stmt)
     db_check = res.scalar_one_or_none()
@@ -142,7 +142,7 @@ async def generate_verification_link(check_id: str, db: AsyncSession = Depends(g
         selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
         selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
         selectinload(models.VerificationCheck.assigned_verifier),
-        selectinload(models.VerificationCheck.qc_verifier)
+        selectinload(models.VerificationCheck.finalized_user)
     ).filter(models.VerificationCheck.id == check_id)
     res = await db.execute(stmt)
     db_check = res.scalar_one()
