@@ -13,6 +13,8 @@ class UserBase(BaseModel):
     business_unit: Optional[str] = None
     customer_id: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
+    phone: Optional[str] = None
+    is_2fa_enabled: Optional[bool] = False
     
     @field_validator('status', 'role', mode='before')
     @classmethod
@@ -65,6 +67,8 @@ class UserUpdate(BaseModel):
     customer_id: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
     password: Optional[str] = None
+    phone: Optional[str] = None
+    is_2fa_enabled: Optional[bool] = None
 
 class User(UserBase):
     id: str
@@ -73,8 +77,12 @@ class User(UserBase):
     model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
-    access_token: str
-    token_type: str
+    access_token: Optional[str] = None
+    token_type: Optional[str] = None
+    status: Optional[str] = "success"
+    temp_token: Optional[str] = None
+    phone_masked: Optional[str] = None
+    branding: Optional[Dict[str, Any]] = None
 
 class TokenData(BaseModel):
     email: Optional[str] = None

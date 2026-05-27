@@ -91,7 +91,7 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
             role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
             is_customer = "CUSTOMER" in user_role_str or "CUSTOMER" in role_name
             
-            if is_customer and action == "read" and module in ["bms", "bvs"]:
+            if is_customer and action in ["read", "write"] and module in ["bms", "bvs"]:
                 return current_user
 
             # Grant systemic write access to specific oversight roles for the verification module
@@ -110,6 +110,17 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
         return current_user
     return permission_checker
 
+from datetime import datetime
+import random
+from pydantic import BaseModel
+
+class Verify2FARequest(BaseModel):
+    temp_token: str
+    otp_code: str
+
+class Resend2FARequest(BaseModel):
+    temp_token: str
+
 @router.post("/login", response_model=schemas.Token)
 @limiter.limit("5/minute")
 async def login_for_access_token(request: Request, db: AsyncSession = Depends(database.get_async_db), form_data: OAuth2PasswordRequestForm = Depends()):
@@ -122,6 +133,34 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
     
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+    # If 2FA is enabled and user has a phone number
+    if user.is_2fa_enabled and user.phone:
+        otp = f"{random.randint(100000, 999999)}"
+        user.otp_code = otp
+        user.otp_expires_at = datetime.utcnow() + timedelta(minutes=5)
+        db.add(user)
+        await db.commit()
+        
+        # Send OTP SMS compliant with Jio DLT
+        from .sms_utils import send_otp_sms
+        await send_otp_sms(user.phone, otp)
+        
+        # Mask phone number (e.g. +91 ******1234)
+        phone = user.phone.strip()
+        masked_phone = f"+91 ******{phone[-4:]}" if len(phone) >= 4 else phone
+        
+        # Generate temp JWT token
+        temp_token = auth.create_access_token(
+            data={"sub": user.email, "type": "2fa_temp"},
+            expires_delta=timedelta(minutes=5)
+        )
+        
+        return {
+            "status": "2fa_required",
+            "temp_token": temp_token,
+            "phone_masked": masked_phone
+        }
     
     perms = (user.role_rel.permissions or {}).copy() if user.role_id and user.role_rel else (user.bvs_permissions or {}).copy()
 
@@ -148,8 +187,102 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
     return {
         "access_token": token, 
         "token_type": "bearer",
+        "status": "success",
         "branding": branding
     }
+
+@router.post("/verify-2fa", response_model=schemas.Token)
+async def verify_2fa(payload: Verify2FARequest, db: AsyncSession = Depends(database.get_async_db)):
+    try:
+        decoded = jwt.decode(payload.temp_token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        email = decoded.get("sub")
+        token_type = decoded.get("type")
+        
+        if not email or token_type != "2fa_temp":
+            raise HTTPException(status_code=401, detail="Invalid temporary token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Expired or invalid temporary token")
+        
+    stmt = select(models.User).options(
+        selectinload(models.User.role_rel),
+        selectinload(models.User.customer)
+    ).filter(models.User.email == email)
+    res = await db.execute(stmt)
+    user = res.unique().scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    if not user.otp_code or user.otp_code != payload.otp_code:
+        raise HTTPException(status_code=400, detail="Invalid OTP code")
+        
+    if not user.otp_expires_at or user.otp_expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="OTP code has expired")
+        
+    # Clear OTP columns
+    user.otp_code = None
+    user.otp_expires_at = None
+    db.add(user)
+    await db.commit()
+    
+    perms = (user.role_rel.permissions or {}).copy() if user.role_id and user.role_rel else (user.bvs_permissions or {}).copy()
+
+    token = auth.create_access_token(
+        data={
+            "sub": user.email, 
+            "id": user.id, 
+            "role": user.role_rel.name if user.role_id and user.role_rel else ("Super Admin" if user.role == models.UserRole.SUPER_ADMIN else user.role), 
+            "full_name": user.full_name, 
+            "customer_id": user.customer_id,
+            "permissions": perms
+        },
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+
+    branding = None
+    if user.customer:
+        branding = {
+            "primary": user.customer.brand_primary_color,
+            "secondary": user.customer.brand_secondary_color,
+            "logo": user.customer.logo_url
+        }
+
+    return {
+        "access_token": token, 
+        "token_type": "bearer",
+        "status": "success",
+        "branding": branding
+    }
+
+@router.post("/resend-2fa")
+async def resend_2fa(payload: Resend2FARequest, db: AsyncSession = Depends(database.get_async_db)):
+    try:
+        decoded = jwt.decode(payload.temp_token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        email = decoded.get("sub")
+        token_type = decoded.get("type")
+        
+        if not email or token_type != "2fa_temp":
+            raise HTTPException(status_code=401, detail="Invalid temporary token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Expired or invalid temporary token")
+        
+    stmt = select(models.User).filter(models.User.email == email)
+    res = await db.execute(stmt)
+    user = res.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    otp = f"{random.randint(100000, 999999)}"
+    user.otp_code = otp
+    user.otp_expires_at = datetime.utcnow() + timedelta(minutes=5)
+    db.add(user)
+    await db.commit()
+    
+    from .sms_utils import send_otp_sms
+    await send_otp_sms(user.phone, otp)
+    
+    return {"status": "success", "message": "OTP resent successfully"}
 
 @router.get("/me")
 async def get_me(current_user: models.User = Depends(get_current_user), db: AsyncSession = Depends(database.get_async_db)):

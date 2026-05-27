@@ -83,6 +83,10 @@ class User(Base):
     territory = Column(String(255), nullable=True)
     business_unit = Column(String(255), nullable=True)
     bvs_permissions = Column(JSONEncodedDict, default=lambda: {})
+    phone = Column(String(20), nullable=True)
+    is_2fa_enabled = Column(Boolean, default=False)
+    otp_code = Column(String(6), nullable=True)
+    otp_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True)
 
@@ -135,6 +139,8 @@ class Customer(Base):
     brand_secondary_color = Column(String(20), default="#f5f3ff")
     logo_url = Column(String(512), nullable=True)
     custom_domain = Column(String(255), nullable=True)
+    gst_number = Column(String(100), nullable=True)
+    billing_config = Column(JSONEncodedDict, nullable=True)
 
 class ClientDocument(Base):
     __tablename__ = "client_documents"
@@ -220,6 +226,7 @@ class Case(Base):
     completed_date = Column(DateTime(timezone=True), nullable=True, index=True)
     tat_days = Column(Integer, default=0)
     verifier_revoke_count = Column(Integer, default=0)
+    qc_revoke_count = Column(Integer, default=0)
     is_in_tat = Column(Integer, default=1)
     ai_summary = Column(Text, nullable=True)
     file_no = Column(String(50), nullable=True, index=True)
@@ -233,6 +240,13 @@ class Case(Base):
     final_result = Column(String(50), nullable=True) # Holistic Case Verdict
     final_report_status = Column(String(50), nullable=True) # POSITIVE, NEGATIVE, DISCREPANCY, INTERIM, INSUFFICIENT
     final_remarks = Column(Text, nullable=True) # Overall Finalization Remarks
+    
+    # Billing & Invoice System Fields
+    is_billable = Column(Boolean, default=True)
+    is_invoiced = Column(Boolean, default=False, index=True)
+    invoice_id = Column(String(36), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
+    billed_at = Column(DateTime, nullable=True)
+    billing_amount = Column(Float, default=0.0)
 
     __table_args__ = (
         Index("index_customer_status", "customer_id", "status"),
@@ -552,3 +566,30 @@ class QCFieldIssue(Base):
     check = relationship("VerificationCheck", backref="qc_field_issues")
     raiser = relationship("User", foreign_keys=[raised_by], backref="raised_qc_issues")
     assignee = relationship("User", foreign_keys=[assigned_to], backref="assigned_qc_issues")
+
+
+class Invoice(Base):
+    __tablename__ = "invoices"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    invoice_number = Column(String(100), unique=True, index=True, nullable=False)
+    client_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"), index=True, nullable=False)
+    billing_cycle = Column(String(50), default="MONTHLY")
+    billing_period_from = Column(DateTime, nullable=False)
+    billing_period_to = Column(DateTime, nullable=False)
+    subtotal = Column(Float, default=0.0)
+    gst_amount = Column(Float, default=0.0)
+    total_amount = Column(Float, default=0.0)
+    generated_at = Column(DateTime, default=datetime.utcnow)
+    due_date = Column(DateTime, nullable=True)
+    status = Column(String(50), default="DRAFT") # DRAFT, GENERATED, SENT, PAID, OVERDUE
+    
+    # Audit trail
+    generated_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    modified_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    paid_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    client = relationship("Customer", backref="invoices_rel")
+    creator = relationship("User", foreign_keys=[generated_by], backref="created_invoices")
+    modifier = relationship("User", foreign_keys=[modified_by], backref="modified_invoices")
+    cases = relationship("Case", backref="invoice_rel")

@@ -104,6 +104,37 @@ async def delete_user(
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     
-    await db.delete(db_user)
-    await db.commit()
+    from sqlalchemy import delete, update
+    
+    try:
+        # 1. Clean up dependent transaction logs and audit entries
+        await db.execute(delete(models.AuditLog).filter(models.AuditLog.user_id == user_id))
+        await db.execute(delete(models.Notification).filter(models.Notification.user_id == user_id))
+        await db.execute(delete(models.CaseComment).filter(models.CaseComment.user_id == user_id))
+        await db.execute(delete(models.RevokeLog).filter(models.RevokeLog.user_id == user_id))
+        await db.execute(delete(models.InsufficiencyLog).filter(models.InsufficiencyLog.user_id == user_id))
+        await db.execute(delete(models.VerificationLog).filter(models.VerificationLog.performed_by_id == user_id))
+        await db.execute(delete(models.QCFieldIssue).filter((models.QCFieldIssue.raised_by == user_id) | (models.QCFieldIssue.assigned_to == user_id)))
+        await db.execute(delete(models.VerificationDocument).filter(models.VerificationDocument.uploaded_by_id == user_id))
+        await db.execute(delete(models.ClientDocument).filter((models.ClientDocument.uploaded_by == user_id) | (models.ClientDocument.read_by == user_id)))
+        await db.execute(delete(models.Insufficiency).filter((models.Insufficiency.raised_by == user_id) | (models.Insufficiency.updated_by == user_id) | (models.Insufficiency.resolved_by == user_id)))
+        
+        # 2. Reset nullable user associations in Case/Check status entities
+        await db.execute(update(models.VerificationCheck).filter(models.VerificationCheck.assigned_verifier_id == user_id).values(assigned_verifier_id=None))
+        await db.execute(update(models.VerificationCheck).filter(models.VerificationCheck.finalized_by == user_id).values(finalized_by=None))
+        await db.execute(update(models.Case).filter(models.Case.assigned_to == user_id).values(assigned_to=None))
+        await db.execute(update(models.Case).filter(models.Case.finalized_by == user_id).values(finalized_by=None))
+        await db.execute(update(models.DocumentMetadata).filter(models.DocumentMetadata.uploader_id == user_id).values(uploader_id=None))
+        
+        # 3. Perform primary row deletion
+        await db.delete(db_user)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Integrity error during deletion of user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user due to database constraint dependencies: {str(e)}"
+        )
+        
     return None

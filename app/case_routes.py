@@ -906,6 +906,7 @@ async def export_mis_data(
     customer_id: Optional[str] = None,
     customer_name: Optional[str] = None,
     search: Optional[str] = None,
+    candidate_id: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
@@ -917,7 +918,8 @@ async def export_mis_data(
             joinedload(models.Case.candidate),
             joinedload(models.Case.customer),
             joinedload(models.Case.assigned_user),
-            selectinload(models.Case.checks),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.logs),
             selectinload(models.Case.verification_logs),
             selectinload(models.Case.insufficiencies)
         )
@@ -952,6 +954,9 @@ async def export_mis_data(
                 models.Case.case_ref_no.ilike(f"%{search}%"),
                 models.Candidate.name.ilike(f"%{search}%")
             ))
+
+        if candidate_id:
+            stmt = stmt.filter(models.Case.candidate_id == candidate_id)
 
         if from_date:
             try:
@@ -1119,16 +1124,356 @@ async def export_mis_data(
         # -------------------------------------------------------------
         ws2 = workbook["Check wise MIS"]
         
-        # Clear existing mock/old data starting from row 4
-        for r in range(4, ws2.max_row + 1):
-            for col in range(1, ws2.max_column + 1):
-                ws2.cell(row=r, column=col).value = None
+        # Clear merged cells
+        ws2.merged_cells.ranges.clear()
+        
+        # Completely clear all existing rows in sheet 2
+        ws2.delete_rows(1, ws2.max_row + 1)
+        
+        # Helper functions
+        def get_base_type(chk_type: str) -> str:
+            t = str(chk_type or "").lower()
+            if "address" in t or "resident" in t: return "address"
+            if "criminal" in t or "court" in t: return "criminal"
+            if "employment" in t: return "employment"
+            if "education" in t or "academic" in t: return "education"
+            if "identity" in t: return "identity"
+            if "reference" in t: return "reference"
+            if "drug" in t: return "drug"
+            if "cibil" in t or "credit" in t: return "credit"
+            if "global" in t: return "global"
+            if "social" in t: return "social"
+            return t
 
-        row_idx2 = 4
-        for idx, c in enumerate(cases_gen, start=1):
-            apply_row_styles(ws2, 4, row_idx2)
+        def format_check_detail_value(chk_type: str, chk_data: Any, verifier_remarks: str = "") -> str:
+            if not chk_data:
+                return verifier_remarks[:80] if verifier_remarks else ""
+                
+            base = get_base_type(chk_type)
+            
+            dicts_to_search = []
+            if isinstance(chk_data, dict):
+                dicts_to_search.append(chk_data)
+                for k, v in chk_data.items():
+                    if isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, dict):
+                                dicts_to_search.append(item)
+            elif isinstance(chk_data, list):
+                for item in chk_data:
+                    if isinstance(item, dict):
+                        dicts_to_search.append(item)
+                        for k, v in item.items():
+                            if isinstance(v, list):
+                                for sub_item in v:
+                                    if isinstance(sub_item, dict):
+                                        dicts_to_search.append(sub_item)
+                    elif isinstance(item, str):
+                        return str(item)
 
-            # Columns 1 to 20 are the same as Case wise MIS
+            key_mapping = {
+                "address": ["address", "city", "location", "permanent_address", "given_address"],
+                "criminal": ["status", "verdict", "high_court", "supreme_court", "district_court", "remarks"],
+                "employment": ["company_name", "company", "employer_name", "employer", "organization"],
+                "education": ["course", "degree", "qualification", "university_name", "college_name", "institute"],
+                "identity": ["id_number", "pan_no", "aadhar_no", "id_type", "voter_id", "passport_no"],
+                "reference": ["ref_name", "reference_name", "ref_type"],
+                "drug": ["test_type", "panel_type", "panel", "result"],
+                "credit": ["score", "credit_score"],
+                "global": ["database_name", "registry"],
+                "social": ["linkedin", "facebook", "twitter", "instagram"]
+            }
+            
+            target_keys = key_mapping.get(base, ["name", "value", "remarks"])
+            
+            for d in dicts_to_search:
+                for key in target_keys:
+                    val = d.get(key)
+                    if val is not None and str(val).strip() != "":
+                        return str(val).strip()
+                        
+            general_keys = ["address", "company_name", "course", "id_number", "ref_name", "remarks"]
+            for d in dicts_to_search:
+                for key in general_keys:
+                    val = d.get(key)
+                    if val is not None and str(val).strip() != "":
+                        return str(val).strip()
+                        
+            return verifier_remarks[:80] if verifier_remarks else ""
+
+        # -------------------------------------------------------------
+        # Group and build the columns dynamically for Sheet 2
+        # -------------------------------------------------------------
+        def get_check_info(chk):
+            t = str(chk.check_type or "").lower()
+            
+            # Address Check
+            if "address" in t or "resident" in t:
+                return "address", "Address", "Address", chk.data.get("address") or chk.data.get("permanent_address") or chk.data.get("given_address") or chk.data.get("city") or ""
+            
+            # Criminal/Court Check
+            if "criminal" in t or "court" in t:
+                return "criminal", "Court Check", "Verdict", chk.data.get("verdict") or chk.data.get("status") or chk.data.get("remarks") or ""
+                
+            # Employment Check
+            if "employment" in t:
+                return "employment", "Employment", "Company", chk.data.get("company_name") or chk.data.get("company") or chk.data.get("employer_name") or chk.data.get("employer") or chk.data.get("organization") or ""
+                
+            # Education Check
+            if "education" in t or "academic" in t:
+                return "education", "Education", "Course", chk.data.get("course") or chk.data.get("degree") or chk.data.get("qualification") or chk.data.get("university_name") or chk.data.get("college_name") or chk.data.get("institute") or ""
+                
+            # Identity Check (extract document type cleanly)
+            if "identity" in t or "id" in t or "pan" in t or "aadhar" in t or "passport" in t or "voter" in t or "driving" in t or "dl" in t:
+                doc_type = "Identity"
+                raw_doc = str(chk.data.get("id_type") or chk.data.get("documentType") or "").upper()
+                if "PAN" in raw_doc or "PAN" in t.upper(): doc_type = "PAN"
+                elif "AADHAAR" in raw_doc or "AADHAR" in raw_doc or "AADHAAR" in t.upper() or "AADHAR" in t.upper(): doc_type = "Aadhaar"
+                elif "PASSPORT" in raw_doc or "PASSPORT" in t.upper(): doc_type = "Passport"
+                elif "VOTER" in raw_doc or "VOTER" in t.upper(): doc_type = "Voter ID"
+                elif "DRIVING" in raw_doc or "DL" in raw_doc or "DRIVING" in t.upper() or "DL" in t.upper(): doc_type = "DL"
+                else:
+                    if raw_doc: doc_type = raw_doc.capitalize()
+                    else: doc_type = "Identity"
+                
+                id_num = chk.data.get("id_number") or chk.data.get("pan_no") or chk.data.get("aadhar_no") or chk.data.get("voter_id") or chk.data.get("passport_no") or ""
+                return "identity", doc_type, "Document No", id_num
+
+            # Reference Check
+            if "reference" in t:
+                return "reference", "Reference", "Referee Name", chk.data.get("ref_name") or chk.data.get("reference_name") or chk.data.get("ref_type") or ""
+                
+            # Drug Check
+            if "drug" in t:
+                return "drug", "Drug Test", "Panel", chk.data.get("test_type") or chk.data.get("panel_type") or chk.data.get("panel") or chk.data.get("result") or ""
+                
+            # Credit Check
+            if "credit" in t or "cibil" in t:
+                return "credit", "Credit Check", "Score", chk.data.get("score") or chk.data.get("credit_score") or ""
+                
+            # Global Database Check
+            if "global" in t:
+                return "global", "Global DB", "Registry", chk.data.get("database_name") or chk.data.get("registry") or ""
+                
+            # Social Media Check
+            if "social" in t:
+                return "social", "Social Media", "Platform", chk.data.get("platform") or chk.data.get("profile_url") or ""
+                
+            return "other", chk.check_type or "Other", "Detail", chk.verifier_remarks or ""
+
+        # Pre-group checks for each candidate to keep row processing efficient and aligned
+        candidate_grouped_checks = []
+        max_counts = {
+            "address": 0, "criminal": 0, "employment": 0, "education": 0,
+            "reference": 0, "drug": 0, "credit": 0, "global": 0, "social": 0, "other": 0
+        }
+        max_identity_counts = {}
+
+        for c in cases_gen:
+            groups = {
+                "address": [], "criminal": [], "employment": [], "education": [],
+                "identity": {},  # grouped by doc_type
+                "reference": [], "drug": [], "credit": [], "global": [], "social": [], "other": []
+            }
+            for chk in (c.checks or []):
+                base_type, doc_type, label_name, val = get_check_info(chk)
+                
+                # Fetch actual check detail dynamically using general key mapping if detail is missing
+                if not val and chk.data:
+                    val = format_check_detail_value(chk.check_type, chk.data, chk.verifier_remarks)
+                if not val:
+                    val = chk.verifier_remarks[:80] if chk.verifier_remarks else ""
+                    
+                chk_info = {
+                    "chk": chk,
+                    "val": val,
+                    "status": chk.status or "In Progress"
+                }
+                if base_type == "identity":
+                    if doc_type not in groups["identity"]:
+                        groups["identity"][doc_type] = []
+                    groups["identity"][doc_type].append(chk_info)
+                else:
+                    groups[base_type].append(chk_info)
+                    
+            candidate_grouped_checks.append((c, groups))
+            
+            # Track maximum count across all candidates
+            for btype in max_counts.keys():
+                max_counts[btype] = max(max_counts[btype], len(groups[btype]))
+            for doc_type, chks in groups["identity"].items():
+                max_identity_counts[doc_type] = max(max_identity_counts.get(doc_type, 0), len(chks))
+
+        # Build dynamic column definitions in standard enterprise order
+        dynamic_cols = []
+        
+        # 1. Address
+        for i in range(max_counts["address"]):
+            dynamic_cols.append({
+                "type": "address",
+                "group_title": f"Address {i + 1}" if max_counts["address"] > 1 else "Address",
+                "sub_headers": ["Address", "Status"],
+                "index": i
+            })
+            
+        # 2. Criminal
+        for i in range(max_counts["criminal"]):
+            dynamic_cols.append({
+                "type": "criminal",
+                "group_title": f"Court Check {i + 1}" if max_counts["criminal"] > 1 else "Court Check",
+                "sub_headers": ["Verdict", "Status"],
+                "index": i
+            })
+            
+        # 3. Employment
+        for i in range(max_counts["employment"]):
+            dynamic_cols.append({
+                "type": "employment",
+                "group_title": f"Employment {i + 1}" if max_counts["employment"] > 1 else "Employment",
+                "sub_headers": ["Company", "Status"],
+                "index": i
+            })
+            
+        # 4. Education
+        for i in range(max_counts["education"]):
+            dynamic_cols.append({
+                "type": "education",
+                "group_title": f"Education {i + 1}" if max_counts["education"] > 1 else "Education",
+                "sub_headers": ["Course", "Status"],
+                "index": i
+            })
+            
+        # 5. Identity
+        doc_order = ["AADHAAR", "PAN", "PASSPORT", "VOTER ID", "DL"]
+        def doc_sort_key(x):
+            x_up = x.upper()
+            try:
+                return doc_order.index(x_up)
+            except ValueError:
+                return len(doc_order)
+                
+        sorted_doc_types = sorted(list(max_identity_counts.keys()), key=doc_sort_key)
+        for doc_type in sorted_doc_types:
+            count = max_identity_counts[doc_type]
+            for i in range(count):
+                title = f"{doc_type} {i + 1}" if count > 1 else doc_type
+                dynamic_cols.append({
+                    "type": "identity",
+                    "doc_type": doc_type,
+                    "group_title": title,
+                    "sub_headers": ["Document No", "Status"],
+                    "index": i
+                })
+                
+        # 6. Reference
+        for i in range(max_counts["reference"]):
+            dynamic_cols.append({
+                "type": "reference",
+                "group_title": f"Reference {i + 1}" if max_counts["reference"] > 1 else "Reference",
+                "sub_headers": ["Referee Name", "Status"],
+                "index": i
+            })
+            
+        # 7. Drug
+        for i in range(max_counts["drug"]):
+            dynamic_cols.append({
+                "type": "drug",
+                "group_title": f"Drug Test {i + 1}" if max_counts["drug"] > 1 else "Drug Test",
+                "sub_headers": ["Panel", "Status"],
+                "index": i
+            })
+            
+        # 8. Credit
+        for i in range(max_counts["credit"]):
+            dynamic_cols.append({
+                "type": "credit",
+                "group_title": f"Credit Check {i + 1}" if max_counts["credit"] > 1 else "Credit Check",
+                "sub_headers": ["Score", "Status"],
+                "index": i
+            })
+            
+        # 9. Global
+        for i in range(max_counts["global"]):
+            dynamic_cols.append({
+                "type": "global",
+                "group_title": f"Global DB {i + 1}" if max_counts["global"] > 1 else "Global DB",
+                "sub_headers": ["Registry", "Status"],
+                "index": i
+            })
+            
+        # 10. Social
+        for i in range(max_counts["social"]):
+            dynamic_cols.append({
+                "type": "social",
+                "group_title": f"Social Media {i + 1}" if max_counts["social"] > 1 else "Social Media",
+                "sub_headers": ["Platform", "Status"],
+                "index": i
+            })
+            
+        # 11. Other
+        for i in range(max_counts["other"]):
+            dynamic_cols.append({
+                "type": "other",
+                "group_title": f"Other {i + 1}" if max_counts["other"] > 1 else "Other",
+                "sub_headers": ["Detail", "Status"],
+                "index": i
+            })
+
+        # Construct Header Row 1 (Group level) and Header Row 2 (Sub level)
+        h1 = [
+            'S.No', 'Received date', 'Ref No', 'Emp Code', 'Emp Name', 'Status', 'Report Shared date',
+            'Insuff raised date', 'Insuff raised Remarks', 'Insuff cleared date', 'Insuff cleared Remarks'
+        ]
+        for col in dynamic_cols:
+            h1.append(col["group_title"])
+            h1.append("")  # For merged cell companion
+            
+        h2 = ['', '', '', '', '', '', '', '', '', '', '']
+        for col in dynamic_cols:
+            h2.extend(col["sub_headers"])
+
+        # Write headers to Sheet 2
+        for col_idx, val in enumerate(h1, start=1):
+            cell = ws2.cell(row=1, column=col_idx, value=val)
+            cell.font = openpyxl.styles.Font(bold=True, size=11, color="1F2937")
+            cell.fill = openpyxl.styles.PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
+            cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+            
+        for col_idx, val in enumerate(h2, start=1):
+            cell = ws2.cell(row=2, column=col_idx, value=val)
+            cell.font = openpyxl.styles.Font(bold=True, size=11, color="1F2937")
+            cell.fill = openpyxl.styles.PatternFill(start_color="EEF4FB", end_color="EEF4FB", fill_type="solid")
+            cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+            
+        # Apply vertical merges for columns 1 to 11
+        for col_idx in range(1, 12):
+            ws2.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
+            cell = ws2.cell(row=1, column=col_idx)
+            cell.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center", wrap_text=True)
+            
+        # Apply horizontal merges for all dynamic check columns
+        curr_col = 12
+        for col in dynamic_cols:
+            ws2.merge_cells(start_row=1, start_column=curr_col, end_row=1, end_column=curr_col + 1)
+            curr_col += 2
+
+        # Apply borders to Row 1 and Row 2
+        thin_border = openpyxl.styles.Border(
+            left=openpyxl.styles.Side(style='thin', color='D9D9D9'),
+            right=openpyxl.styles.Side(style='thin', color='D9D9D9'),
+            top=openpyxl.styles.Side(style='thin', color='D9D9D9'),
+            bottom=openpyxl.styles.Side(style='thin', color='D9D9D9')
+        )
+        for r in [1, 2]:
+            for c_idx in range(1, len(h1) + 1):
+                ws2.cell(row=r, column=c_idx).border = thin_border
+
+        # Write data rows starting from row 3
+        row_idx2 = 3
+        for idx, (c, groups) in enumerate(candidate_grouped_checks, start=1):
+            apply_row_styles(ws2, 2, row_idx2)
+            
+            # Timelines and remarks
             raised_date = None
             raised_remarks = []
             cleared_date = None
@@ -1144,59 +1489,7 @@ async def export_mis_data(
                     if ins.resolved_remarks:
                         cleared_remarks.append(ins.resolved_remarks)
 
-            interim_date = None
-            interim_remarks = []
-            stop_date = None
-            stop_remarks = []
-            amber_date = None
-            amber_remarks = []
-            negative_remarks = []
-            reinitiate_date = None
-            reinitiate_remarks = []
-            reinitiate_completed_date = None
-            reinitiate_completed_remarks = []
-
-            for log in (c.verification_logs or []):
-                action_lower = str(log.action or "").lower()
-                remarks_lower = str(log.remarks or "").lower()
-                
-                if log.new_status == "INTERIM" or "interim" in action_lower or "interim" in remarks_lower:
-                    if not interim_date or log.created_at < interim_date:
-                        interim_date = log.created_at
-                    if log.remarks:
-                        interim_remarks.append(log.remarks)
-                
-                if log.new_status == "STOP" or "stop" in action_lower or "stop" in remarks_lower:
-                    if not stop_date or log.created_at < stop_date:
-                        stop_date = log.created_at
-                    if log.remarks:
-                        stop_remarks.append(log.remarks)
-
-                if log.new_status == "AMBER" or "amber" in action_lower or "amber" in remarks_lower:
-                    if not amber_date or log.created_at < amber_date:
-                        amber_date = log.created_at
-                    if log.remarks:
-                        amber_remarks.append(log.remarks)
-
-                if log.new_status == "NEGATIVE" or "negative" in action_lower or "negative" in remarks_lower:
-                    if log.remarks:
-                        negative_remarks.append(log.remarks)
-
-                if "reinitiate" in action_lower or "re-initiate" in action_lower or "reinitiated" in remarks_lower or "re-initiated" in remarks_lower:
-                    if not reinitiate_date or log.created_at < reinitiate_date:
-                        reinitiate_date = log.created_at
-                    if log.remarks:
-                        reinitiate_remarks.append(log.remarks)
-
-                if ("reinitiate" in remarks_lower or "re-initiate" in remarks_lower) and log.new_status == "COMPLETED":
-                    if not reinitiate_completed_date or log.created_at < reinitiate_completed_date:
-                        reinitiate_completed_date = log.created_at
-                    if log.remarks:
-                        reinitiate_completed_remarks.append(log.remarks)
-
-            if not negative_remarks and c.final_report_status == 'NEGATIVE' and c.qc_remarks:
-                negative_remarks.append(c.qc_remarks)
-
+            # Write basic fields
             ws2.cell(row=row_idx2, column=1, value=idx)
             ws2.cell(row=row_idx2, column=2, value=c.received_date.replace(tzinfo=None) if c.received_date else None)
             ws2.cell(row=row_idx2, column=3, value=c.case_ref_no or "")
@@ -1208,86 +1501,43 @@ async def export_mis_data(
             ws2.cell(row=row_idx2, column=9, value="; ".join(raised_remarks) if raised_remarks else "")
             ws2.cell(row=row_idx2, column=10, value=cleared_date.replace(tzinfo=None) if cleared_date else None)
             ws2.cell(row=row_idx2, column=11, value="; ".join(cleared_remarks) if cleared_remarks else "")
-            ws2.cell(row=row_idx2, column=12, value=interim_date.replace(tzinfo=None) if interim_date else None)
-            ws2.cell(row=row_idx2, column=13, value="; ".join(interim_remarks) if interim_remarks else "")
-            ws2.cell(row=row_idx2, column=14, value=stop_date.replace(tzinfo=None) if stop_date else None)
-            ws2.cell(row=row_idx2, column=15, value="; ".join(stop_remarks) if stop_remarks else "")
-            ws2.cell(row=row_idx2, column=16, value=amber_date.replace(tzinfo=None) if amber_date else None)
-            ws2.cell(row=row_idx2, column=17, value="; ".join(amber_remarks) if amber_remarks else "")
-            ws2.cell(row=row_idx2, column=18, value="; ".join(negative_remarks) if negative_remarks else "")
-            ws2.cell(row=row_idx2, column=19, value=reinitiate_date.replace(tzinfo=None) if reinitiate_date else None)
-            ws2.cell(row=row_idx2, column=20, value="; ".join(reinitiate_remarks) if reinitiate_remarks else "")
 
-            # Specific verification check mapping
-            ad = c.candidate.address_details if c.candidate and c.candidate.address_details else {}
-            
-            # Address Check (Col 21, Col 22)
-            addr_check = next((chk for chk in (c.checks or []) if 'address' in str(chk.check_type).lower()), None)
-            ws2.cell(row=row_idx2, column=21, value="Permanent")
-            ws2.cell(row=row_idx2, column=22, value=addr_check.status if addr_check else "N/A")
+            # Write checkwise dynamic columns
+            curr_col = 12
+            for col in dynamic_cols:
+                chk_list = []
+                if col["type"] == "identity":
+                    chk_list = groups["identity"].get(col["doc_type"], [])
+                else:
+                    chk_list = groups.get(col["type"], [])
+                    
+                if col["index"] < len(chk_list):
+                    chk_info = chk_list[col["index"]]
+                    val = chk_info["val"]
+                    status = chk_info["status"]
+                    
+                    ws2.cell(row=row_idx2, column=curr_col, value=val)
+                    ws2.cell(row=row_idx2, column=curr_col + 1, value=status)
+                else:
+                    ws2.cell(row=row_idx2, column=curr_col, value="")
+                    ws2.cell(row=row_idx2, column=curr_col + 1, value="")
+                curr_col += 2
 
-            # Criminal Check (Col 23, Col 24)
-            crim_check = next((chk for chk in (c.checks or []) if 'criminal' in str(chk.check_type).lower()), None)
-            ws2.cell(row=row_idx2, column=23, value="")
-            ws2.cell(row=row_idx2, column=24, value=crim_check.status if crim_check else "N/A")
-
-            # Employments (Col 25 to 33)
-            employments = ad.get("employments", []) if isinstance(ad.get("employments"), list) else []
-            emp_checks = [chk for chk in (c.checks or []) if 'employment' in str(chk.check_type).lower()]
-            
-            # Employment 1
-            emp1_name = employments[0].get("employer_name") if len(employments) > 0 else ""
-            emp1_chk = emp_checks[0] if len(emp_checks) > 0 else None
-            ws2.cell(row=row_idx2, column=25, value=emp1_name)
-            ws2.cell(row=row_idx2, column=26, value=emp1_name)
-            ws2.cell(row=row_idx2, column=27, value=emp1_chk.status if emp1_chk else "N/A")
-
-            # Employment 2
-            emp2_name = employments[1].get("employer_name") if len(employments) > 1 else ""
-            emp2_chk = emp_checks[1] if len(emp_checks) > 1 else None
-            ws2.cell(row=row_idx2, column=28, value=emp2_name)
-            ws2.cell(row=row_idx2, column=29, value=emp2_name)
-            ws2.cell(row=row_idx2, column=30, value=emp2_chk.status if emp2_chk else "N/A")
-
-            # Employment 3
-            emp3_name = employments[2].get("employer_name") if len(employments) > 2 else ""
-            emp3_chk = emp_checks[2] if len(emp_checks) > 2 else None
-            ws2.cell(row=row_idx2, column=31, value=emp3_name)
-            ws2.cell(row=row_idx2, column=32, value=emp3_name)
-            ws2.cell(row=row_idx2, column=33, value=emp3_chk.status if emp3_chk else "N/A")
-
-            # Educations (Col 34 to 39)
-            educations = ad.get("educations", []) if isinstance(ad.get("educations"), list) else []
-            edu_checks = [chk for chk in (c.checks or []) if 'education' in str(chk.check_type).lower()]
-
-            # Education 1
-            edu1_course = educations[0].get("course") if len(educations) > 0 else ""
-            edu1_chk = edu_checks[0] if len(edu_checks) > 0 else None
-            ws2.cell(row=row_idx2, column=34, value=edu1_course)
-            ws2.cell(row=row_idx2, column=35, value=edu1_course)
-            ws2.cell(row=row_idx2, column=36, value=edu1_chk.status if edu1_chk else "N/A")
-
-            # Education 2
-            edu2_course = educations[1].get("course") if len(educations) > 1 else ""
-            edu2_chk = edu_checks[1] if len(edu_checks) > 1 else None
-            ws2.cell(row=row_idx2, column=37, value=edu2_course)
-            ws2.cell(row=row_idx2, column=38, value=edu2_course)
-            ws2.cell(row=row_idx2, column=39, value=edu2_chk.status if edu2_chk else "N/A")
-
-            # Identity ID1 (Col 40 to 42)
-            identities = ad.get("identities", []) if isinstance(ad.get("identities"), list) else []
-            id_checks = [chk for chk in (c.checks or []) if 'identity' in str(chk.check_type).lower()]
-            id1_type = "PAN"
-            if len(identities) > 0:
-                id1_type = identities[0].get("id_type") or "PAN"
-            elif c.candidate and c.candidate.identity_type:
-                id1_type = c.candidate.identity_type
-            id1_chk = id_checks[0] if len(id_checks) > 0 else None
-            ws2.cell(row=row_idx2, column=40, value=id1_type)
-            ws2.cell(row=row_idx2, column=41, value=id1_type)
-            ws2.cell(row=row_idx2, column=42, value=id1_chk.status if id1_chk else "N/A")
-
+            # Apply borders and formatting to the data row
+            for c_col in range(1, len(h1) + 1):
+                dcell = ws2.cell(row=row_idx2, column=c_col)
+                dcell.border = thin_border
+                dcell.font = openpyxl.styles.Font(size=10)
+                if c_col in [1, 2, 6, 7, 8, 10] or (c_col >= 12 and c_col % 2 == 1):
+                    dcell.alignment = openpyxl.styles.Alignment(horizontal="center")
+                    
             row_idx2 += 1
+
+        # Auto-fit column widths properly
+        for col in ws2.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = openpyxl.utils.get_column_letter(col[0].column)
+            ws2.column_dimensions[col_letter].width = max(max_len + 3, 12)
 
         output = io.BytesIO()
         workbook.save(output)
@@ -1317,7 +1567,8 @@ async def get_strategic_mis(
         stmt = select(models.Case).options(
             selectinload(models.Case.candidate),
             selectinload(models.Case.customer),
-            selectinload(models.Case.checks),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.Case.checks).selectinload(models.VerificationCheck.logs),
             selectinload(models.Case.assigned_user)
         )
 
@@ -1350,8 +1601,6 @@ async def get_strategic_mis(
             check_map = {k: "NA" for k in report_keys}
             detailed_checks = []
 
-            # Deduplicate checks by type to prevent counting redundancies (e.g. 12 cards for 10 checks)
-            distinct_checks = {}
             for chk in c.checks:
                 status_label = "In Progress"
                 s = str(chk.status).upper()
@@ -1378,27 +1627,27 @@ async def get_strategic_mis(
                 if report_key in report_keys:
                     check_map[report_key] = status_label
                 
-                # Take the most recent one if duplicates exist
-                chk_data = {
+                detailed_checks.append({
                     "id": chk.id,
                     "type": chk.check_type,
                     "status": status_label,
                     "raw_status": chk.status,
                     "data": chk.data or {},
                     "remarks": chk.verifier_remarks or "",
+                    "assigned_verifier_name": chk.assigned_verifier.full_name if chk.assigned_verifier else "Unallocated",
                     "updated_at": chk.verified_date.strftime("%Y-%m-%d %H:%M") if chk.verified_date else None,
                     "verified_date": chk.verified_date.strftime("%Y-%m-%d") if chk.verified_date else None,
-                    "created_at_raw": chk.verified_date or datetime.min # For sorting
-                }
-                
-                if chk.check_type not in distinct_checks:
-                    distinct_checks[chk.check_type] = chk_data
-                else:
-                    # If duplicate, keep the one with more data or more recent
-                    if chk.verified_date and (not distinct_checks[chk.check_type]["created_at_raw"] or chk.verified_date > distinct_checks[chk.check_type]["created_at_raw"]):
-                         distinct_checks[chk.check_type] = chk_data
-
-            detailed_checks = list(distinct_checks.values())
+                    "logs": [
+                        {
+                            "id": l.id,
+                            "action": l.action,
+                            "remarks": l.remarks,
+                            "old_status": l.old_status,
+                            "new_status": l.new_status,
+                            "created_at": l.created_at.isoformat() if l.created_at else None
+                        } for l in chk.logs
+                    ]
+                })
 
 
 
@@ -1934,6 +2183,7 @@ async def read_cases(
     search: Optional[str] = None,
     search_name: Optional[str] = None,
     search_ref: Optional[str] = None,
+    candidate_id: Optional[str] = None,
     assigned: Optional[bool] = None,
     assigned_to: Optional[str] = None,
     exclude_completed: Optional[bool] = None,
@@ -2058,7 +2308,11 @@ async def read_cases(
         stmt = stmt.filter(involvement_filter)
         base_count_stmt = base_count_stmt.filter(involvement_filter)
     if search:
-        f = or_(models.Case.case_ref_no.ilike(f"%{search}%"), models.Candidate.name.ilike(f"{search}%"))
+        f = or_(
+            models.Case.case_ref_no.ilike(f"%{search}%"),
+            models.Candidate.name.ilike(f"%{search}%"),
+            models.Candidate.client_emp_code.ilike(f"%{search}%")
+        )
         stmt = stmt.filter(f)
         base_count_stmt = base_count_stmt.filter(f)
     if search_name:
@@ -2067,6 +2321,9 @@ async def read_cases(
     if search_ref:
         stmt = stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
         base_count_stmt = base_count_stmt.filter(models.Case.case_ref_no.ilike(f"%{search_ref}%"))
+    if candidate_id:
+        stmt = stmt.filter(models.Case.candidate_id == candidate_id)
+        base_count_stmt = base_count_stmt.filter(models.Case.candidate_id == candidate_id)
     if assigned is not None:
         _FINAL_S = ['FINALIZED','COMPLETED','POSITIVE','NEGATIVE','DISCREPANCY','UNABLE TO VERIFY','HOLD','INSUFFICIENT','QC_VERIFIED','CLOSED']
         if assigned:
@@ -2486,7 +2743,15 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
 
             
             # QC Revoke: Moving back from QC or Completed
-            if (case_obj.status in [models.CaseStatus.QC, models.CaseStatus.COMPLETED]) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+            finalized_statuses = [
+                "QC", "QC_PENDING", "QA_PENDING", "COMPLETED", "FINALIZED",
+                "POSITIVE", "NEGATIVE", "DISCREPANCY", "UNABLE TO VERIFY", "HOLD", "INSUFFICIENT",
+                models.CaseStatus.QC, models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED,
+                models.CaseStatus.FINALIZED, models.CaseStatus.POSITIVE, models.CaseStatus.NEGATIVE,
+                models.CaseStatus.DISCREPANCY, models.CaseStatus.UNABLE_TO_VERIFY, models.CaseStatus.HOLD,
+                models.CaseStatus.INSUFFICIENT
+            ]
+            if (case_obj.status in finalized_statuses) and req.target_value in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
                 case_obj.qc_revoke_count += 1
                 db.add(models.RevokeLog(
                     case_id=cid,
@@ -2495,6 +2760,15 @@ async def bulk_action(req: schemas.BulkActionRequest, db: AsyncSession = Depends
                     from_status=case_obj.status,
                     to_status=req.target_value
                 ))
+                # Reset all checks to WIP so verifier can re-verify from scratch
+                for chk in case_obj.checks:
+                    chk.status = models.CheckStatus.VERIFICATION
+                    chk.final_result = None
+                    chk.qc_status = "PENDING_REVIEW"
+                # Reset case-level finalization metadata
+                case_obj.final_result = None
+                case_obj.final_report_status = None
+                case_obj.completed_date = None
             
             # QA/Lead Revoke: Moving back from QA to QC or Verifier
             if case_obj.status == models.CaseStatus.QA_PENDING and req.target_value in [models.CaseStatus.QC, models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
@@ -2742,8 +3016,16 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
                 chk.status = models.CheckStatus.QC_PENDING
     elif update_data.get("status") and update_data.get("status") != models.CaseStatus.COMPLETED:
         # Revoke Logic for Single Update
-        # QC Revoke: from QC/QA/Completed to Verification/Pending
-        if (db_case.status in [models.CaseStatus.QC, models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED]) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
+        # QC Revoke: from QC/QA/Completed/Finalized (including result statuses) to Verification/Pending
+        finalized_statuses = [
+            "QC", "QC_PENDING", "QA_PENDING", "COMPLETED", "FINALIZED",
+            "POSITIVE", "NEGATIVE", "DISCREPANCY", "UNABLE TO VERIFY", "HOLD", "INSUFFICIENT",
+            models.CaseStatus.QC, models.CaseStatus.QA_PENDING, models.CaseStatus.COMPLETED,
+            models.CaseStatus.FINALIZED, models.CaseStatus.POSITIVE, models.CaseStatus.NEGATIVE,
+            models.CaseStatus.DISCREPANCY, models.CaseStatus.UNABLE_TO_VERIFY, models.CaseStatus.HOLD,
+            models.CaseStatus.INSUFFICIENT
+        ]
+        if (db_case.status in finalized_statuses) and update_data.get("status") in [models.CaseStatus.VERIFICATION, models.CaseStatus.PENDING]:
             db_case.qc_revoke_count += 1
             db.add(models.RevokeLog(
                 case_id=case_id,
@@ -2752,10 +3034,15 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
                 from_status=db_case.status,
                 to_status=update_data.get('status')
             ))
-            # Reset checks to WIP so verifier can re-verify
+            # Reset all checks to WIP so verifier can re-verify from scratch
             for chk in db_case.checks:
-                if chk.status == models.CheckStatus.QC_PENDING:
-                    chk.status = models.CheckStatus.VERIFICATION
+                chk.status = models.CheckStatus.VERIFICATION
+                chk.final_result = None
+                chk.qc_status = "PENDING_REVIEW"
+            # Reset case-level finalization metadata
+            db_case.final_result = None
+            db_case.final_report_status = None
+            db_case.completed_date = None
             
         # Transition Revoke: from Completed back to QC/QA
         if db_case.status == models.CaseStatus.COMPLETED and update_data.get("status") in [models.CaseStatus.QC, models.CaseStatus.QA_PENDING]:

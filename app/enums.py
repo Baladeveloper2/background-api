@@ -64,6 +64,7 @@ class CheckStatus(str, enum.Enum):
     SUBMITTED_TO_QC = "SUBMITTED_TO_QC"
     STOP = "STOP"
     NOT_AP = "NOT_AP"
+    CLEAR_VERIFIED = "CLEAR/VERIFIED"
 
 class QCStatus(str, enum.Enum):
     PENDING_REVIEW = "PENDING_REVIEW"
