@@ -22,3 +22,4 @@ aiomysql
 boto3
 requests
 httpx
+reportlab>=3.6.12
