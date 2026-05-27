@@ -11,6 +11,262 @@ from datetime import datetime
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
+# ─── IMPORTANT: Static routes MUST come before /{customer_id} dynamic route ───
+
+from sqlalchemy import or_, func
+from fastapi.responses import JSONResponse
+
+def derive_case_final_result(case, db):
+    """Derive business verification outcome from check results when case.final_result is NULL.
+    Priority: case.final_result > case.final_report_status > derived from checks.
+    NEVER returns workflow status like FINALIZED/COMPLETED as a business result."""
+    stored = (case.final_result or case.final_report_status or "").upper().strip()
+    
+    # If stored result is a real business outcome, use it
+    business_outcomes = ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED', 'NEGATIVE', 'RED',
+                         'AMBER', 'DISCREPANCY', 'STOPCHECK', 'STOP CHECK', 'CLIENT HOLD',
+                         'HOLD', 'STOP', 'INTERIM', 'PARTIAL COMPLETION', 'INSUFFICIENT', 'INSUFFICIENCY']
+    if stored in business_outcomes:
+        return stored
+    
+    # Stored value is empty or a workflow status (FINALIZED/COMPLETED) — derive from checks
+    workflow_status = (case.status or "").upper().strip()
+    is_finalized = workflow_status in ['FINALIZED', 'COMPLETED']
+    
+    if not is_finalized:
+        return None  # Case not yet finalized, genuinely WIP
+    
+    # Case is finalized but final_result not set — derive from verification checks
+    checks = db.query(models.VerificationCheck).filter(
+        models.VerificationCheck.case_id == case.id
+    ).all()
+    
+    if not checks:
+        return None
+    
+    check_results = [(chk.final_result or chk.status or "").upper().strip() for chk in checks]
+    
+    # Business rules: any NEGATIVE → NEGATIVE, any AMBER → AMBER, all POSITIVE → POSITIVE
+    for r in check_results:
+        if r in ['NEGATIVE', 'RED']:
+            return 'NEGATIVE'
+    for r in check_results:
+        if r in ['STOPCHECK', 'STOP CHECK', 'CLIENT HOLD']:
+            return 'STOP CHECK'
+    for r in check_results:
+        if r in ['INSUFFICIENT', 'INSUFFICIENCY']:
+            return 'INSUFFICIENT'
+    for r in check_results:
+        if r in ['AMBER', 'DISCREPANCY']:
+            return 'AMBER'
+    for r in check_results:
+        if r in ['INTERIM', 'PARTIAL COMPLETION']:
+            return 'INTERIM'
+    
+    # All checks positive or clear
+    positive_set = ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED', 'QC_VERIFIED', 'VERIFIED']
+    if all(r in positive_set for r in check_results if r):
+        return 'POSITIVE'
+    
+    return None
+
+
+@router.get("/dashboard-summary")
+def get_customer_dashboard_summary(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    if not current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Not associated with any customer")
+        
+    client_id = current_user.customer_id
+    
+    cases = db.query(models.Case).filter(models.Case.customer_id == client_id).all()
+    
+    overall = len(cases)
+    positive = 0
+    negative = 0
+    amber = 0
+    in_progress = 0
+    stop_check = 0
+    interim = 0
+    insufficiency = 0
+    
+    for c in cases:
+        # Derive the REAL business result (never workflow status)
+        val_to_eval = (derive_case_final_result(c, db) or "").upper().strip()
+
+        if val_to_eval in ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED']:
+            positive += 1
+        elif val_to_eval in ['NEGATIVE', 'RED']:
+            negative += 1
+        elif val_to_eval in ['AMBER', 'DISCREPANCY']:
+            amber += 1
+        elif val_to_eval in ['STOPCHECK', 'STOP CHECK', 'CLIENT HOLD', 'HOLD', 'STOP']:
+            stop_check += 1
+        elif val_to_eval in ['INTERIM', 'PARTIAL COMPLETION']:
+            interim += 1
+        elif val_to_eval in ['INSUFFICIENT', 'INSUFFICIENCY']:
+            insufficiency += 1
+        else:
+            in_progress += 1
+
+
+    return {
+        "overallCases": overall,
+        "positive": positive,
+        "negative": negative,
+        "amber": amber,
+        "inProgress": in_progress,
+        "stopCheck": stop_check,
+        "interim": interim,
+        "insufficiency": insufficiency
+    }
+
+
+@router.get("/candidates-list")
+def get_customer_candidates(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    page: int = 1,
+    limit: int = 10,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    if not current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Not associated with any customer")
+
+    from sqlalchemy.orm import joinedload
+    query = (
+        db.query(models.Case)
+        .options(joinedload(models.Case.candidate), joinedload(models.Case.customer))
+        .filter(models.Case.customer_id == current_user.customer_id)
+    )
+
+    if search:
+        query = query.join(models.Candidate, models.Case.candidate_id == models.Candidate.id, isouter=True).filter(
+            or_(
+                models.Candidate.name.ilike(f"%{search}%"),
+                models.Case.case_ref_no.ilike(f"%{search}%")
+            )
+        )
+
+    if from_date:
+        query = query.filter(models.Case.received_date >= from_date)
+    if to_date:
+        query = query.filter(models.Case.received_date <= to_date)
+
+    # The status filtering is now performed in Python after deriving final_result.
+
+
+    total = query.count()
+    cases = query.order_by(models.Case.received_date.desc()).offset((page - 1) * limit).limit(limit).all()
+
+    results = []
+    for c in cases:
+        cand = c.candidate
+        cust = c.customer
+        results.append({
+            "id": c.id,
+            "candidate_name": cand.name if cand else "N/A",
+            "case_ref_no": c.case_ref_no,
+            "client_emp_code": cand.client_emp_code if cand else None,
+            "received_date": c.received_date.isoformat() if c.received_date else None,
+            "completed_date": c.completed_date.isoformat() if c.completed_date else None,
+            "status": c.status,
+            "final_result": derive_case_final_result(c, db),
+            "is_in_tat": c.is_in_tat
+        })
+
+    # Apply Python-side filter based on business outcome if status filter is provided
+    # Status filter will be applied after deriving final_result for each case.
+    # The SQL query does not filter by status here; we will filter the results list in Python.
+    # This ensures that derived business outcomes are used consistently.
+    if status and status.upper() not in ('ALL', ''):
+        filter_upper = status.upper().strip()
+        def outcome_matches(res):
+            val = (res.get('final_result') or '').upper().strip()
+            if filter_upper == 'POSITIVE':
+                return val in ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED']
+            if filter_upper == 'NEGATIVE':
+                return val in ['NEGATIVE', 'RED']
+            if filter_upper == 'AMBER':
+                return val in ['AMBER', 'DISCREPANCY']
+            if filter_upper in ['IN PROGRESS (WIP)', 'INPROGRESS', 'IN PROGRESS', 'WIP']:
+                # No business outcome yet means in progress
+                return not val
+            if filter_upper == 'STOP CHECK':
+                return val in ['STOPCHECK', 'STOP CHECK', 'CLIENT HOLD']
+            if filter_upper == 'INTERIM':
+                return val in ['INTERIM', 'PARTIAL COMPLETION']
+            if filter_upper == 'INSUFFICIENCY':
+                return val in ['INSUFFICIENT', 'INSUFFICIENCY']
+            return False
+        filtered = [r for r in results if outcome_matches(r)]
+        total = len(filtered)
+        results = filtered
+
+    return JSONResponse(
+        content=results,
+        headers={"x-total-count": str(total), "access-control-expose-headers": "x-total-count"}
+    )
+
+
+@router.get("/candidate/{case_id}/summary")
+def get_candidate_summary(
+    case_id: str,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    if not current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Not associated with any customer")
+
+    from sqlalchemy.orm import joinedload
+    case = (
+        db.query(models.Case)
+        .options(joinedload(models.Case.candidate), joinedload(models.Case.customer))
+        .filter(models.Case.id == case_id, models.Case.customer_id == current_user.customer_id)
+        .first()
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Use VerificationCheck (the actual model name)
+    checks = db.query(models.VerificationCheck).filter(models.VerificationCheck.case_id == case_id).all()
+
+    check_list = []
+    for chk in checks:
+        check_list.append({
+            "module": chk.check_type,
+            "status": chk.status,
+            "result": chk.final_result,
+            "completed_date": chk.verified_date.isoformat() if chk.verified_date else None
+        })
+
+    cand = case.candidate
+    cust = case.customer
+    return {
+        "case": {
+            "candidate_name": cand.name if cand else "N/A",
+            "case_ref_no": case.case_ref_no,
+            "client_emp_code": cand.client_emp_code if cand else None,
+            "status": case.status,
+            "sla": case.is_in_tat,
+            "received_date": case.received_date.isoformat() if case.received_date else None,
+            "completed_date": case.completed_date.isoformat() if case.completed_date else None,
+            "overall_result": derive_case_final_result(case, db),
+            "report_status": case.status,
+            "id": case.id,
+            "customer_name": cust.name if cust else "N/A"
+        },
+        "checks": check_list
+    }
+
+
+# ─── Dynamic / parameterized routes below ────────────────────────────────────
+
 @router.post("", response_model=schemas.Customer)
 async def create_customer(
     name: str = Form(...),
@@ -257,3 +513,4 @@ def delete_customer(
     db.delete(db_customer)
     db.commit()
     return {"message": "Customer deleted successfully"}
+

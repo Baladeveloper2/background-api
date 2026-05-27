@@ -37,7 +37,7 @@ async def seed_activity(case_id):
         logs = [
             VerificationLog(
                 id=str(uuid.uuid4()), case_id=case_id, action="CASE_INITIALIZED",
-                performed_by_id=user_id, remarks="Case dossier initialized in Dynamic Workspace.",
+                performed_by_id=user_id, remarks="Case Reports initialized in Dynamic Workspace.",
                 created_at=base_time
             ),
             VerificationLog(

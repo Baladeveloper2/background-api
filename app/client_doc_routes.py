@@ -69,14 +69,14 @@ async def upload_client_document(
         uploaded_by=current_user.id
     )
     
+    db.add(new_doc)
+    
     if not is_folder:
         try:
             # Try to get customer name
             customer_name = "Unknown Client"
-            if current_user.customer:
-                customer_name = current_user.customer.name
-            elif current_user.customer_id:
-                # Fetch customer if not loaded
+            if current_user.customer_id:
+                # Fetch customer to avoid lazy-loading issues in async
                 c_res = await db.execute(select(models.Customer).filter_by(id=current_user.customer_id))
                 customer = c_res.scalar_one_or_none()
                 if customer:

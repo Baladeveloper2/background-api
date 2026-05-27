@@ -124,6 +124,24 @@ api_v1.include_router(billing_routes.router)
 api_v1.include_router(client_doc_routes.router)
 api_v1.include_router(public_routes.router)
 
+# Alias routes for Customer MIS Export to ensure all path variations resolve perfectly
+from .stats_routes import export_customer_mis_data
+
+@api_v1.post("/customer/mis/export")
+async def customer_mis_export_alias_v1(
+    payload: dict,
+    db = Depends(get_async_db),
+    current_user = Depends(auth_routes.get_current_user)
+):
+    return await export_customer_mis_data(payload, db, current_user)
+
+@app.post("/api/customer/mis/export")
+async def customer_mis_export_alias_root(
+    payload: dict,
+    db = Depends(get_async_db),
+    current_user = Depends(auth_routes.get_current_user)
+):
+    return await export_customer_mis_data(payload, db, current_user)
 
 
 app.include_router(api_v1)

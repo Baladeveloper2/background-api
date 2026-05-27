@@ -181,45 +181,72 @@ async def get_customer_dashboard(
         cases = cases_res.scalars().all()
 
         total_candidates = len(cases)
-        in_progress = 0
-        finalized = 0
-        insufficiency = 0
-        approaching_sla = 0
-        reports_ready = 0
 
-        # Verdict counts
-        verdict_positive = 0
-        verdict_negative = 0
-        verdict_wip = 0
-        verdict_insufficiency = 0
+        # Case-wise metrics aggregation using SUM(CASE)
+        from sqlalchemy.sql import exists
+        has_active_insuff = exists().where(
+            and_(
+                models.Insufficiency.case_id == models.Case.id,
+                models.Insufficiency.is_resolved == False
+            )
+        )
+
+        case_stats_stmt = select(
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED']),
+                    func.upper(models.Case.status).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED'])
+                )
+            ), 1), else_=0)).label("positiveCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['NEGATIVE', 'RED', 'DISCREPANCY']),
+                    func.upper(models.Case.status).in_(['NEGATIVE', 'RED', 'DISCREPANCY'])
+                )
+            ), 1), else_=0)).label("negativeCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH']),
+                    func.upper(models.Case.status).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH'])
+                )
+            ), 1), else_=0)).label("amberCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['STOPCHECK', 'HOLD', 'CLIENT HOLD', 'STOPPED', 'STOP']),
+                    func.upper(models.Case.status).in_(['STOPCHECK', 'HOLD', 'CLIENT HOLD', 'STOPPED', 'STOP'])
+                )
+            ), 1), else_=0)).label("stopCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.status).in_(['INSUFFICIENT', 'INSUFFICIENCY']),
+                    func.upper(models.Case.final_result).in_(['INSUFFICIENT', 'INSUFFICIENCY']),
+                    has_active_insuff
+                )
+            ), 1), else_=0)).label("insufficiencyCases"),
+            
+            func.sum(case(((
+                and_(
+                    func.upper(models.Case.status).in_(['WIP', 'ASSIGNED', 'INITIATED', 'VERIFICATION', 'QC_PENDING', 'CLIENT_REVIEW', 'IN_PROGRESS', 'PENDING']),
+                    func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CANCELLED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY'])
+                )
+            ), 1), else_=0)).label("inProgressCases")
+        ).select_from(models.Case).where(models.Case.customer_id == current_user.customer_id)
+
+        case_stats_res = await db.execute(case_stats_stmt)
+        case_row = case_stats_res.one()
+
+        positive_checks = int(case_row.positiveCases or 0)
+        negative_checks = int(case_row.negativeCases or 0)
+        amber_checks = int(case_row.amberCases or 0)
+        stop_checks = int(case_row.stopCases or 0)
+        insufficiency_checks = int(case_row.insufficiencyCases or 0)
+        in_progress_checks = int(case_row.inProgressCases or 0)
 
         now = datetime.utcnow()
-
-        for c in cases:
-            status_upper = str(c.status).upper() if c.status else ""
-            
-            # KPI & report status
-            if status_upper in ["FINALIZED", "COMPLETED", "POSITIVE", "GREEN"]:
-                finalized += 1
-                reports_ready += 1
-                verdict_positive += 1
-            elif status_upper in ["NEGATIVE", "RED", "DISCREPANCY"]:
-                finalized += 1
-                reports_ready += 1
-                verdict_negative += 1
-            elif status_upper in ["INSUFFICIENCY", "INSUFFICIENT"]:
-                insufficiency += 1
-                verdict_insufficiency += 1
-            else:
-                in_progress += 1
-                verdict_wip += 1
-
-            # Approaching SLA
-            if status_upper not in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED", "DISCREPANCY"]:
-                age_days = (now - c.received_date.replace(tzinfo=None)).days if c.received_date else 0
-                sla_days_left = (c.tat_days or 10) - age_days
-                if sla_days_left <= 3 or (c.risk_score and c.risk_score > 70):
-                    approaching_sla += 1
 
         # Get 10 recent cases
         recent_cases_q = (
@@ -379,17 +406,25 @@ async def get_customer_dashboard(
             "customer_name": customer_name,
             "stats": {
                 "total_candidates": total_candidates,
-                "in_progress": in_progress,
-                "finalized": finalized,
-                "insufficiency": insufficiency,
-                "approaching_sla": approaching_sla,
-                "reports_ready": reports_ready
+                "positive_checks": positive_checks,
+                "negative_checks": negative_checks,
+                "amber_checks": amber_checks,
+                "stop_checks": stop_checks,
+                "insufficiency_checks": insufficiency_checks,
+                "in_progress_checks": in_progress_checks,
+                "in_progress": in_progress_checks,
+                "finalized": positive_checks + negative_checks + amber_checks + stop_checks,
+                "insufficiency": insufficiency_checks,
+                "approaching_sla": 0,
+                "reports_ready": positive_checks + negative_checks
             },
             "status_mix": {
-                "positive": verdict_positive,
-                "negative": verdict_negative,
-                "wip": verdict_wip,
-                "insufficiency": verdict_insufficiency
+                "positive": positive_checks,
+                "negative": negative_checks,
+                "amber": amber_checks,
+                "stop": stop_checks,
+                "insufficiency": insufficiency_checks,
+                "in_progress": in_progress_checks
             },
             "recent_candidates": recent_candidates_list,
             "batches": {
@@ -405,6 +440,319 @@ async def get_customer_dashboard(
     except Exception as e:
         logger.error(f"customer-dashboard error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to load customer dashboard data")
+
+
+@router.get("/customer-candidates")
+async def get_customer_candidates(
+    page: int = 1,
+    limit: int = 20,
+    search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Paginated, filterable candidate listing for Customer Portal.
+    """
+    if not current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Access denied. User is not associated with any customer account.")
+
+    try:
+        # Base query for cases
+        query = select(models.Case).where(models.Case.customer_id == current_user.customer_id)
+        
+        # Text Search
+        if search:
+            search = f"%{search}%"
+            query = query.filter(
+                or_(
+                    models.Case.case_ref_no.ilike(search),
+                    models.Case.candidate.has(models.Candidate.name.ilike(search)),
+                    models.Case.candidate.has(models.Candidate.client_emp_code.ilike(search)),
+                    models.Case.batch_id.ilike(search)
+                )
+            )
+            
+        # Date filtering based on received_date
+        if from_date:
+            try:
+                dt_from = datetime.strptime(from_date, "%Y-%m-%d")
+                query = query.filter(models.Case.received_date >= dt_from)
+            except: pass
+        if to_date:
+            try:
+                dt_to = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+                query = query.filter(models.Case.received_date < dt_to)
+            except: pass
+            
+        # Status filtering
+        if status and status.upper() != 'ALL':
+            status_upper = status.upper()
+            from sqlalchemy.sql import exists
+            has_active_insuff = exists().where(
+                and_(
+                    models.Insufficiency.case_id == models.Case.id,
+                    models.Insufficiency.is_resolved == False
+                )
+            )
+            
+            if status_upper == 'POSITIVE':
+                query = query.filter(
+                    or_(
+                        func.upper(models.Case.final_result).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED']),
+                        func.upper(models.Case.status).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED'])
+                    )
+                )
+            elif status_upper == 'NEGATIVE':
+                query = query.filter(
+                    or_(
+                        func.upper(models.Case.final_result).in_(['NEGATIVE', 'RED', 'DISCREPANCY']),
+                        func.upper(models.Case.status).in_(['NEGATIVE', 'RED', 'DISCREPANCY'])
+                    )
+                )
+            elif status_upper == 'AMBER':
+                query = query.filter(
+                    or_(
+                        func.upper(models.Case.final_result).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH']),
+                        func.upper(models.Case.status).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH'])
+                    )
+                )
+            elif status_upper == 'STOP CHECK':
+                query = query.filter(
+                    or_(
+                        func.upper(models.Case.final_result).in_(['STOPCHECK', 'HOLD', 'CLIENT HOLD', 'STOPPED', 'STOP']),
+                        func.upper(models.Case.status).in_(['STOPCHECK', 'HOLD', 'CLIENT HOLD', 'STOPPED', 'STOP'])
+                    )
+                )
+            elif status_upper == 'INSUFFICIENCY':
+                query = query.filter(
+                    or_(
+                        func.upper(models.Case.status).in_(['INSUFFICIENT', 'INSUFFICIENCY']),
+                        func.upper(models.Case.final_result).in_(['INSUFFICIENT', 'INSUFFICIENCY']),
+                        has_active_insuff
+                    )
+                )
+            elif status_upper == 'IN PROGRESS':
+                query = query.filter(
+                    and_(
+                        func.upper(models.Case.status).in_(['WIP', 'ASSIGNED', 'INITIATED', 'VERIFICATION', 'QC_PENDING', 'CLIENT_REVIEW', 'IN_PROGRESS', 'PENDING']),
+                        func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CANCELLED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY'])
+                    )
+                )
+            elif status_upper == 'FINALIZED':
+                query = query.filter(models.Case.status.in_(['FINALIZED', 'COMPLETED']))
+            else:
+                query = query.filter(models.Case.status == status_upper)
+                
+        # Calculate summary statistics for the filtered dataset
+        case_stats_stmt = query.with_only_columns(
+            func.sum(case(((or_(func.upper(models.Case.final_result).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED']), func.upper(models.Case.status).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED']))), 1), else_=0)).label("positiveCases"),
+            func.sum(case(((or_(func.upper(models.Case.final_result).in_(['NEGATIVE', 'RED', 'DISCREPANCY']), func.upper(models.Case.status).in_(['NEGATIVE', 'RED', 'DISCREPANCY']))), 1), else_=0)).label("negativeCases"),
+            func.sum(case(((or_(func.upper(models.Case.final_result).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH']), func.upper(models.Case.status).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH']))), 1), else_=0)).label("amberCases"),
+            func.sum(case(((or_(func.upper(models.Case.status).in_(['INSUFFICIENT', 'INSUFFICIENCY']), func.upper(models.Case.final_result).in_(['INSUFFICIENT', 'INSUFFICIENCY']))), 1), else_=0)).label("insufficiencyCases"),
+            func.count(models.Case.id).label("total")
+        )
+        stats_res = await db.execute(case_stats_stmt)
+        stats = stats_res.one()
+        
+        total = stats.total or 0
+        summary = {
+            "positive": int(stats.positiveCases or 0),
+            "negative": int(stats.negativeCases or 0),
+            "amber": int(stats.amberCases or 0),
+            "insufficiency": int(stats.insufficiencyCases or 0)
+        }
+        
+        total_pages = (total + limit - 1) // limit if limit > 0 else 1
+        
+        # Pagination
+        query = query.order_by(models.Case.received_date.desc())
+        if limit > 0:
+            query = query.offset((page - 1) * limit).limit(limit)
+            
+        # Eager load candidate info
+        query = query.options(selectinload(models.Case.candidate), selectinload(models.Case.batch))
+        
+        cases_res = await db.execute(query)
+        cases = cases_res.scalars().all()
+        
+        data = []
+        now = datetime.utcnow()
+        for c in cases:
+            age_days = (now - c.received_date.replace(tzinfo=None)).days if c.received_date else 0
+            sla_days_left = (c.tat_days or 10) - age_days
+            
+            if c.status in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]:
+                sla_text = "Completed"
+            elif sla_days_left < 0:
+                sla_text = f"Breached ({abs(sla_days_left)}d overdue)"
+            elif sla_days_left <= 3:
+                sla_text = f"Risk ({sla_days_left}d left)"
+            else:
+                sla_text = f"Healthy ({sla_days_left}d left)"
+
+            data.append({
+                "id": c.id,
+                "candidate_name": c.candidate.name if c.candidate else "Unknown",
+                "employee_id": c.candidate.client_emp_code if c.candidate else "N/A",
+                "batch_no": c.batch.batch_no if c.batch else (c.batch_id or "Manual Entry"),
+                "case_ref": c.case_ref_no,
+                "status": c.status,
+                "final_result": c.final_result,
+                "received_date": c.received_date.isoformat() if c.received_date else None,
+                "sla": sla_text,
+                "report_status": "READY" if c.status in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"] else "PENDING"
+            })
+            
+        return {
+            "data": data,
+            "total": total,
+            "page": page,
+            "totalPages": total_pages,
+            "summary": summary
+        }
+    except Exception as e:
+        logger.error(f"customer-candidates error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch customer candidates")
+
+
+
+@router.get("/customer-summary")
+async def get_customer_summary(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    candidate_id: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Dedicated check-wise stats overview for Customer Portal dashboard.
+    """
+    if not current_user.customer_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. User is not associated with any customer account."
+        )
+
+    try:
+        # Build Filters based on customer and standard optional filters
+        filters = [models.Case.customer_id == current_user.customer_id]
+        
+        if from_date:
+            try:
+                start_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                filters.append(models.Case.received_date >= start_dt)
+            except Exception:
+                pass
+        if to_date:
+            try:
+                end_dt = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+                filters.append(models.Case.received_date < end_dt)
+            except Exception:
+                pass
+        if batch_id and batch_id != 'ALL':
+            filters.append(
+                or_(
+                    models.Case.batch_id == batch_id,
+                    models.Case.batch.has(models.Batch.batch_no == batch_id)
+                )
+            )
+        if candidate_id:
+            filters.append(models.Case.candidate_id == candidate_id)
+            
+        if search:
+            filters.append(
+                or_(
+                    models.Case.case_ref_no.ilike(f"%{search}%"),
+                    models.Case.candidate.has(models.Candidate.name.ilike(f"%{search}%")),
+                    models.Case.candidate.has(models.Candidate.client_emp_code.ilike(f"%{search}%"))
+                )
+            )
+            
+        if status and status != 'ALL':
+            status_upper = status.upper()
+            filters.append(models.Case.status == status_upper)
+
+        # 1. Total Candidates count (Case-Wise count of unique cases/candidates)
+        total_candidates_stmt = select(func.count(distinct(models.Case.id))).where(*filters)
+        total_candidates_res = await db.execute(total_candidates_stmt)
+        total_candidates = total_candidates_res.scalar() or 0
+
+        # 2. Case-wise metrics aggregation using SUM(CASE) to do it in one single fast query
+        from sqlalchemy.sql import exists
+        has_active_insuff = exists().where(
+            and_(
+                models.Insufficiency.case_id == models.Case.id,
+                models.Insufficiency.is_resolved == False
+            )
+        )
+
+        case_stats_stmt = select(
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED']),
+                    func.upper(models.Case.status).in_(['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR_VERIFIED', 'CLEAR/VERIFIED', 'FINALIZED', 'COMPLETED'])
+                )
+            ), 1), else_=0)).label("positiveCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['NEGATIVE', 'RED', 'DISCREPANCY']),
+                    func.upper(models.Case.status).in_(['NEGATIVE', 'RED', 'DISCREPANCY'])
+                )
+            ), 1), else_=0)).label("negativeCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH']),
+                    func.upper(models.Case.status).in_(['AMBER', 'REVIEW REQUIRED', 'REVIEW_REQUIRED', 'MINOR MISMATCH'])
+                )
+            ), 1), else_=0)).label("amberCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.final_result).in_(['STOPCHECK', 'HOLD', 'CLIENT HOLD', 'STOPPED', 'STOP']),
+                    func.upper(models.Case.status).in_(['STOPCHECK', 'HOLD', 'CLIENT HOLD', 'STOPPED', 'STOP'])
+                )
+            ), 1), else_=0)).label("stopCases"),
+            
+            func.sum(case(((
+                or_(
+                    func.upper(models.Case.status).in_(['INSUFFICIENT', 'INSUFFICIENCY']),
+                    func.upper(models.Case.final_result).in_(['INSUFFICIENT', 'INSUFFICIENCY']),
+                    has_active_insuff
+                )
+            ), 1), else_=0)).label("insufficiencyCases"),
+            
+            func.sum(case(((
+                and_(
+                    func.upper(models.Case.status).in_(['WIP', 'ASSIGNED', 'INITIATED', 'VERIFICATION', 'QC_PENDING', 'CLIENT_REVIEW', 'IN_PROGRESS', 'PENDING']),
+                    func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CANCELLED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY'])
+                )
+            ), 1), else_=0)).label("inProgressCases")
+        ).select_from(models.Case).where(*filters)
+
+        case_stats_res = await db.execute(case_stats_stmt)
+        case_row = case_stats_res.one()
+
+        return {
+            "totalCandidates": total_candidates,
+            "positiveChecks": int(case_row.positiveCases or 0),
+            "negativeChecks": int(case_row.negativeCases or 0),
+            "amberChecks": int(case_row.amberCases or 0),
+            "stopChecks": int(case_row.stopCases or 0),
+            "insufficiencyChecks": int(case_row.insufficiencyCases or 0),
+            "inProgressChecks": int(case_row.inProgressCases or 0)
+        }
+
+    except Exception as e:
+        logger.error(f"customer-summary error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load customer summary stats")
 
 
 # ─── Dedicated Verifier Workspace Dashboard ────────────────────────────────────
@@ -2464,4 +2812,706 @@ async def get_daily_operations(
     except Exception as e:
         logger.error(f"Error in daily-operations endpoint: {str(e)}", exc_info=True)
         raise HTTPException(500, detail=str(e))
+
+
+# ─── PREMIUM CUSTOMER MIS EXPORT SYSTEM ────────────────────────────────────────
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from fastapi.responses import StreamingResponse
+import io
+import csv
+
+# ReportLab imports for branded enterprise PDF generation
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, KeepTogether
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfgen import canvas
+
+class NumberedCanvas(canvas.Canvas):
+    """
+    Two-pass canvas to dynamically compute and render professional 'Page X of Y' page numbers
+    along with branded enterprise running headers and footers (polygon accent lines).
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_decorations(num_pages)
+            super().showPage()
+        super().save()
+
+    def draw_page_decorations(self, page_count):
+        self.saveState()
+        
+        # 1. Header (Branded Running Header)
+        self.setFont("Helvetica-Bold", 8)
+        self.setFillColor(colors.HexColor("#1E1B4B")) # Premium Deep Indigo
+        self.drawString(36, 560, "CHECKLINE BACKGROUND VERIFICATION SERVICES")
+        
+        self.setFont("Helvetica", 8)
+        self.setFillColor(colors.HexColor("#64748B"))
+        self.drawRightString(806, 560, "CONFIDENTIAL CUSTOMER OPERATIONAL MIS")
+        
+        # Header border lines (branded accent polygons / lines)
+        self.setStrokeColor(colors.HexColor("#7C3AED")) # Indigo accent
+        self.setLineWidth(1)
+        self.line(36, 552, 806, 552)
+        self.setStrokeColor(colors.HexColor("#E2E8F0"))
+        self.setLineWidth(0.5)
+        self.line(36, 550, 806, 550)
+        
+        # 2. Footer (Page numbers + Date + Privacy)
+        self.setStrokeColor(colors.HexColor("#E2E8F0"))
+        self.setLineWidth(0.5)
+        self.line(36, 45, 806, 45)
+        
+        self.setFont("Helvetica", 8)
+        self.setFillColor(colors.HexColor("#64748B"))
+        self.drawString(36, 30, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        self.drawCentredString(421, 30, "CONFIDENTIAL  -  RESTRICTED CLIENT CIRCULATION ONLY")
+        self.drawRightString(806, 30, f"Page {self._pageNumber} of {page_count}")
+        
+        self.restoreState()
+
+
+@router.post("/customer/mis/export")
+async def export_customer_mis_data(
+    payload: dict,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Enterprise-grade Customer MIS Export route supporting Candidate MIS, Checkwise MIS,
+    Status Summary, Finalized Reports, and Insufficiency Tracker in Excel, CSV, and PDF formats.
+    Robust customer-level role scoping is enforced automatically.
+    """
+    if not current_user.customer_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. User is not associated with any customer account."
+        )
+
+    customer_id = current_user.customer_id
+    export_type = payload.get("exportType", "Candidate MIS")
+    fmt = payload.get("format", "xlsx").lower()
+    filters = payload.get("filters", {}) or {}
+
+    try:
+        # Fetch customer details
+        cust_q = select(models.Customer).where(models.Customer.id == customer_id)
+        cust_res = await db.execute(cust_q)
+        customer = cust_res.scalar_one_or_none()
+        customer_name = customer.name if customer else "Customer"
+
+        # Build secure scoped query
+        stmt = (
+            select(models.Case)
+            .where(models.Case.customer_id == customer_id)
+            .options(
+                joinedload(models.Case.candidate),
+                joinedload(models.Case.customer),
+                selectinload(models.Case.checks),
+                selectinload(models.Case.insufficiencies),
+                selectinload(models.Case.verification_logs)
+            )
+        )
+
+        # ─── APPLY DASHBOARD FILTERS ───
+        # 1. Date Range
+        date_range = filters.get("dateRange")
+        if date_range:
+            from_str = date_range.get("from")
+            to_str = date_range.get("to")
+            if from_str:
+                try:
+                    stmt = stmt.filter(models.Case.received_date >= datetime.strptime(from_str, "%Y-%m-%d"))
+                except: pass
+            if to_str:
+                try:
+                    stmt = stmt.filter(models.Case.received_date <= datetime.strptime(to_str, "%Y-%m-%d").replace(hour=23, minute=59, second=59))
+                except: pass
+
+        # 2. Candidate Search
+        search = filters.get("searchTerm") or filters.get("search")
+        if search:
+            stmt = stmt.join(models.Candidate).filter(or_(
+                models.Case.case_ref_no.ilike(f"%{search}%"),
+                models.Candidate.name.ilike(f"%{search}%"),
+                models.Candidate.client_emp_code.ilike(f"%{search}%")
+            ))
+
+        # 3. Status Filter
+        status = filters.get("status")
+        if status and status.upper() != "ALL":
+            stmt = stmt.filter(models.Case.status == status.upper())
+
+        # 4. Batch Filter
+        batch = filters.get("batch")
+        if batch and batch.upper() != "ALL":
+            stmt = stmt.filter(or_(models.Case.batch_id == batch, models.Case.batch_id.ilike(f"%{batch}%")))
+
+        # Order by received date
+        stmt = stmt.order_by(models.Case.received_date.desc())
+        
+        # Execute query
+        res = await db.execute(stmt)
+        cases = res.unique().scalars().all()
+
+        # Filter-aware export types
+        if export_type == "Finalized Reports":
+            cases = [c for c in cases if c.status in ["FINALIZED", "COMPLETED"]]
+        elif export_type == "Insufficiency Tracker":
+            cases = [c for c in cases if c.status in ["INSUFFICIENT", "INSUFFICIENCY"]]
+
+        # ─── HELPER FOR STATUS NORMALIZATION ───
+        def normalize_status(val):
+            if not val:
+                return ""
+            val_up = str(val).strip().upper()
+            mapping = {
+                "CLEAR": "POSITIVE",
+                "CLEAR_VERIFIED": "POSITIVE",
+                "CLEAR/VERIFIED": "POSITIVE",
+                "GREEN": "POSITIVE",
+                "RED": "NEGATIVE",
+                "DISCREPANCY": "NEGATIVE",
+                "MINOR MISMATCH": "AMBER",
+                "REVIEW REQUIRED": "AMBER",
+                "REVIEW_REQUIRED": "AMBER",
+                "HOLD": "STOPCHECK",
+                "CLIENT HOLD": "STOPCHECK",
+                "STOPPED": "STOPCHECK",
+                "STOP": "STOPCHECK",
+                "INSUFF": "INSUFFICIENT",
+                "INSUFFICIENT": "INSUFFICIENT",
+                "INSUFFICIENCY": "INSUFFICIENT"
+            }
+            return mapping.get(val_up, val_up)
+
+        # ─── HELPER FOR DYNAMIC VALUE EXTRACTION ───
+        def get_check_value(chk):
+            if not chk.data:
+                return ""
+            t = str(chk.check_type or "").lower()
+            d = chk.data
+            if isinstance(d, list) and len(d) > 0:
+                d = d[0]
+            if not isinstance(d, dict):
+                return str(chk.data)
+
+            if "address" in t or "resident" in t:
+                return d.get("address") or d.get("permanent_address") or d.get("given_address") or d.get("city") or ""
+            if "employment" in t:
+                return d.get("company_name") or d.get("company") or d.get("employer_name") or d.get("employer") or ""
+            if "education" in t or "academic" in t:
+                return d.get("course") or d.get("degree") or d.get("qualification") or ""
+            if "identity" in t or "id" in t or "pan" in t or "aadhar" in t or "passport" in t:
+                return d.get("id_number") or d.get("pan_no") or d.get("aadhar_no") or d.get("passport_no") or ""
+            if "reference" in t:
+                return d.get("ref_name") or d.get("reference_name") or ""
+            if "drug" in t:
+                return d.get("test_type") or d.get("panel_type") or d.get("panel") or d.get("result") or ""
+            if "credit" in t or "cibil" in t:
+                return d.get("score") or d.get("credit_score") or ""
+            if "global" in t or "database" in t:
+                return d.get("database_name") or d.get("registry") or d.get("result") or ""
+            if "social" in t:
+                return d.get("platform") or d.get("profile_url") or ""
+            return str(chk.data)
+
+        # ─────────────────────────────────────────────────────────────
+        # A. EXCEL FORMAT (.xlsx)
+        # ─────────────────────────────────────────────────────────────
+        if fmt == "xlsx":
+            wb = openpyxl.Workbook()
+            # Remove default sheet
+            wb.remove(wb.active)
+
+            # Pre-group and sort candidates & checks
+            candidate_grouped_checks = []
+            max_counts = {
+                "address": 0, "employment": 0, "education": 0, "reference": 0,
+                "drug": 0, "credit": 0, "global": 0, "social": 0, "other": 0
+            }
+            max_identity_counts = {}
+
+            for c in cases:
+                groups = {
+                    "address": [], "employment": [], "education": [], "identity": {},
+                    "reference": [], "drug": [], "credit": [], "global": [], "social": [], "other": []
+                }
+                for chk in (c.checks or []):
+                    t = str(chk.check_type or "").lower()
+                    val = get_check_value(chk)
+                    chk_info = {"chk": chk, "val": val, "status": normalize_status(chk.status or "WIP")}
+                    
+                    if "address" in t or "resident" in t:
+                        groups["address"].append(chk_info)
+                    elif "employment" in t:
+                        groups["employment"].append(chk_info)
+                    elif "education" in t or "academic" in t:
+                        groups["education"].append(chk_info)
+                    elif "reference" in t:
+                        groups["reference"].append(chk_info)
+                    elif "drug" in t:
+                        groups["drug"].append(chk_info)
+                    elif "credit" in t or "cibil" in t:
+                        groups["credit"].append(chk_info)
+                    elif "global" in t or "database" in t:
+                        groups["global"].append(chk_info)
+                    elif "social" in t:
+                        groups["social"].append(chk_info)
+                    elif "identity" in t or "id" in t or "pan" in t or "aadhar" in t or "passport" in t:
+                        doc_type = "Identity"
+                        if "PAN" in t.upper(): doc_type = "PAN"
+                        elif "AADHAAR" in t.upper() or "AADHAR" in t.upper(): doc_type = "AADHAAR"
+                        elif "PASSPORT" in t.upper(): doc_type = "PASSPORT"
+                        elif "DL" in t.upper() or "DRIVING" in t.upper(): doc_type = "DL"
+                        
+                        if doc_type not in groups["identity"]:
+                            groups["identity"][doc_type] = []
+                        groups["identity"][doc_type].append(chk_info)
+                    else:
+                        groups["other"].append(chk_info)
+
+                candidate_grouped_checks.append((c, groups))
+                
+                # Update maximum dynamic check column counts
+                for btype in max_counts.keys():
+                    max_counts[btype] = max(max_counts[btype], len(groups[btype]))
+                for doc_type, chks in groups["identity"].items():
+                    max_identity_counts[doc_type] = max(max_identity_counts.get(doc_type, 0), len(chks))
+
+            # Build list of dynamic column headers
+            dynamic_cols = []
+            
+            # 1. Address
+            for i in range(max_counts["address"]):
+                dynamic_cols.append({"type": "address", "title": f"Address {i + 1}", "sub": ["Value", "Status"], "index": i})
+            # 2. Employment
+            for i in range(max_counts["employment"]):
+                dynamic_cols.append({"type": "employment", "title": f"Employment {i + 1}", "sub": ["Company Name", "Status"], "index": i})
+            # 3. Education
+            for i in range(max_counts["education"]):
+                dynamic_cols.append({"type": "education", "title": f"Education {i + 1}", "sub": ["Qualification", "Status"], "index": i})
+            # 4. Identity
+            for doc_type in sorted(list(max_identity_counts.keys())):
+                for i in range(max_identity_counts[doc_type]):
+                    dynamic_cols.append({"type": "identity", "doc_type": doc_type, "title": f"{doc_type} {i + 1}" if max_identity_counts[doc_type] > 1 else doc_type, "sub": [doc_type, "Status"], "index": i})
+            # 5. Reference
+            for i in range(max_counts["reference"]):
+                dynamic_cols.append({"type": "reference", "title": f"Reference {i + 1}", "sub": ["Reference Name", "Status"], "index": i})
+            # 6. Drug Test
+            for i in range(max_counts["drug"]):
+                dynamic_cols.append({"type": "drug", "title": f"Drug Test {i + 1}", "sub": ["Drug Test Result", "Status"], "index": i})
+            # 7. Credit/CIBIL
+            for i in range(max_counts["credit"]):
+                dynamic_cols.append({"type": "credit", "title": f"Credit {i + 1}", "sub": ["Credit Score", "Status"], "index": i})
+            # 8. Global DB
+            for i in range(max_counts["global"]):
+                dynamic_cols.append({"type": "global", "title": f"Global DB {i + 1}", "sub": ["Database Result", "Status"], "index": i})
+            # 9. Social Media
+            for i in range(max_counts["social"]):
+                dynamic_cols.append({"type": "social", "title": f"Social Media {i + 1}", "sub": ["Social Media Result", "Status"], "index": i})
+            # 10. Other
+            for i in range(max_counts["other"]):
+                dynamic_cols.append({"type": "other", "title": f"Other {i + 1}", "sub": ["Result", "Status"], "index": i})
+
+            # Styled Header Theme
+            header_fill = PatternFill(start_color="1E1B4B", end_color="1E1B4B", fill_type="solid") # Deep Indigo
+            header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+            sub_fill = PatternFill(start_color="312E81", end_color="312E81", fill_type="solid") # Lighter Deep Indigo
+            sub_font = Font(name="Segoe UI", size=10, color="FFFFFF")
+            
+            thin_border = Border(
+                left=Side(style='thin', color='E2E8F0'),
+                right=Side(style='thin', color='E2E8F0'),
+                top=Side(style='thin', color='E2E8F0'),
+                bottom=Side(style='thin', color='E2E8F0')
+            )
+            
+            # ─────────────────────────────────────────────────────────
+            # SHEET 1: Candidate MIS
+            # ─────────────────────────────────────────────────────────
+            ws1 = wb.create_sheet(title="Candidate MIS")
+            ws1.views.sheetView[0].showGridLines = True
+            
+            fixed_headers = [
+                "S.No", "Case Ref", "Employee ID", "Candidate Name", 
+                "Client Name", "Batch", "Received Date", "Completed Date", 
+                "Overall Status", "SLA Status"
+            ]
+
+            h1 = list(fixed_headers)
+            for col in dynamic_cols:
+                h1.append(col["title"])
+                h1.append("") # Companion cell for horizontal merge
+
+            h2 = [""] * len(fixed_headers)
+            for col in dynamic_cols:
+                h2.extend(col["sub"])
+
+            # Write rows 1 & 2 headers
+            for col_idx, val in enumerate(h1, start=1):
+                cell = ws1.cell(row=1, column=col_idx, value=val)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = thin_border
+                
+            for col_idx, val in enumerate(h2, start=1):
+                cell = ws1.cell(row=2, column=col_idx, value=val)
+                if val:
+                    cell.font = sub_font
+                    cell.fill = sub_fill
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = thin_border
+
+            # Vertical merges for fixed columns
+            for col_idx in range(1, len(fixed_headers) + 1):
+                ws1.merge_cells(start_row=1, start_column=col_idx, end_row=2, end_column=col_idx)
+                
+            # Horizontal merges for dynamic columns
+            curr_col = len(fixed_headers) + 1
+            for col in dynamic_cols:
+                ws1.merge_cells(start_row=1, start_column=curr_col, end_row=1, end_column=curr_col + 1)
+                curr_col += 2
+
+            # Write Data
+            row_idx = 3
+            for idx, (c, groups) in enumerate(candidate_grouped_checks, start=1):
+                # SLA calculation
+                age_days = (datetime.utcnow() - c.received_date.replace(tzinfo=None)).days if c.received_date else 0
+                sla_days_left = (c.tat_days or 10) - age_days
+                
+                if c.status in ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]:
+                    sla_status = "Completed"
+                elif sla_days_left < 0:
+                    sla_status = "Breached"
+                elif sla_days_left <= 3:
+                    sla_status = "Risk"
+                else:
+                    sla_status = "Healthy"
+
+                ws1.cell(row=row_idx, column=1, value=idx)
+                ws1.cell(row=row_idx, column=2, value=c.case_ref_no or "")
+                ws1.cell(row=row_idx, column=3, value=c.candidate.client_emp_code if c.candidate else "")
+                ws1.cell(row=row_idx, column=4, value=c.candidate.name if c.candidate else "")
+                ws1.cell(row=row_idx, column=5, value=c.customer.name if c.customer else "")
+                ws1.cell(row=row_idx, column=6, value=c.batch_id or "Manual Entry")
+                ws1.cell(row=row_idx, column=7, value=c.received_date.strftime("%Y-%m-%d") if c.received_date else "")
+                ws1.cell(row=row_idx, column=8, value=c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "")
+                
+                final_res = normalize_status(c.final_result or c.final_report_status or c.status or "WIP")
+                if c.status in ["FINALIZED", "COMPLETED"] and (c.final_result or c.final_report_status):
+                    ws1.cell(row=row_idx, column=9, value=normalize_status(c.final_result or c.final_report_status))
+                else:
+                    ws1.cell(row=row_idx, column=9, value=normalize_status(c.status or "WIP"))
+                    
+                ws1.cell(row=row_idx, column=10, value=sla_status)
+
+                # Write dynamic values
+                curr_dcol = len(fixed_headers) + 1
+                for col in dynamic_cols:
+                    chk_list = []
+                    if col["type"] == "identity":
+                        chk_list = groups["identity"].get(col["doc_type"], [])
+                    else:
+                        chk_list = groups.get(col["type"], [])
+                        
+                    if col["index"] < len(chk_list):
+                        chk_info = chk_list[col["index"]]
+                        ws1.cell(row=row_idx, column=curr_dcol, value=chk_info["val"])
+                        ws1.cell(row=row_idx, column=curr_dcol + 1, value=chk_info["status"])
+                    else:
+                        ws1.cell(row=row_idx, column=curr_dcol, value="")
+                        ws1.cell(row=row_idx, column=curr_dcol + 1, value="")
+                    curr_dcol += 2
+
+                # Borders & styling
+                for c_col in range(1, len(h1) + 1):
+                    dcell = ws1.cell(row=row_idx, column=c_col)
+                    dcell.border = thin_border
+                    dcell.font = Font(name="Segoe UI", size=10)
+                    if c_col in [1, 2, 3, 7, 8, 9, 10]:
+                        dcell.alignment = Alignment(horizontal="center")
+                        
+                row_idx += 1
+
+            # Auto column width
+            for col in ws1.columns:
+                max_len = max(len(str(cell.value or '')) for cell in col)
+                col_letter = get_column_letter(col[0].column)
+                ws1.column_dimensions[col_letter].width = max(max_len + 3, 11)
+
+            # Freeze Fixed columns + headers (Column K, Row 3)
+            ws1.freeze_panes = "K3"
+
+            # ─────────────────────────────────────────────────────────
+            # SHEET 2: Checkwise MIS
+            # ─────────────────────────────────────────────────────────
+            ws2 = wb.create_sheet(title="Checkwise MIS")
+            ws2.views.sheetView[0].showGridLines = True
+            
+            c_headers = [
+                "Case Ref", "Candidate Name", "Module", "Sub Type", 
+                "Verification Status", "Result", "Verifier", "Completed Date", "Remarks"
+            ]
+            
+            for col_idx, val in enumerate(c_headers, start=1):
+                cell = ws2.cell(row=1, column=col_idx, value=val)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = thin_border
+                
+            r_idx = 2
+            for c, groups in candidate_grouped_checks:
+                for chk in (c.checks or []):
+                    ws2.cell(row=r_idx, column=1, value=c.case_ref_no or "")
+                    ws2.cell(row=r_idx, column=2, value=c.candidate.name if c.candidate else "")
+                    ws2.cell(row=r_idx, column=3, value=str(chk.check_type or "").upper())
+                    ws2.cell(row=r_idx, column=4, value=str(chk.data.get("id_type") or chk.check_type if isinstance(chk.data, dict) else chk.check_type).upper())
+                    ws2.cell(row=r_idx, column=5, value=normalize_status(chk.status or "WIP"))
+                    ws2.cell(row=r_idx, column=6, value=get_check_value(chk))
+                    ws2.cell(row=r_idx, column=7, value="") # Omitted for privacy
+                    ws2.cell(row=r_idx, column=8, value=chk.completed_at.strftime("%Y-%m-%d") if chk.completed_at else "")
+                    ws2.cell(row=r_idx, column=9, value=chk.verifier_remarks or "")
+                    
+                    for c_col in range(1, len(c_headers) + 1):
+                        dcell = ws2.cell(row=r_idx, column=c_col)
+                        dcell.border = thin_border
+                        dcell.font = Font(name="Segoe UI", size=10)
+                        if c_col in [1, 5, 8]:
+                            dcell.alignment = Alignment(horizontal="center")
+                    r_idx += 1
+
+            for col in ws2.columns:
+                max_len = max(len(str(cell.value or '')) for cell in col)
+                col_letter = get_column_letter(col[0].column)
+                ws2.column_dimensions[col_letter].width = max(max_len + 3, 12)
+            ws2.freeze_panes = "A2"
+
+            # ─────────────────────────────────────────────────────────
+            # SHEET 3: Status Summary
+            # ─────────────────────────────────────────────────────────
+            ws3 = wb.create_sheet(title="Status Summary")
+            ws3.views.sheetView[0].showGridLines = True
+            
+            s_headers = [
+                "Metric Title", "Count of Cases/Checks"
+            ]
+            for col_idx, val in enumerate(s_headers, start=1):
+                cell = ws3.cell(row=1, column=col_idx, value=val)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.border = thin_border
+                
+            # Aggregate stats checkwise
+            total_cand = len(cases)
+            pos_checks = sum(1 for c in cases for chk in (c.checks or []) if normalize_status(chk.status) == "POSITIVE")
+            neg_checks = sum(1 for c in cases for chk in (c.checks or []) if normalize_status(chk.status) == "NEGATIVE")
+            amb_checks = sum(1 for c in cases for chk in (c.checks or []) if normalize_status(chk.status) == "AMBER")
+            stop_checks = sum(1 for c in cases for chk in (c.checks or []) if normalize_status(chk.status) == "STOPCHECK")
+            in_prog_checks = sum(1 for c in cases for chk in (c.checks or []) if normalize_status(chk.status) in ["WIP", "VERIFICATION", "QC_PENDING"])
+            insuff_checks = sum(1 for c in cases for chk in (c.checks or []) if normalize_status(chk.status) == "INSUFFICIENT")
+
+            summary_rows = [
+                ("Total Candidates", total_cand),
+                ("Positive Checks", pos_checks),
+                ("Negative Checks", neg_checks),
+                ("Amber Checks", amb_checks),
+                ("Stop Checks", stop_checks),
+                ("In Progress Checks", in_prog_checks),
+                ("Insufficiencies", insuff_checks)
+            ]
+
+            for s_idx, (title, val) in enumerate(summary_rows, start=2):
+                c1 = ws3.cell(row=s_idx, column=1, value=title)
+                c2 = ws3.cell(row=s_idx, column=2, value=val)
+                c1.border = thin_border
+                c2.border = thin_border
+                c1.font = Font(name="Segoe UI", size=10, bold=True)
+                c2.font = Font(name="Segoe UI", size=10)
+                c2.alignment = Alignment(horizontal="right")
+
+            ws3.column_dimensions['A'].width = 25
+            ws3.column_dimensions['B'].width = 25
+
+            # Save Output
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+            
+            filename = f"{customer_name.replace(' ', '_')}_{export_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+            return StreamingResponse(
+                output,
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+                media_type='application/vnd.officedocument.spreadsheetml.sheet'
+            )
+
+        # ─────────────────────────────────────────────────────────────
+        # B. CSV FORMAT (.csv)
+        # ─────────────────────────────────────────────────────────────
+        elif fmt == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            
+            # Default Candidate MIS format in flat CSV
+            writer.writerow([
+                "S.No", "Case Ref", "Employee ID", "Candidate Name", 
+                "Client Name", "Batch", "Received Date", "Completed Date", 
+                "Overall Status"
+            ])
+            
+            for idx, c in enumerate(cases, start=1):
+                writer.writerow([
+                    idx,
+                    c.case_ref_no or "",
+                    c.candidate.client_emp_code if c.candidate else "",
+                    c.candidate.name if c.candidate else "",
+                    c.customer.name if c.customer else "",
+                    c.batch_id or "Manual Entry",
+                    c.received_date.strftime("%Y-%m-%d") if c.received_date else "",
+                    c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "",
+                    normalize_status(c.final_result or c.final_report_status) if c.status in ["FINALIZED", "COMPLETED"] and (c.final_result or c.final_report_status) else normalize_status(c.status or "WIP")
+                ])
+                
+            stream = io.BytesIO(output.getvalue().encode('utf-8'))
+            filename = f"{customer_name.replace(' ', '_')}_{export_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            return StreamingResponse(
+                stream,
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+                media_type='text/csv'
+            )
+
+        # ─────────────────────────────────────────────────────────────
+        # C. PDF FORMAT (.pdf)
+        # ─────────────────────────────────────────────────────────────
+        elif fmt == "pdf":
+            # PDF Generation - Landscaped, professional enterprise layout
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=landscape(A4),
+                leftMargin=36,
+                rightMargin=36,
+                topMargin=54,
+                bottomMargin=54
+            )
+            
+            styles = getSampleStyleSheet()
+            
+            # Custom styled ParagraphStyles
+            title_style = ParagraphStyle(
+                'DocTitle',
+                parent=styles['Heading1'],
+                fontName='Helvetica-Bold',
+                fontSize=20,
+                textColor=colors.HexColor("#1E1B4B"),
+                spaceAfter=6
+            )
+            
+            meta_style = ParagraphStyle(
+                'DocMeta',
+                parent=styles['Normal'],
+                fontName='Helvetica-Bold',
+                fontSize=9,
+                textColor=colors.HexColor("#64748B"),
+                spaceAfter=15
+            )
+
+            cell_header_style = ParagraphStyle(
+                'CellHeader',
+                parent=styles['Normal'],
+                fontName='Helvetica-Bold',
+                fontSize=8,
+                textColor=colors.white,
+                alignment=1
+            )
+            
+            cell_body_style = ParagraphStyle(
+                'CellBody',
+                parent=styles['Normal'],
+                fontName='Helvetica',
+                fontSize=8,
+                textColor=colors.HexColor("#1F2937"),
+                alignment=1
+            )
+
+            elements = []
+            
+            # Title block
+            elements.append(Paragraph(f"{customer_name.upper()} OPERATIONAL MIS", title_style))
+            elements.append(Paragraph(f"EXPORT TYPE: {export_type}  |  TOTAL RECORDS: {len(cases)}  |  DATE GENERATED: {datetime.now().strftime('%Y-%m-%d %H:%M')}", meta_style))
+            elements.append(Spacer(1, 10))
+            
+            # Table columns & widths
+            headers = [
+                Paragraph("S.No", cell_header_style),
+                Paragraph("Case Ref", cell_header_style),
+                Paragraph("Employee ID", cell_header_style),
+                Paragraph("Candidate Name", cell_header_style),
+                Paragraph("Batch No", cell_header_style),
+                Paragraph("Received Date", cell_header_style),
+                Paragraph("Completed Date", cell_header_style),
+                Paragraph("Overall Status", cell_header_style)
+            ]
+            
+            table_data = [headers]
+            for idx, c in enumerate(cases, start=1):
+                row = [
+                    Paragraph(str(idx), cell_body_style),
+                    Paragraph(c.case_ref_no or "", cell_body_style),
+                    Paragraph(c.candidate.client_emp_code if c.candidate else "", cell_body_style),
+                    Paragraph(c.candidate.name if c.candidate else "", cell_body_style),
+                    Paragraph(c.batch_id or "Manual Entry", cell_body_style),
+                    Paragraph(c.received_date.strftime("%Y-%m-%d") if c.received_date else "", cell_body_style),
+                    Paragraph(c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "", cell_body_style),
+                    Paragraph(normalize_status(c.final_result or c.final_report_status) if c.status in ["FINALIZED", "COMPLETED"] and (c.final_result or c.final_report_status) else normalize_status(c.status or "WIP"), cell_body_style)
+                ]
+                table_data.append(row)
+
+            # A4 Landscape printable width is 842 - 72 = 770 pt
+            col_widths = [30, 90, 80, 150, 110, 80, 80, 150]
+            
+            t = Table(table_data, colWidths=col_widths, repeatRows=1)
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E1B4B")),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('TOPPADDING', (0, 0), (-1, 0), 8),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                ('TOPPADDING', (0, 1), (-1, -1), 6),
+            ]))
+            
+            elements.append(t)
+            
+            # Build Document using NumberedCanvas
+            doc.build(elements, canvasmaker=NumberedCanvas)
+            
+            buffer.seek(0)
+            filename = f"{customer_name.replace(' ', '_')}_{export_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+            return StreamingResponse(
+                buffer,
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+                media_type='application/pdf'
+            )
+
+    except Exception as e:
+        logger.error(f"Error generating customer export: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate MIS export: {str(e)}")
+
 

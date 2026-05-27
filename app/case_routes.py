@@ -53,6 +53,56 @@ def validate_case_completion(case_obj: models.Case):
         )
     return True
 
+def derive_case_final_result_preloaded(case):
+    """Derive business verification outcome from preloaded checks when case.final_result is NULL.
+    NEVER returns workflow status like FINALIZED/COMPLETED as a business result."""
+    stored = (case.final_result or case.final_report_status or "").upper().strip()
+    
+    # If stored result is a real business outcome, use it
+    business_outcomes = ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED', 'NEGATIVE', 'RED',
+                         'AMBER', 'DISCREPANCY', 'STOPCHECK', 'STOP CHECK', 'CLIENT HOLD',
+                         'HOLD', 'STOP', 'INTERIM', 'PARTIAL COMPLETION', 'INSUFFICIENT', 'INSUFFICIENCY']
+    if stored in business_outcomes:
+        return stored
+    
+    # Stored value is empty or a workflow status (FINALIZED/COMPLETED) — derive from checks
+    workflow_status = (case.status or "").upper().strip()
+    is_finalized = workflow_status in ['FINALIZED', 'COMPLETED']
+    
+    if not is_finalized:
+        return None  # Case not yet finalized, genuinely WIP
+    
+    checks = case.checks
+    if not checks:
+        return None
+    
+    check_results = [(chk.final_result or chk.status or "").upper().strip() for chk in checks]
+    
+    # Business rules: any NEGATIVE → NEGATIVE, any AMBER → AMBER, all POSITIVE → POSITIVE
+    for r in check_results:
+        if r in ['NEGATIVE', 'RED']:
+            return 'NEGATIVE'
+    for r in check_results:
+        if r in ['STOPCHECK', 'STOP CHECK', 'CLIENT HOLD']:
+            return 'STOP CHECK'
+    for r in check_results:
+        if r in ['INSUFFICIENT', 'INSUFFICIENCY']:
+            return 'INSUFFICIENT'
+    for r in check_results:
+        if r in ['AMBER', 'DISCREPANCY']:
+            return 'AMBER'
+    for r in check_results:
+        if r in ['INTERIM', 'PARTIAL COMPLETION']:
+            return 'INTERIM'
+    
+    # All checks positive or clear
+    positive_set = ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED', 'QC_VERIFIED', 'VERIFIED']
+    if all(r in positive_set for r in check_results if r):
+        return 'POSITIVE'
+    
+    return None
+
+
 @router.get("/insufficient")
 async def get_insufficient_cases(
     resolved: bool = False,
@@ -1559,10 +1609,14 @@ async def get_strategic_mis(
     customer_name: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Returns detailed candidate list with check-wise status for Strategic MIS."""
+    """Returns detailed candidate list with check-wise status for Strategic MIS.
+    Uses the SAME filter logic as /customers/candidates-list so export count
+    always matches the dashboard visible count."""
     try:
         stmt = select(models.Case).options(
             selectinload(models.Case.candidate),
@@ -1572,17 +1626,23 @@ async def get_strategic_mis(
             selectinload(models.Case.assigned_user)
         )
 
-        # RBAC Isolation
+        # RBAC Isolation — match the same scope as /candidates-list (no status exclusions)
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         if "CUSTOMER" in user_role or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
-            stmt = stmt.filter(
-                models.Case.customer_id == current_user.customer_id,
-                ~models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
-            )
+            stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
         elif customer_id:
             stmt = stmt.filter(models.Case.customer_id == customer_id)
         elif customer_name:
             stmt = stmt.join(models.Customer).filter(models.Customer.name == customer_name)
+
+        # Search filter — same as /candidates-list
+        if search:
+            stmt = stmt.join(models.Candidate, models.Case.candidate_id == models.Candidate.id, isouter=True).filter(
+                or_(
+                    models.Candidate.name.ilike(f"%{search}%"),
+                    models.Case.case_ref_no.ilike(f"%{search}%")
+                )
+            )
 
         if from_date:
             stmt = stmt.filter(models.Case.received_date >= datetime.strptime(from_date, "%Y-%m-%d"))
@@ -1608,6 +1668,8 @@ async def get_strategic_mis(
                 elif s in ["RED", "NEGATIVE"]: status_label = "Negative"
                 elif s == "AMBER": status_label = "Amber"
                 elif s == "INTERIM": status_label = "Interim"
+                elif s in ["STOPCHECK", "STOP", "STOP CHECK"]: status_label = "Stop Check"
+                elif s in ["INSUFFICIENT", "INSUFFICIENCY", "INSUFF"]: status_label = "Insufficient"
                 
                 # Normalize technical type to report key
                 tech_type = chk.check_type.lower()
@@ -1634,6 +1696,7 @@ async def get_strategic_mis(
                     "raw_status": chk.status,
                     "data": chk.data or {},
                     "remarks": chk.verifier_remarks or "",
+                    "final_result": chk.final_result or "",
                     "assigned_verifier_name": chk.assigned_verifier.full_name if chk.assigned_verifier else "Unallocated",
                     "updated_at": chk.verified_date.strftime("%Y-%m-%d %H:%M") if chk.verified_date else None,
                     "verified_date": chk.verified_date.strftime("%Y-%m-%d") if chk.verified_date else None,
@@ -1649,7 +1712,8 @@ async def get_strategic_mis(
                     ]
                 })
 
-
+            # Derive proper business final result (NOT workflow status like FINALIZED/COMPLETED)
+            final_result = derive_case_final_result_preloaded(c)
 
             report.append({
                 "id": c.id,
@@ -1659,16 +1723,41 @@ async def get_strategic_mis(
                 "received_date": c.received_date.strftime("%Y-%m-%d") if c.received_date else "N/A",
                 "completed_date": c.completed_date.strftime("%Y-%m-%d") if c.completed_date else "N/A",
                 "customer_name": c.customer.name if c.customer else "N/A",
-                "status": c.status,
+                "status": str(c.status.value if hasattr(c.status, 'value') else c.status),
+                "final_result": final_result or "WIP",
                 "assigned_to_name": c.assigned_user.full_name if c.assigned_user else "Unallocated",
                 "tat_days": c.tat_days or 10,
                 "checks": check_map,
                 "detailed_checks": detailed_checks
             })
+
+        # Apply Python-side status filter after deriving final_result — same as /candidates-list
+        if status and status.upper() not in ('ALL', ''):
+            filter_upper = status.upper().strip()
+            def outcome_matches(r):
+                val = (r.get('final_result') or '').upper().strip()
+                if filter_upper == 'POSITIVE':
+                    return val in ['POSITIVE', 'CLEAR', 'GREEN', 'CLEAR/VERIFIED']
+                if filter_upper == 'NEGATIVE':
+                    return val in ['NEGATIVE', 'RED']
+                if filter_upper == 'AMBER':
+                    return val in ['AMBER', 'DISCREPANCY']
+                if filter_upper in ['IN PROGRESS (WIP)', 'INPROGRESS', 'IN PROGRESS', 'WIP']:
+                    return not val or val == 'WIP'
+                if filter_upper in ['STOP CHECK', 'STOPCHECK']:
+                    return val in ['STOPCHECK', 'STOP CHECK', 'CLIENT HOLD']
+                if filter_upper == 'INTERIM':
+                    return val in ['INTERIM', 'PARTIAL COMPLETION']
+                if filter_upper == 'INSUFFICIENCY':
+                    return val in ['INSUFFICIENT', 'INSUFFICIENCY']
+                return False
+            report = [r for r in report if outcome_matches(r)]
+
         return report
     except Exception as e:
         logger.error(f"Error generating strategic MIS: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/strategic-mis/{case_id}")
 async def get_case_strategic_details(
@@ -2411,6 +2500,11 @@ async def read_cases(
     cases_read = []
     for case in cases_models:
         case_data = schemas.CaseRead.model_validate(case)
+        # Populate verifier name for each check (frontend expects this field)
+        for idx, chk in enumerate(case.checks):
+            verifier_name = chk.assigned_verifier.full_name if chk.assigned_verifier else "Unallocated"
+            case_data.checks[idx].assigned_verifier_name = verifier_name
+        case_data.final_result = derive_case_final_result_preloaded(case)
         if case.candidate: case_data.candidate_name = case.candidate.name
         if case.customer: case_data.customer_name = case.customer.name
         if case.batch:
@@ -2601,6 +2695,7 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
 
     # Convert to Pydantic and populate metadata
     case_data = schemas.CaseRead.model_validate(db_case)
+    case_data.final_result = derive_case_final_result_preloaded(db_case)
     
     # Populate metadata
     if db_case.candidate: case_data.candidate_name = db_case.candidate.name
