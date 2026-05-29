@@ -5,9 +5,8 @@ from . import (
     user_routes, candidate_routes, batch_routes, case_routes, 
     verification_routes, stats_routes, role_routes, media_routes,
     notification_routes, ai_routes, billing_routes, client_doc_routes,
-    public_routes
+    public_routes, bulk_invite_routes
 )
-
 
 from .database import engine, Base, get_async_db, async_engine
 from sqlalchemy import text, select
@@ -73,6 +72,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
+        "http://localhost:5174",
         "http://127.0.0.1:5173",
         "http://[::1]:5173",
         "http://localhost:3000",
@@ -123,6 +123,7 @@ api_v1.include_router(ai_routes.router)
 api_v1.include_router(billing_routes.router)
 api_v1.include_router(client_doc_routes.router)
 api_v1.include_router(public_routes.router)
+api_v1.include_router(bulk_invite_routes.router)
 
 # Alias routes for Customer MIS Export to ensure all path variations resolve perfectly
 from .stats_routes import export_customer_mis_data

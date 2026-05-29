@@ -134,7 +134,9 @@ async def get_billing_clients(
             "autoGenerateInvoice": False,
             "invoiceGenerationDay": 30,
             "invoicePrefix": "INV",
-            "rateCardId": "STANDARD"
+            "rateCardId": "STANDARD",
+            "stateName": "",
+            "stateCode": ""
         }
         
         cfg = client.billing_config or {}
@@ -496,6 +498,8 @@ async def get_invoice_details(
         "client_name": inv.client.name if inv.client else "Unknown Client",
         "client_gst": inv.client.gst_number if inv.client else None,
         "client_address": inv.client.address if inv.client else None,
+        "client_state": inv.client.billing_config.get("stateName") if (inv.client and inv.client.billing_config) else None,
+        "client_state_code": inv.client.billing_config.get("stateCode") if (inv.client and inv.client.billing_config) else None,
         "billing_cycle": inv.billing_cycle,
         "billing_period_from": inv.billing_period_from.isoformat() if inv.billing_period_from else None,
         "billing_period_to": inv.billing_period_to.isoformat() if inv.billing_period_to else None,

@@ -118,7 +118,9 @@ async def get_insufficient_cases(
         .options(
             joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
             joinedload(models.Insufficiency.case).joinedload(models.Case.customer),
-            joinedload(models.Insufficiency.check)
+            joinedload(models.Insufficiency.case).joinedload(models.Case.assigned_user),
+            joinedload(models.Insufficiency.check),
+            joinedload(models.Insufficiency.user)
         )
         .filter(models.Insufficiency.is_resolved == resolved)
         .order_by(models.Insufficiency.created_at.desc())
@@ -151,6 +153,8 @@ async def get_insufficient_cases(
             "insufficiency_id": i.id,
             "case_ref_no": i.case.case_ref_no if i.case else "N/A",
             "candidate_name": i.case.candidate.name if i.case and i.case.candidate else "N/A",
+            "candidate_email": i.case.candidate.email if i.case and i.case.candidate else "N/A",
+            "candidate_phone": i.case.candidate.phone if i.case and i.case.candidate else "N/A",
             "customer_name": i.case.customer.name if i.case and i.case.customer else "N/A",
             "check_id": i.check_id,
             "check_name": i.check.check_type if i.check else "General",
@@ -159,7 +163,10 @@ async def get_insufficient_cases(
             "status": i.status,
             "documents": i.documents or [],
             "is_resolved": i.is_resolved,
-            "resolved_at": i.updated_at.strftime("%Y-%m-%d %H:%M") if (i.is_resolved and i.updated_at) else None
+            "resolved_at": i.updated_at.strftime("%Y-%m-%d %H:%M") if (i.is_resolved and i.updated_at) else None,
+            "tat_days": i.case.tat_days if i.case else 0,
+            "assigned_to_name": i.case.assigned_user.full_name if i.case and i.case.assigned_user else "Unassigned",
+            "raised_by_name": i.user.full_name if i.user else "Verifier"
         })
         seen_check_ids.add((i.case_id, i.check_id))
 
@@ -173,8 +180,10 @@ async def get_insufficient_cases(
     ).options(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
+        joinedload(models.Case.assigned_user),
         selectinload(models.Case.insufficiency_logs).options(
-            joinedload(models.InsufficiencyLog.check)
+            joinedload(models.InsufficiencyLog.check),
+            joinedload(models.InsufficiencyLog.user)
         )
     )
     
@@ -211,13 +220,18 @@ async def get_insufficient_cases(
                 "id": c.id,
                 "case_ref_no": c.case_ref_no,
                 "candidate_name": c.candidate.name if c.candidate else "N/A",
+                "candidate_email": c.candidate.email if c.candidate else "N/A",
+                "candidate_phone": c.candidate.phone if c.candidate else "N/A",
                 "customer_name": c.customer.name if c.customer else "N/A",
                 "check_id": check_id,
                 "check_name": last_log.check.check_type if last_log and last_log.check else "General",
                 "marked_at": last_log.marked_at.strftime("%Y-%m-%d %H:%M") if last_log else (c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A"),
                 "remarks": last_log.notes if last_log else "Legacy insufficiency",
                 "status": "INSUFFICIENT",
-                "is_resolved": False
+                "is_resolved": False,
+                "tat_days": c.tat_days,
+                "assigned_to_name": c.assigned_user.full_name if c.assigned_user else "Unassigned",
+                "raised_by_name": last_log.user.full_name if (last_log and last_log.user) else "Verifier"
             })
             seen_check_ids.add((c.id, check_id))
             
@@ -407,7 +421,7 @@ async def get_candidate_invitations(
             "email": c.candidate.email if c.candidate else "N/A",
             "phone": c.candidate.phone if c.candidate else "N/A",
             "emp_id": c.candidate.client_emp_code if c.candidate else "N/A",
-            "status": c.status,
+            "status": "DOCUMENTS_SUBMITTED" if c.submitted_at else ("LINK_SHARED" if c.link_shared_at else "PENDING"),
             "client_name": c.customer.name if c.customer else "N/A",
             "created_at": c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else None,
             "link_shared_at": c.link_shared_at.strftime("%Y-%m-%d %H:%M") if c.link_shared_at else (c.received_date.strftime("%Y-%m-%d %H:%M") if c.status == enums.CaseStatus.LINK_SHARED else None),
@@ -590,7 +604,7 @@ async def get_case_public(case_id: str, db: AsyncSession = Depends(get_read_db))
             "address": case.candidate.address if case.candidate else ""
         },
         "customer_name": case.customer.name if case.customer else "",
-        "status": case.status,
+        "status": "DOCUMENTS_SUBMITTED" if case.submitted_at else ("LINK_SHARED" if case.link_shared_at else "PENDING"),
         "checks": [chk.check_type for chk in case.checks]
     }
 
@@ -4189,3 +4203,224 @@ async def sync_all_case_risks(db: AsyncSession = Depends(get_async_db)):
     """Trigger the predictive risk assessment for all active cases."""
     await risk_utils.update_all_case_risks(db)
     return {"message": "SLA Risk Analysis completed successfully"}
+
+def resolve_check_lifecycle(check: models.VerificationCheck, case: models.Case) -> tuple[str, str]:
+    """
+    Returns (status_label, verifier_name) based on the latest status/logs.
+    """
+    verifier_name = "Unallocated"
+    if check.assigned_verifier:
+        verifier_name = check.assigned_verifier.full_name
+    elif case.assigned_user:
+        verifier_name = case.assigned_user.full_name
+        
+    status_upper = (check.status or "").upper()
+    
+    final_statuses = {"FINALIZED", "COMPLETED", "APPROVED", "POSITIVE", "NEGATIVE", "DISCREPANCY", "GREEN", "RED", "AMBER", "CLEAR_VERIFIED", "CLEAR/VERIFIED", "QC_VERIFIED"}
+    if status_upper in final_statuses:
+        fin_user = check.finalized_user.full_name if check.finalized_user else verifier_name
+        return "Finalized", fin_user
+
+    is_verified = status_upper in ["QC_PENDING", "SUBMITTED_TO_QC"]
+    if not is_verified and check.logs:
+        for log in check.logs:
+            if log.new_status in ["QC_PENDING", "SUBMITTED_TO_QC"] or log.action in ["SUBMIT_TO_QC", "VERIFIER_SUBMITTED"]:
+                is_verified = True
+                break
+    if is_verified:
+        return f"Verified by {verifier_name}", verifier_name
+
+    is_started = status_upper in ["VERIFICATION", "IN_PROGRESS"]
+    if not is_started and check.logs:
+        for log in check.logs:
+            if log.new_status in ["VERIFICATION", "IN_PROGRESS"] or log.action in ["VERIFICATION_STARTED"]:
+                is_started = True
+                break
+    if is_started:
+        return "Verification In Progress", verifier_name
+
+    if verifier_name and verifier_name != "Unallocated":
+        return f"Assigned to {verifier_name}", verifier_name
+
+    return "Awaiting Allocator", "Unallocated"
+
+@router.get("/{case_id}/checks")
+async def get_case_checks_summary(
+    case_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    stmt = select(models.Case).options(
+        selectinload(models.Case.checks).options(
+            selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.VerificationCheck.finalized_user),
+            selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer)
+        ),
+        selectinload(models.Case.assigned_user)
+    ).filter(models.Case.id == case_id)
+    res = await db.execute(stmt)
+    case_obj = res.scalar_one_or_none()
+    if not case_obj:
+        raise HTTPException(404, detail="Case not found")
+
+    checks_summary = []
+    for check in case_obj.checks:
+        display_status, verifier_name = resolve_check_lifecycle(check, case_obj)
+        checks_summary.append({
+            "id": check.id,
+            "check_type": check.check_type,
+            "status": check.status,
+            "display_status": display_status,
+            "verifier_name": verifier_name,
+            "result": check.final_result or check.status,
+            "updated_at": check.verified_date.isoformat() if check.verified_date else (check.finalized_at.isoformat() if check.finalized_at else None)
+        })
+    return checks_summary
+
+@router.get("/{case_id}/check/{check_id}")
+async def get_case_check_details(
+    case_id: str,
+    check_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    stmt = select(models.Case).options(
+        selectinload(models.Case.checks).options(
+            selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.VerificationCheck.finalized_user),
+            selectinload(models.VerificationCheck.documents).selectinload(models.VerificationDocument.uploader),
+            selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer)
+        ),
+        selectinload(models.Case.assigned_user),
+        selectinload(models.Case.candidate)
+    ).filter(models.Case.id == case_id)
+    
+    res = await db.execute(stmt)
+    case_obj = res.scalar_one_or_none()
+    if not case_obj:
+        raise HTTPException(404, detail="Case not found")
+
+    check = next((c for c in case_obj.checks if c.id == check_id), None)
+    if not check:
+        raise HTTPException(404, detail="Check not found in this case")
+
+    display_status, verifier_name = resolve_check_lifecycle(check, case_obj)
+
+    submitted_info = None
+    check_type_lower = (check.check_type or "").lower()
+    key_map = {
+        'education': 'educations',
+        'academic': 'educations',
+        'employment': 'employments',
+        'address': 'addresses',
+        'resident': 'addresses',
+        'identity': 'identities',
+        'reference': 'references',
+        'criminal': 'criminal_records',
+        'court': 'criminal_records',
+        'drugtest': 'drug_tests',
+        'drug test': 'drug_tests',
+        'cibil': 'cibil_checks',
+        'global database': 'global_database_checks',
+        'database': 'global_database_checks'
+    }
+
+    candidate = case_obj.candidate
+    if candidate and candidate.address_details:
+        for k, v in key_map.items():
+            if k in check_type_lower:
+                submitted_info = candidate.address_details.get(v)
+                break
+
+    findings = check.data or {}
+
+    attachments = []
+    for doc in check.documents:
+        attachments.append({
+            "id": doc.id,
+            "file_name": doc.file_name,
+            "file_url": doc.file_url,
+            "file_type": doc.file_type,
+            "is_primary": doc.is_primary,
+            "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+            "uploaded_by": doc.uploader.full_name if doc.uploader else "System"
+        })
+
+    timeline = []
+    status_upper = (check.status or "").upper()
+    logs = sorted(check.logs, key=lambda l: l.created_at) if check.logs else []
+
+    allocated_log = next((l for l in logs if l.action == "CASE_ALLOCATED" or "allocated" in (l.remarks or "").lower()), None)
+    timeline.append({
+        "stage": "Allocated",
+        "completed": check.assigned_verifier_id is not None or case_obj.assigned_to is not None,
+        "timestamp": allocated_log.created_at.strftime("%d-%b-%Y %I:%M %p") if allocated_log else (case_obj.received_date.strftime("%d-%b-%Y %I:%M %p") if case_obj.received_date else None),
+        "performer": allocated_log.performer.full_name if (allocated_log and allocated_log.performer) else "System",
+        "remarks": allocated_log.remarks if allocated_log else "Check allocated for verification."
+    })
+
+
+
+    verified_log = next((l for l in logs if l.new_status in ["QC_PENDING", "SUBMITTED_TO_QC"] or "submitted" in (l.remarks or "").lower()), None)
+    has_verified = verified_log is not None or status_upper in ["QC_PENDING", "QC_VERIFIED", "FINALIZED", "POSITIVE", "NEGATIVE", "DISCREPANCY", "GREEN", "RED", "AMBER", "CLEAR_VERIFIED"]
+    timeline.append({
+        "stage": "Verified",
+        "completed": has_verified,
+        "timestamp": verified_log.created_at.strftime("%d-%b-%Y %I:%M %p") if verified_log else (check.verified_date.strftime("%d-%b-%Y %I:%M %p") if (has_verified and check.verified_date) else None),
+        "performer": verified_log.performer.full_name if (verified_log and verified_log.performer) else verifier_name,
+        "remarks": verified_log.remarks if verified_log else ("Verification check details submitted." if has_verified else "Pending verifier submission.")
+    })
+
+
+    finalized_log = next((l for l in logs if l.new_status in ["FINALIZED", "POSITIVE", "NEGATIVE", "DISCREPANCY", "GREEN", "RED", "AMBER", "QC_VERIFIED"] or "finalized" in (l.remarks or "").lower()), None)
+    has_finalized = finalized_log is not None or status_upper in ["FINALIZED", "POSITIVE", "NEGATIVE", "DISCREPANCY", "GREEN", "RED", "AMBER", "CLEAR_VERIFIED", "QC_VERIFIED"]
+    timeline.append({
+        "stage": "Finalized",
+        "completed": has_finalized,
+        "timestamp": finalized_log.created_at.strftime("%d-%b-%Y %I:%M %p") if finalized_log else (check.finalized_at.strftime("%d-%b-%Y %I:%M %p") if (has_finalized and check.finalized_at) else (check.verified_date.strftime("%d-%b-%Y %I:%M %p") if (has_finalized and check.verified_date) else None)),
+        "performer": finalized_log.performer.full_name if (finalized_log and finalized_log.performer) else (check.finalized_user.full_name if check.finalized_user else "System"),
+        "remarks": finalized_log.remarks if finalized_log else ("Verification finalized and report generated." if has_finalized else "Pending final report release.")
+    })
+
+    sla_status = "Within SLA"
+    if case_obj.is_in_tat == 0:
+        sla_status = "SLA Breached"
+
+    # Fetch insufficiency details for this check
+    insuff_stmt = select(models.Insufficiency).filter(
+        models.Insufficiency.check_id == check_id,
+        models.Insufficiency.case_id == case_id
+    ).order_by(models.Insufficiency.created_at.desc())
+    insuff_res = await db.execute(insuff_stmt)
+    insuff_list = insuff_res.scalars().all()
+    
+    insufficiency_details = []
+    for ins in insuff_list:
+        insufficiency_details.append({
+            "id": ins.id,
+            "message": ins.message,
+            "status": ins.status,
+            "is_resolved": ins.is_resolved,
+            "created_at": ins.created_at.strftime("%Y-%m-%d %H:%M") if ins.created_at else None,
+            "resolved_at": ins.resolved_at.strftime("%Y-%m-%d %H:%M") if ins.resolved_at else None,
+            "resolved_remarks": ins.resolved_remarks or ""
+        })
+
+    return {
+        "id": check.id,
+        "check_type": check.check_type,
+        "status": check.status,
+        "display_status": display_status,
+        "verifier_name": verifier_name,
+        "verified_date": check.verified_date.strftime("%d-%b-%Y %I:%M %p") if check.verified_date else None,
+        "remarks": check.verifier_remarks or "",
+        "result": check.final_result or check.status,
+        "updated_at": check.verified_date.isoformat() if check.verified_date else (check.finalized_at.isoformat() if check.finalized_at else None),
+        "submitted_info": submitted_info,
+        "findings": findings,
+        "attachments": attachments,
+        "timeline": timeline,
+        "sla_status": sla_status,
+        "insufficiency_details": insufficiency_details
+    }
+

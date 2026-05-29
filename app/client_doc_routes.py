@@ -50,6 +50,9 @@ async def upload_client_document(
     if not current_user.customer_id:
         raise HTTPException(403, detail="Only client users can upload documents")
 
+    if parent_id in [None, "", "null", "undefined"]:
+        parent_id = None
+
     file_path = None
     file_type = None
     
@@ -105,6 +108,9 @@ async def list_client_documents(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    if parent_id in [None, "", "null", "undefined"]:
+        parent_id = None
+
     # If customer, can only see their own
     active_customer_id = current_user.customer_id
     
