@@ -5,7 +5,7 @@ from . import (
     user_routes, candidate_routes, batch_routes, case_routes, 
     verification_routes, stats_routes, role_routes, media_routes,
     notification_routes, ai_routes, billing_routes, client_doc_routes,
-    public_routes, bulk_invite_routes
+    public_routes, bulk_invite_routes, search_routes
 )
 
 from .database import engine, Base, get_async_db, async_engine
@@ -29,7 +29,7 @@ setup_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
-    # instrument_sqlalchemy(async_engine.sync_engine)
+    instrument_sqlalchemy(async_engine.sync_engine)
     
     yield
     # Shutdown: Dispose of the async engine to avoid event loop errors
@@ -124,6 +124,7 @@ api_v1.include_router(billing_routes.router)
 api_v1.include_router(client_doc_routes.router)
 api_v1.include_router(public_routes.router)
 api_v1.include_router(bulk_invite_routes.router)
+api_v1.include_router(search_routes.router)
 
 # Alias routes for Customer MIS Export to ensure all path variations resolve perfectly
 from .stats_routes import export_customer_mis_data

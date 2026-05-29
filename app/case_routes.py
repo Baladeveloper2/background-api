@@ -181,6 +181,7 @@ async def get_insufficient_cases(
         joinedload(models.Case.candidate),
         joinedload(models.Case.customer),
         joinedload(models.Case.assigned_user),
+        selectinload(models.Case.checks),
         selectinload(models.Case.insufficiency_logs).options(
             joinedload(models.InsufficiencyLog.check),
             joinedload(models.InsufficiencyLog.user)
@@ -211,9 +212,7 @@ async def get_insufficient_cases(
         check_id = last_log.check_id if last_log else None
         
         if not check_id:
-            ck_stmt = select(models.VerificationCheck.id).filter(models.VerificationCheck.case_id == c.id).limit(1)
-            ck_res = await db.execute(ck_stmt)
-            check_id = ck_res.scalar_one_or_none()
+            check_id = c.checks[0].id if c.checks else None
         
         if check_id and (c.id, check_id) not in seen_check_ids:
             results.append({
@@ -3671,7 +3670,7 @@ async def ocr_extract(data: schemas.OcrExtractRequest, background_tasks: Backgro
         full_text = " ".join(text)
         
         # Offload blocking ID parsing to thread pool
-        extracted = await run_in_threadpool(scanner.parse_id, full_text)
+        extracted = await run_in_threadpool(scanner.parse_id, full_text, url)
         
         return {
             "success": True,
