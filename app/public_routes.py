@@ -54,10 +54,23 @@ async def submit_candidate_insufficiency(
     if not insuff:
         raise HTTPException(status_code=404, detail="Invalid token")
         
-    # Update insufficiency
+    # Update insufficiency lifecycle status
     insuff.documents = data.documents
-    insuff.status = "CUSTOMER_UPLOADED"
+    insuff.status = "CANDIDATE_RESPONDED"
+    insuff.response_at = datetime.utcnow()
     insuff.updated_at = datetime.utcnow()
+    
+    # Append timeline event
+    import json as _json
+    existing_timeline = insuff.timeline or []
+    existing_timeline.append({
+        "event": "CANDIDATE_RESPONDED",
+        "title": "Candidate Responded",
+        "description": f"Candidate {insuff.case.candidate.name if insuff.case and insuff.case.candidate else 'Candidate'} submitted evidence via secure link.",
+        "timestamp": datetime.utcnow().isoformat(),
+        "actor": "Candidate (Self-Service Portal)"
+    })
+    insuff.timeline = existing_timeline
     
     # Update case status if needed
     db_case = insuff.case
@@ -66,18 +79,21 @@ async def submit_candidate_insufficiency(
         from sqlalchemy import func
         rem_stmt = select(func.count(models.Insufficiency.id)).filter(
             models.Insufficiency.case_id == db_case.id,
-            models.Insufficiency.status == "INSUFFICIENT",
+            models.Insufficiency.status.in_(["INSUFFICIENT", "PENDING"]),
             models.Insufficiency.is_resolved == False
         )
         rem_res = await db.execute(rem_stmt)
         if rem_res.scalar() == 0:
-            db_case.status = "VERIFICATION" # Move back to queue
+            db_case.status = "VERIFICATION"  # Move back to queue
     
     # Notify stakeholders
-    await notification_utils.notify_insufficiency_resolved(
-        db, insuff.id, 
-        background_tasks=background_tasks
-    )
+    try:
+        await notification_utils.notify_insufficiency_resolved(
+            db, insuff.id, 
+            background_tasks=background_tasks
+        )
+    except Exception:
+        pass  # Best-effort notification
     
     await db.commit()
     

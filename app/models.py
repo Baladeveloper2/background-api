@@ -502,7 +502,7 @@ class Insufficiency(Base):
     role = Column(String(50))
     message = Column(Text, nullable=False)
     documents = Column(JSONEncodedList) # Support for customer evidence uploads
-    status = Column(String(50), default="INSUFFICIENT")
+    status = Column(String(50), default="PENDING")
     is_resolved = Column(Boolean, default=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     updated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
@@ -511,6 +511,12 @@ class Insufficiency(Base):
     resolved_remarks = Column(Text, nullable=True)
     token = Column(String(100), unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # New lifecycle and outreach columns
+    notification_count = Column(Integer, default=0)
+    last_notified_at = Column(DateTime(timezone=True), nullable=True)
+    response_at = Column(DateTime(timezone=True), nullable=True)
+    timeline = Column(JSONEncodedList, default=lambda: [])
 
     # Relationships
     case = relationship("Case", back_populates="insufficiencies")

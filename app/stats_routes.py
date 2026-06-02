@@ -2971,7 +2971,55 @@ async def export_customer_mis_data(
         if export_type == "Finalized Reports":
             cases = [c for c in cases if c.status in ["FINALIZED", "COMPLETED"]]
         elif export_type == "Insufficiency Tracker":
-            cases = [c for c in cases if c.status in ["INSUFFICIENT", "INSUFFICIENCY"]]
+            # Fetch from the dedicated Insufficiency table with full lifecycle data
+            insuff_stmt = (
+                select(models.Insufficiency)
+                .where(models.Insufficiency.case.has(models.Case.customer_id == customer_id))
+                .options(
+                    joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
+                    joinedload(models.Insufficiency.case).joinedload(models.Case.customer),
+                    joinedload(models.Insufficiency.case).joinedload(models.Case.assigned_user),
+                    joinedload(models.Insufficiency.check),
+                    joinedload(models.Insufficiency.user)
+                )
+                .order_by(models.Insufficiency.created_at.desc())
+            )
+            insuff_res = await db.execute(insuff_stmt)
+            insufficiencies = insuff_res.unique().scalars().all()
+
+            insuff_rows = []
+            for i in insufficiencies:
+                if i.is_resolved and i.resolved_at and i.created_at:
+                    ageing_days = (i.resolved_at - i.created_at).days
+                elif i.created_at:
+                    ageing_days = (datetime.utcnow() - i.created_at.replace(tzinfo=None)).days
+                else:
+                    ageing_days = 0
+
+                # Derive last timeline event description
+                tl = i.timeline or []
+                last_event_desc = tl[-1]["description"] if tl else "—"
+
+                insuff_rows.append({
+                    "case_ref": i.case.case_ref_no if i.case else "N/A",
+                    "candidate_name": i.case.candidate.name if (i.case and i.case.candidate) else "N/A",
+                    "candidate_email": i.case.candidate.email if (i.case and i.case.candidate) else "N/A",
+                    "customer_name": i.case.customer.name if (i.case and i.case.customer) else "N/A",
+                    "check_name": i.check.check_type if i.check else "General",
+                    "remarks": i.message or "—",
+                    "status": i.status or "PENDING",
+                    "notification_count": i.notification_count or 0,
+                    "last_notified_date": i.last_notified_at.strftime("%Y-%m-%d %H:%M") if i.last_notified_at else "—",
+                    "response_date": i.response_at.strftime("%Y-%m-%d %H:%M") if i.response_at else "—",
+                    "resolved_date": i.resolved_at.strftime("%Y-%m-%d %H:%M") if i.resolved_at else "—",
+                    "ageing_days": ageing_days,
+                    "raised_date": i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else "—",
+                    "raised_by": i.user.full_name if i.user else "Verifier",
+                    "assigned_to": i.case.assigned_user.full_name if (i.case and i.case.assigned_user) else "Unassigned",
+                    "last_event": last_event_desc,
+                    "is_resolved": i.is_resolved,
+                    "timeline_count": len(tl)
+                })
 
         # ─── HELPER FOR STATUS NORMALIZATION ───
         def normalize_status(val):
@@ -3028,6 +3076,136 @@ async def export_customer_mis_data(
             if "social" in t:
                 return d.get("platform") or d.get("profile_url") or ""
             return str(chk.data)
+
+        # ─────────────────────────────────────────────────────────────
+        # INSUFFICIENCY TRACKER EXPORT (dedicated path for all formats)
+        # ─────────────────────────────────────────────────────────────
+        if export_type == "Insufficiency Tracker":
+            insuff_headers = [
+                "S.No", "Case Ref", "Candidate Name", "Candidate Email",
+                "Check Type", "Remarks / Flag Reason", "Current Status",
+                "Notification Count", "Raised Date", "Last Notified Date",
+                "Response Date", "Resolved Date", "Ageing (Days)",
+                "Raised By", "Assigned To", "Last Activity"
+            ]
+
+            header_fill_it = PatternFill(start_color="7C3AED", end_color="7C3AED", fill_type="solid")
+            header_font_it = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+            thin_border_it = Border(
+                left=Side(style='thin', color='E2E8F0'),
+                right=Side(style='thin', color='E2E8F0'),
+                top=Side(style='thin', color='E2E8F0'),
+                bottom=Side(style='thin', color='E2E8F0')
+            )
+
+            STATUS_COLORS = {
+                "PENDING": ("FFF3CD", "92400E"),
+                "NOTIFICATION_SENT": ("DBEAFE", "1E40AF"),
+                "REMINDER_SENT": ("FFEDD5", "9A3412"),
+                "CANDIDATE_RESPONDED": ("F3E8FF", "6B21A8"),
+                "UNDER_REVIEW": ("CFFAFE", "155E75"),
+                "RESOLVED": ("D1FAE5", "065F46"),
+            }
+
+            if fmt == "xlsx":
+                wb_it = openpyxl.Workbook()
+                wb_it.remove(wb_it.active)
+                ws_it = wb_it.create_sheet(title="Insufficiency Tracker")
+                ws_it.views.sheetView[0].showGridLines = True
+
+                for col_idx, val in enumerate(insuff_headers, start=1):
+                    cell = ws_it.cell(row=1, column=col_idx, value=val)
+                    cell.font = header_font_it
+                    cell.fill = header_fill_it
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    cell.border = thin_border_it
+
+                for idx, row in enumerate(insuff_rows, start=1):
+                    r = idx + 1
+                    ws_it.cell(row=r, column=1, value=idx)
+                    ws_it.cell(row=r, column=2, value=row["case_ref"])
+                    ws_it.cell(row=r, column=3, value=row["candidate_name"])
+                    ws_it.cell(row=r, column=4, value=row["candidate_email"])
+                    ws_it.cell(row=r, column=5, value=row["check_name"])
+                    ws_it.cell(row=r, column=6, value=row["remarks"])
+                    status_cell = ws_it.cell(row=r, column=7, value=row["status"].replace("_", " "))
+                    sc = STATUS_COLORS.get(row["status"], ("F1F5F9", "334155"))
+                    status_cell.fill = PatternFill(start_color=sc[0], end_color=sc[0], fill_type="solid")
+                    status_cell.font = Font(name="Segoe UI", size=10, bold=True, color=sc[1])
+                    ws_it.cell(row=r, column=8, value=row["notification_count"])
+                    ws_it.cell(row=r, column=9, value=row["raised_date"])
+                    ws_it.cell(row=r, column=10, value=row["last_notified_date"])
+                    ws_it.cell(row=r, column=11, value=row["response_date"])
+                    ws_it.cell(row=r, column=12, value=row["resolved_date"])
+                    ageing_cell = ws_it.cell(row=r, column=13, value=row["ageing_days"])
+                    if not row["is_resolved"] and row["ageing_days"] > 7:
+                        ageing_cell.font = Font(name="Segoe UI", size=10, bold=True, color="DC2626")
+                    ws_it.cell(row=r, column=14, value=row["raised_by"])
+                    ws_it.cell(row=r, column=15, value=row["assigned_to"])
+                    ws_it.cell(row=r, column=16, value=row["last_event"])
+
+                    for c_col in range(1, len(insuff_headers) + 1):
+                        dcell = ws_it.cell(row=r, column=c_col)
+                        dcell.border = thin_border_it
+                        if not dcell.font.bold:
+                            dcell.font = Font(name="Segoe UI", size=10)
+                        if c_col in [1, 8, 13]:
+                            dcell.alignment = Alignment(horizontal="center")
+
+                # Summary Sheet
+                ws_sum = wb_it.create_sheet(title="Summary")
+                sum_headers = ["Status", "Count"]
+                for ci, h in enumerate(sum_headers, start=1):
+                    cell = ws_sum.cell(row=1, column=ci, value=h)
+                    cell.font = header_font_it
+                    cell.fill = header_fill_it
+                    cell.border = thin_border_it
+
+                from collections import Counter
+                status_counts = Counter(r["status"] for r in insuff_rows)
+                for si, (st, cnt) in enumerate(status_counts.items(), start=2):
+                    ws_sum.cell(row=si, column=1, value=st.replace("_", " ")).border = thin_border_it
+                    ws_sum.cell(row=si, column=2, value=cnt).border = thin_border_it
+
+                # Column widths
+                for col in ws_it.columns:
+                    max_len = max((len(str(cell.value or '')) for cell in col), default=10)
+                    ws_it.column_dimensions[get_column_letter(col[0].column)].width = max(max_len + 3, 14)
+                ws_it.freeze_panes = "A2"
+
+                output_it = io.BytesIO()
+                wb_it.save(output_it)
+                output_it.seek(0)
+                filename_it = f"{customer_name.replace(' ', '_')}_Insufficiency_Tracker_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                return StreamingResponse(
+                    output_it,
+                    headers={'Content-Disposition': f'attachment; filename="{filename_it}"'},
+                    media_type='application/vnd.officedocument.spreadsheetml.sheet'
+                )
+
+            elif fmt == "csv":
+                out_it = io.StringIO()
+                writer_it = csv.writer(out_it)
+                writer_it.writerow(insuff_headers)
+                for idx, row in enumerate(insuff_rows, start=1):
+                    writer_it.writerow([
+                        idx, row["case_ref"], row["candidate_name"], row["candidate_email"],
+                        row["check_name"], row["remarks"], row["status"],
+                        row["notification_count"], row["raised_date"], row["last_notified_date"],
+                        row["response_date"], row["resolved_date"], row["ageing_days"],
+                        row["raised_by"], row["assigned_to"], row["last_event"]
+                    ])
+                stream_it = io.BytesIO(out_it.getvalue().encode('utf-8'))
+                filename_it = f"{customer_name.replace(' ', '_')}_Insufficiency_Tracker_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+                return StreamingResponse(
+                    stream_it,
+                    headers={'Content-Disposition': f'attachment; filename="{filename_it}"'},
+                    media_type='text/csv'
+                )
+
+            else:
+                # PDF fallback for insufficiency tracker
+                raise HTTPException(status_code=400, detail="PDF export for Insufficiency Tracker is not yet supported. Please use XLSX or CSV.")
 
         # ─────────────────────────────────────────────────────────────
         # A. EXCEL FORMAT (.xlsx)

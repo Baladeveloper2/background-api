@@ -73,6 +73,9 @@ def derive_case_final_result(case, db):
 
 @router.get("/dashboard-summary")
 def get_customer_dashboard_summary(
+    search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
@@ -81,7 +84,30 @@ def get_customer_dashboard_summary(
         
     client_id = current_user.customer_id
     
-    cases = db.query(models.Case).filter(models.Case.customer_id == client_id).all()
+    query = db.query(models.Case).filter(models.Case.customer_id == client_id)
+    
+    if search:
+        query = query.join(models.Candidate, models.Case.candidate_id == models.Candidate.id, isouter=True).filter(
+            or_(
+                models.Candidate.name.ilike(f"%{search}%"),
+                models.Case.case_ref_no.ilike(f"%{search}%")
+            )
+        )
+
+    if from_date:
+        try:
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            query = query.filter(models.Case.received_date >= from_dt)
+        except ValueError:
+            query = query.filter(models.Case.received_date >= from_date)
+    if to_date:
+        try:
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            query = query.filter(models.Case.received_date <= to_dt)
+        except ValueError:
+            query = query.filter(models.Case.received_date <= to_date)
+
+    cases = query.all()
     
     overall = len(cases)
     positive = 0
@@ -154,37 +180,36 @@ def get_customer_candidates(
         )
 
     if from_date:
-        query = query.filter(models.Case.received_date >= from_date)
+        try:
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            query = query.filter(models.Case.received_date >= from_dt)
+        except ValueError:
+            query = query.filter(models.Case.received_date >= from_date)
     if to_date:
-        query = query.filter(models.Case.received_date <= to_date)
+        try:
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            query = query.filter(models.Case.received_date <= to_dt)
+        except ValueError:
+            query = query.filter(models.Case.received_date <= to_date)
 
-    # The status filtering is now performed in Python after deriving final_result.
-
-
-    total = query.count()
-    cases = query.order_by(models.Case.received_date.desc()).offset((page - 1) * limit).limit(limit).all()
-
-    results = []
-    for c in cases:
-        cand = c.candidate
-        cust = c.customer
-        results.append({
-            "id": c.id,
-            "candidate_name": cand.name if cand else "N/A",
-            "case_ref_no": c.case_ref_no,
-            "client_emp_code": cand.client_emp_code if cand else None,
-            "received_date": c.received_date.isoformat() if c.received_date else None,
-            "completed_date": c.completed_date.isoformat() if c.completed_date else None,
-            "status": c.status,
-            "final_result": derive_case_final_result(c, db),
-            "is_in_tat": c.is_in_tat
-        })
-
-    # Apply Python-side filter based on business outcome if status filter is provided
-    # Status filter will be applied after deriving final_result for each case.
-    # The SQL query does not filter by status here; we will filter the results list in Python.
-    # This ensures that derived business outcomes are used consistently.
+    # If status filter is applied, perform pagination in Python after status derivation
     if status and status.upper() not in ('ALL', ''):
+        cases = query.order_by(models.Case.received_date.desc()).all()
+        results = []
+        for c in cases:
+            cand = c.candidate
+            results.append({
+                "id": c.id,
+                "candidate_name": cand.name if cand else "N/A",
+                "case_ref_no": c.case_ref_no,
+                "client_emp_code": cand.client_emp_code if cand else None,
+                "received_date": c.received_date.isoformat() if c.received_date else None,
+                "completed_date": c.completed_date.isoformat() if c.completed_date else None,
+                "status": c.status,
+                "final_result": derive_case_final_result(c, db),
+                "is_in_tat": c.is_in_tat
+            })
+
         filter_upper = status.upper().strip()
         def outcome_matches(res):
             val = (res.get('final_result') or '').upper().strip()
@@ -195,18 +220,35 @@ def get_customer_candidates(
             if filter_upper == 'AMBER':
                 return val in ['AMBER', 'DISCREPANCY']
             if filter_upper in ['IN PROGRESS (WIP)', 'INPROGRESS', 'IN PROGRESS', 'WIP']:
-                # No business outcome yet means in progress
-                return not val
+                return not val or val == 'WIP'
             if filter_upper == 'STOP CHECK':
                 return val in ['STOPCHECK', 'STOP CHECK', 'CLIENT HOLD']
             if filter_upper == 'INTERIM':
                 return val in ['INTERIM', 'PARTIAL COMPLETION']
-            if filter_upper == 'INSUFFICIENCY':
+            if filter_upper in ('INSUFFICIENT', 'INSUFFICIENCY'):
                 return val in ['INSUFFICIENT', 'INSUFFICIENCY']
             return False
+
         filtered = [r for r in results if outcome_matches(r)]
         total = len(filtered)
-        results = filtered
+        results = filtered[(page - 1) * limit : page * limit]
+    else:
+        total = query.count()
+        cases = query.order_by(models.Case.received_date.desc()).offset((page - 1) * limit).limit(limit).all()
+        results = []
+        for c in cases:
+            cand = c.candidate
+            results.append({
+                "id": c.id,
+                "candidate_name": cand.name if cand else "N/A",
+                "case_ref_no": c.case_ref_no,
+                "client_emp_code": cand.client_emp_code if cand else None,
+                "received_date": c.received_date.isoformat() if c.received_date else None,
+                "completed_date": c.completed_date.isoformat() if c.completed_date else None,
+                "status": c.status,
+                "final_result": derive_case_final_result(c, db),
+                "is_in_tat": c.is_in_tat
+            })
 
     return JSONResponse(
         content=results,

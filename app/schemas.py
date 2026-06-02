@@ -466,12 +466,17 @@ class InsufficiencyRead(BaseModel):
     raised_by: str
     raised_by_role: Optional[str] = None
     message: str
+    status: str
     is_resolved: bool = False
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
     resolved_remarks: Optional[str] = None
     created_at: datetime
     check_name: Optional[str] = None
+    notification_count: Optional[int] = 0
+    last_notified_at: Optional[datetime] = None
+    response_at: Optional[datetime] = None
+    timeline: Optional[List[Dict[str, Any]]] = []
 
     model_config = ConfigDict(from_attributes=True)
 

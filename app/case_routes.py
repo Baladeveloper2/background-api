@@ -106,12 +106,19 @@ def derive_case_final_result_preloaded(case):
 @router.get("/insufficient")
 async def get_insufficient_cases(
     resolved: bool = False,
+    tab: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Fetch cases marked as insufficient for the current customer with filtering."""
+    """Fetch cases marked as insufficient for the current customer with tab and date filtering."""
+    # Map default tab filters for backward compatibility
+    if tab is None:
+        tab = "RESOLVED" if resolved else "UNRESOLVED"
+    
+    tab_upper = tab.upper()
+
     # 1. Fetch from new Insufficiency table
     stmt_new = (
         select(models.Insufficiency)
@@ -120,12 +127,29 @@ async def get_insufficient_cases(
             joinedload(models.Insufficiency.case).joinedload(models.Case.customer),
             joinedload(models.Insufficiency.case).joinedload(models.Case.assigned_user),
             joinedload(models.Insufficiency.check),
-            joinedload(models.Insufficiency.user)
+            joinedload(models.Insufficiency.user),
+            joinedload(models.Insufficiency.resolver)
         )
-        .filter(models.Insufficiency.is_resolved == resolved)
         .order_by(models.Insufficiency.created_at.desc())
     )
-    
+
+    # Apply Tab Filter
+    if tab_upper == "PENDING":
+        stmt_new = stmt_new.filter(
+            models.Insufficiency.status.in_(["PENDING", "INSUFFICIENT", "NOTIFICATION_SENT", "REMINDER_SENT", "AWAITING_RESPONSE"]),
+            models.Insufficiency.is_resolved == False
+        )
+    elif tab_upper == "IN_PROGRESS":
+        stmt_new = stmt_new.filter(
+            models.Insufficiency.status.in_(["CANDIDATE_RESPONDED", "UNDER_REVIEW", "VERIFIER_REVIEWING"]),
+            models.Insufficiency.is_resolved == False
+        )
+    elif tab_upper == "RESOLVED":
+        stmt_new = stmt_new.filter(models.Insufficiency.is_resolved == True)
+    elif tab_upper == "UNRESOLVED":
+        stmt_new = stmt_new.filter(models.Insufficiency.is_resolved == False)
+    # If "ALL", no filter on is_resolved is applied
+
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt_new = stmt_new.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
         
@@ -148,6 +172,14 @@ async def get_insufficient_cases(
     seen_check_ids = set()
 
     for i in insufficiencies:
+        # Ageing calculation
+        if i.is_resolved and i.resolved_at and i.created_at:
+            ageing_days = (i.resolved_at - i.created_at).days
+        elif i.created_at:
+            ageing_days = (datetime.utcnow() - i.created_at).days
+        else:
+            ageing_days = 0
+
         results.append({
             "id": i.case_id,
             "insufficiency_id": i.id,
@@ -163,79 +195,168 @@ async def get_insufficient_cases(
             "status": i.status,
             "documents": i.documents or [],
             "is_resolved": i.is_resolved,
-            "resolved_at": i.updated_at.strftime("%Y-%m-%d %H:%M") if (i.is_resolved and i.updated_at) else None,
+            "resolved_at": i.resolved_at.strftime("%Y-%m-%d %H:%M") if (i.is_resolved and i.resolved_at) else None,
             "tat_days": i.case.tat_days if i.case else 0,
             "assigned_to_name": i.case.assigned_user.full_name if i.case and i.case.assigned_user else "Unassigned",
-            "raised_by_name": i.user.full_name if i.user else "Verifier"
+            "raised_by_name": i.user.full_name if i.user else "Verifier",
+            "resolved_by_name": i.resolver.full_name if i.resolver else ("System" if i.is_resolved else "—"),
+            # New status tracking columns
+            "notification_count": i.notification_count or 0,
+            "last_notified_date": i.last_notified_at.strftime("%Y-%m-%d %H:%M") if i.last_notified_at else None,
+            "response_date": i.response_at.strftime("%Y-%m-%d %H:%M") if i.response_at else None,
+            "resolved_date": i.resolved_at.strftime("%Y-%m-%d %H:%M") if i.resolved_at else None,
+            "ageing_days": ageing_days,
+            "timeline": i.timeline or []
         })
         seen_check_ids.add((i.case_id, i.check_id))
 
-    # Legacy tracking doesn't fully apply to 'Completed' state, so exit early if requesting resolved items
-    if resolved:
+    # Exit early for resolved-only tab since legacy cases are never resolved
+    if tab_upper == "RESOLVED":
         return sorted(results, key=lambda x: x["marked_at"], reverse=True)
 
-    # 2. Fetch from legacy Case status for backward compatibility
-    stmt_legacy = select(models.Case).filter(
-        models.Case.status == enums.CaseStatus.INSUFFICIENT
-    ).options(
-        joinedload(models.Case.candidate),
-        joinedload(models.Case.customer),
-        joinedload(models.Case.assigned_user),
-        selectinload(models.Case.checks),
-        selectinload(models.Case.insufficiency_logs).options(
-            joinedload(models.InsufficiencyLog.check),
-            joinedload(models.InsufficiencyLog.user)
+    # 2. Fetch from legacy Case status for backward compatibility (only if query requests unresolved/pending/all)
+    if tab_upper in ["PENDING", "UNRESOLVED", "ALL"]:
+        stmt_legacy = select(models.Case).filter(
+            models.Case.status == enums.CaseStatus.INSUFFICIENT
+        ).options(
+            joinedload(models.Case.candidate),
+            joinedload(models.Case.customer),
+            joinedload(models.Case.assigned_user),
+            selectinload(models.Case.checks),
+            selectinload(models.Case.insufficiency_logs).options(
+                joinedload(models.InsufficiencyLog.check),
+                joinedload(models.InsufficiencyLog.user)
+            )
         )
-    )
+        
+        if current_user.role == enums.UserRole.CUSTOMER:
+            stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
+            
+        if from_date:
+            try:
+                f_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                stmt_legacy = stmt_legacy.filter(models.Case.received_date >= f_dt)
+            except: pass
+                
+        if to_date:
+            try:
+                t_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                stmt_legacy = stmt_legacy.filter(models.Case.received_date <= t_dt)
+            except: pass
+
+        res_legacy = await db.execute(stmt_legacy)
+        legacy_cases = res_legacy.unique().scalars().all()
+        
+        for c in legacy_cases:
+            last_log = c.insufficiency_logs[-1] if c.insufficiency_logs else None
+            check_id = last_log.check_id if last_log else None
+            
+            if not check_id:
+                check_id = c.checks[0].id if c.checks else None
+            
+            if check_id and (c.id, check_id) not in seen_check_ids:
+                created_date = last_log.marked_at if last_log else c.received_date
+                ageing_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days if created_date else 0
+                
+                results.append({
+                    "id": c.id,
+                    "case_ref_no": c.case_ref_no,
+                    "candidate_name": c.candidate.name if c.candidate else "N/A",
+                    "candidate_email": c.candidate.email if c.candidate else "N/A",
+                    "candidate_phone": c.candidate.phone if c.candidate else "N/A",
+                    "customer_name": c.customer.name if c.customer else "N/A",
+                    "check_id": check_id,
+                    "check_name": last_log.check.check_type if last_log and last_log.check else "General",
+                    "marked_at": created_date.strftime("%Y-%m-%d %H:%M") if created_date else "N/A",
+                    "remarks": last_log.notes if last_log else "Legacy insufficiency",
+                    "status": "PENDING",
+                    "is_resolved": False,
+                    "tat_days": c.tat_days,
+                    "assigned_to_name": c.assigned_user.full_name if c.assigned_user else "Unassigned",
+                    "raised_by_name": last_log.user.full_name if (last_log and last_log.user) else "Verifier",
+                    # Legacy default status columns
+                    "notification_count": 0,
+                    "last_notified_date": None,
+                    "response_date": None,
+                    "resolved_date": None,
+                    "ageing_days": ageing_days,
+                    "timeline": []
+                })
+                seen_check_ids.add((c.id, check_id))
+                
+    # Final Sort (Latest First)
+    return sorted(results, key=lambda x: x["marked_at"] if x["marked_at"] != "N/A" else "", reverse=True)
+
+@router.get("/insufficient/summary")
+async def get_insufficient_summary(
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Retrieve aggregate summary counts for insufficiency dashboard cards."""
+    # Base query for new insufficiencies table
+    stmt = select(models.Insufficiency)
+    if current_user.role == enums.UserRole.CUSTOMER:
+        stmt = stmt.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
     
+    res = await db.execute(stmt)
+    insufficiencies = res.unique().scalars().all()
+    
+    # Calculate counts
+    total = len(insufficiencies)
+    pending = 0
+    awaiting_response = 0
+    under_review = 0
+    resolved = 0
+    overdue = 0
+    
+    for i in insufficiencies:
+        if i.is_resolved:
+            resolved += 1
+        else:
+            # Check status
+            status_upper = (i.status or "").upper()
+            if status_upper == "PENDING":
+                pending += 1
+            elif status_upper in ["NOTIFICATION_SENT", "REMINDER_SENT"]:
+                awaiting_response += 1
+            elif status_upper in ["CANDIDATE_RESPONDED", "UNDER_REVIEW"]:
+                under_review += 1
+            else:
+                # Default fallback
+                pending += 1
+                
+            # Overdue tracking: age > 7 days and unresolved
+            if i.created_at:
+                age_days = (datetime.utcnow() - i.created_at.replace(tzinfo=None)).days
+                if age_days > 7:
+                    overdue += 1
+
+    # Include legacy cases count (if any) as Pending and check if overdue
+    stmt_legacy = select(models.Case).filter(models.Case.status == enums.CaseStatus.INSUFFICIENT)
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
         
-    if from_date:
-        try:
-            f_dt = datetime.strptime(from_date, "%Y-%m-%d")
-            stmt_legacy = stmt_legacy.filter(models.Case.received_date >= f_dt)
-        except: pass
-            
-    if to_date:
-        try:
-            t_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            stmt_legacy = stmt_legacy.filter(models.Case.received_date <= t_dt)
-        except: pass
-
     res_legacy = await db.execute(stmt_legacy)
     legacy_cases = res_legacy.unique().scalars().all()
     
+    seen_case_ids = {i.case_id for i in insufficiencies}
     for c in legacy_cases:
-        # Get latest check from logs
-        last_log = c.insufficiency_logs[-1] if c.insufficiency_logs else None
-        check_id = last_log.check_id if last_log else None
-        
-        if not check_id:
-            check_id = c.checks[0].id if c.checks else None
-        
-        if check_id and (c.id, check_id) not in seen_check_ids:
-            results.append({
-                "id": c.id,
-                "case_ref_no": c.case_ref_no,
-                "candidate_name": c.candidate.name if c.candidate else "N/A",
-                "candidate_email": c.candidate.email if c.candidate else "N/A",
-                "candidate_phone": c.candidate.phone if c.candidate else "N/A",
-                "customer_name": c.customer.name if c.customer else "N/A",
-                "check_id": check_id,
-                "check_name": last_log.check.check_type if last_log and last_log.check else "General",
-                "marked_at": last_log.marked_at.strftime("%Y-%m-%d %H:%M") if last_log else (c.received_date.strftime("%Y-%m-%d %H:%M") if c.received_date else "N/A"),
-                "remarks": last_log.notes if last_log else "Legacy insufficiency",
-                "status": "INSUFFICIENT",
-                "is_resolved": False,
-                "tat_days": c.tat_days,
-                "assigned_to_name": c.assigned_user.full_name if c.assigned_user else "Unassigned",
-                "raised_by_name": last_log.user.full_name if (last_log and last_log.user) else "Verifier"
-            })
-            seen_check_ids.add((c.id, check_id))
-            
-    # Final Sort (Latest First)
-    return sorted(results, key=lambda x: x["marked_at"] if x["marked_at"] != "N/A" else "", reverse=True)
+        if c.id not in seen_case_ids:
+            total += 1
+            pending += 1
+            if c.received_date:
+                age_days = (datetime.utcnow() - c.received_date.replace(tzinfo=None)).days
+                if age_days > 7:
+                    overdue += 1
+
+    return {
+        "total": total,
+        "pending": pending,
+        "awaiting_response": awaiting_response,
+        "under_review": under_review,
+        "resolved": resolved,
+        "overdue": overdue
+    }
 
 @router.post("/{case_id}/resolve-insufficiency")
 async def resolve_insufficiency(
@@ -294,14 +415,25 @@ async def resolve_insufficiency(
     
     ni_res = await db.execute(new_insuff_stmt)
     new_insuff = ni_res.scalars().first()
+    now_resolve = datetime.utcnow()
     if new_insuff:
         new_insuff.status = "RESOLVED"
         new_insuff.is_resolved = True
-        new_insuff.resolved_at = datetime.utcnow()
+        new_insuff.resolved_at = now_resolve
         new_insuff.resolved_by = current_user.id
         new_insuff.documents = data.documents or []
-        new_insuff.updated_at = datetime.utcnow()
+        new_insuff.updated_at = now_resolve
         new_insuff.updated_by = current_user.id
+        # Append RESOLVED timeline event
+        existing_tl = new_insuff.timeline or []
+        existing_tl.append({
+            "event": "RESOLVED",
+            "title": "Insufficiency Resolved",
+            "description": f"Resolved by {current_user.full_name or current_user.email}. Remarks: {remarks}",
+            "timestamp": now_resolve.isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+        new_insuff.timeline = existing_tl
 
     # Check if any REMAINING insufficiencies are still in 'INSUFFICIENT' state (not uploaded)
     rem_stmt = select(func.count(models.Insufficiency.id)).filter(
@@ -870,24 +1002,57 @@ async def raise_check_insufficiency(
     import uuid
     token = uuid.uuid4().hex
 
+    now = datetime.utcnow()
+
     if new_insuff:
         # Update existing record (Re-notification)
         new_insuff.message = data.message
         new_insuff.token = token
-        new_insuff.status = "INSUFFICIENT"
-        new_insuff.updated_at = datetime.utcnow()
+        new_insuff.status = "NOTIFICATION_SENT"
+        new_insuff.notification_count = (new_insuff.notification_count or 0) + 1
+        new_insuff.last_notified_at = now
+        new_insuff.updated_at = now
+        # Append reminder timeline event
+        existing_timeline = new_insuff.timeline or []
+        existing_timeline.append({
+            "event": "REMINDER_SENT" if (new_insuff.notification_count or 0) > 1 else "NOTIFICATION_SENT",
+            "title": "Reminder Sent" if (new_insuff.notification_count or 0) > 1 else "Notification Sent",
+            "description": f"Notification #{new_insuff.notification_count} sent via email. Check: {check.check_type}.",
+            "timestamp": now.isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+        new_insuff.timeline = existing_timeline
     else:
-        # Create fresh record
+        # Create fresh record with initial timeline
         case.insufficiency_count = (case.insufficiency_count or 0) + 1
+        initial_timeline = [
+            {
+                "event": "RAISED",
+                "title": "Insufficiency Flagged",
+                "description": f"Insufficiency raised by {current_user.full_name or current_user.email} for check: {check.check_type}. Reason: {data.message}",
+                "timestamp": now.isoformat(),
+                "actor": current_user.full_name or current_user.email
+            },
+            {
+                "event": "NOTIFICATION_SENT",
+                "title": "Notification Sent",
+                "description": f"Candidate notified via email with secure upload link. Check: {check.check_type}.",
+                "timestamp": now.isoformat(),
+                "actor": current_user.full_name or current_user.email
+            }
+        ]
         new_insuff = models.Insufficiency(
             case_id=case.id,
             check_id=check.id,
             raised_by=current_user.id,
             role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
             message=data.message,
-            status="INSUFFICIENT",
+            status="NOTIFICATION_SENT",
+            notification_count=1,
+            last_notified_at=now,
             token=token,
-            documents=data.documents or []
+            documents=data.documents or [],
+            timeline=initial_timeline
         )
         db.add(new_insuff)
     
@@ -4055,6 +4220,23 @@ async def get_insufficiency_detail(id: str, db: AsyncSession = Depends(get_async
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
     if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and insuff.case.customer_id != current_user.customer_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+
+    # If status is CANDIDATE_RESPONDED and user is not a customer, transition to UNDER_REVIEW
+    if insuff.status == "CANDIDATE_RESPONDED" and user_role != "CUSTOMER":
+        insuff.status = "UNDER_REVIEW"
+        insuff.updated_at = datetime.utcnow()
+        insuff.updated_by = current_user.id
+        
+        existing_tl = insuff.timeline or []
+        existing_tl.append({
+            "event": "UNDER_REVIEW",
+            "title": "Verifier Reviewing",
+            "description": f"Verifier {current_user.full_name or current_user.email} started reviewing candidate documents.",
+            "timestamp": datetime.utcnow().isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+        insuff.timeline = existing_tl
+        await db.commit()
 
     # Construct Timeline
     timeline = []
