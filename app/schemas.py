@@ -15,6 +15,7 @@ class UserBase(BaseModel):
     bvs_permissions: Optional[Dict[str, Any]] = None
     phone: Optional[str] = None
     is_2fa_enabled: Optional[bool] = False
+    theme_preference: Optional[str] = "professional-violet"
     
     @field_validator('status', 'role', mode='before')
     @classmethod
@@ -69,6 +70,7 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
     phone: Optional[str] = None
     is_2fa_enabled: Optional[bool] = None
+    theme_preference: Optional[str] = None
 
 class User(UserBase):
     id: str
@@ -351,21 +353,35 @@ class CaseBase(BaseModel):
             val = v.upper()
             mapping = {
                 "PENDING": "ASSIGNED",
-                "INSUFFICIENT": "INSUFFICIENCY",
-                "COMPLETED": "FINALIZED",
-                "CLOSED": "FINALIZED",
                 "NEW": "ASSIGNED",
                 "LINK_SHARED": "ASSIGNED",
-                "IN_VERIFICATION": "IN_PROGRESS",
-                "QC_REVIEW": "FINALIZED",
-                "REOPENED": "IN_PROGRESS",
+                "INVITED": "ASSIGNED",
+                
+                "IN_VERIFICATION": "WIP",
+                "VERIFICATION": "WIP",
+                "IN_PROGRESS": "WIP",
+                "REOPENED": "WIP",
+                "DOCUMENTS_SUBMITTED": "WIP",
+                
+                "QC": "REVIEW",
+                "QC_REVIEW": "REVIEW",
+                "QA_PENDING": "REVIEW",
+                "QC_PENDING": "REVIEW",
+                "UNDER_REVIEW": "REVIEW",
+                
+                "COMPLETED": "FINALIZED",
+                "CLOSED": "FINALIZED",
                 "CANCELLED": "FINALIZED",
-                "VERIFICATION": "IN_PROGRESS",
-                "QC": "FINALIZED",
-                "QA_PENDING": "FINALIZED",
-                "QC_PENDING": "FINALIZED",
                 "QC_VERIFIED": "FINALIZED",
-                "DOCUMENTS_SUBMITTED": "IN_PROGRESS"
+                "POSITIVE": "FINALIZED",
+                "NEGATIVE": "FINALIZED",
+                "DISCREPANCY": "FINALIZED",
+                "UNABLE_TO_VERIFY": "FINALIZED",
+                
+                "INSUFFICIENT": "ON_HOLD",
+                "INSUFFICIENCY": "ON_HOLD",
+                "HOLD": "ON_HOLD",
+                "ON_HOLD": "ON_HOLD",
             }
             return mapping.get(val, val)
         return v
@@ -410,21 +426,35 @@ class CaseUpdate(BaseModel):
             val = v.upper()
             mapping = {
                 "PENDING": "ASSIGNED",
-                "INSUFFICIENT": "INSUFFICIENCY",
-                "COMPLETED": "FINALIZED",
-                "CLOSED": "FINALIZED",
                 "NEW": "ASSIGNED",
                 "LINK_SHARED": "ASSIGNED",
-                "IN_VERIFICATION": "IN_PROGRESS",
-                "QC_REVIEW": "FINALIZED",
-                "REOPENED": "IN_PROGRESS",
+                "INVITED": "ASSIGNED",
+                
+                "IN_VERIFICATION": "WIP",
+                "VERIFICATION": "WIP",
+                "IN_PROGRESS": "WIP",
+                "REOPENED": "WIP",
+                "DOCUMENTS_SUBMITTED": "WIP",
+                
+                "QC": "REVIEW",
+                "QC_REVIEW": "REVIEW",
+                "QA_PENDING": "REVIEW",
+                "QC_PENDING": "REVIEW",
+                "UNDER_REVIEW": "REVIEW",
+                
+                "COMPLETED": "FINALIZED",
+                "CLOSED": "FINALIZED",
                 "CANCELLED": "FINALIZED",
-                "VERIFICATION": "IN_PROGRESS",
-                "QC": "FINALIZED",
-                "QA_PENDING": "FINALIZED",
-                "QC_PENDING": "FINALIZED",
                 "QC_VERIFIED": "FINALIZED",
-                "DOCUMENTS_SUBMITTED": "IN_PROGRESS"
+                "POSITIVE": "FINALIZED",
+                "NEGATIVE": "FINALIZED",
+                "DISCREPANCY": "FINALIZED",
+                "UNABLE_TO_VERIFY": "FINALIZED",
+                
+                "INSUFFICIENT": "ON_HOLD",
+                "INSUFFICIENCY": "ON_HOLD",
+                "HOLD": "ON_HOLD",
+                "ON_HOLD": "ON_HOLD",
             }
             return mapping.get(val, val)
         return v

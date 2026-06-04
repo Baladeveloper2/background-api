@@ -231,7 +231,7 @@ async def get_customer_dashboard(
             func.sum(case(((
                 and_(
                     func.upper(models.Case.status).in_(['WIP', 'ASSIGNED', 'INITIATED', 'VERIFICATION', 'QC_PENDING', 'CLIENT_REVIEW', 'IN_PROGRESS', 'PENDING']),
-                    func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CANCELLED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY'])
+                    func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CLOSED'])
                 )
             ), 1), else_=0)).label("inProgressCases")
         ).select_from(models.Case).where(models.Case.customer_id == current_user.customer_id)
@@ -538,7 +538,7 @@ async def get_customer_candidates(
                 query = query.filter(
                     and_(
                         func.upper(models.Case.status).in_(['WIP', 'ASSIGNED', 'INITIATED', 'VERIFICATION', 'QC_PENDING', 'CLIENT_REVIEW', 'IN_PROGRESS', 'PENDING']),
-                        func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CANCELLED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY'])
+                        func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CLOSED'])
                     )
                 )
             elif status_upper == 'FINALIZED':
@@ -732,7 +732,7 @@ async def get_customer_summary(
             func.sum(case(((
                 and_(
                     func.upper(models.Case.status).in_(['WIP', 'ASSIGNED', 'INITIATED', 'VERIFICATION', 'QC_PENDING', 'CLIENT_REVIEW', 'IN_PROGRESS', 'PENDING']),
-                    func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CANCELLED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY'])
+                    func.upper(models.Case.status).notin_(['FINALIZED', 'COMPLETED', 'CLOSED'])
                 )
             ), 1), else_=0)).label("inProgressCases")
         ).select_from(models.Case).where(*filters)
@@ -2749,7 +2749,7 @@ async def get_daily_operations(
                 "executive_id": c.assigned_to,
                 "verification_type": c.checks[0].check_type if c.checks else "Employment Check",
                 "status": "COMPLETED" if c.status in ["COMPLETED", "FINALIZED"] else "INSUFFICIENT" if c.status in ["INSUFFICIENT"] else "VERIFICATION" if c.status in ["IN_PROGRESS", "VERIFICATION"] else "PENDING",
-                "sla_days": "Completed" if c.status in ["COMPLETED", "FINALIZED"] else c_sla_days,
+                "sla_days": c_sla_days,
                 "sla_status": c_sla_status,
                 "assigned_time": c.received_date.strftime("%I:%M %p") if c.received_date else "09:15 AM",
                 "updated_time": c.completed_date.strftime("%I:%M %p") if c.completed_date else (c.received_date.strftime("%I:%M %p") if c.received_date else "09:15 AM"),

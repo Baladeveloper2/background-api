@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+from sqlalchemy import select
 from .celery_app import celery_app
 from io import BytesIO
 import boto3
@@ -7,8 +9,10 @@ from dotenv import load_dotenv
 import time
 from playwright.sync_api import sync_playwright
 from sqlalchemy.orm.attributes import flag_modified
-from .database import SessionLocal
+from .database import SessionLocal, AsyncSessionLocal
 from . import models
+from .notification_utils import create_notification
+from .enums import NotificationCategory
 
 load_dotenv()
 
@@ -118,6 +122,37 @@ def generate_case_pdf(self, case_id: str, user_token: str, custom_frontend_url: 
                 
                 db.commit()
                 logger.info("PERSISTENCE SUCCESS: Artifact explicitly appended to candidate vault.")
+                
+                # Notify customer users asynchronously
+                if c.customer_id:
+                    case_id_val = c.id
+                    cust_id_val = c.customer_id
+                    ref_no_val = c.case_ref_no
+                    cand_name_val = c.candidate.name if c.candidate else "Unknown"
+                    
+                    async def async_notify():
+                        async with AsyncSessionLocal() as adb:
+                            res = await adb.execute(select(models.User).filter(models.User.customer_id == cust_id_val))
+                            customer_users = res.scalars().all()
+                            for u in customer_users:
+                                await create_notification(
+                                    adb, u.id, 
+                                    "Final Report Ready", 
+                                    f"The final verification report for {ref_no_val} ({cand_name_val}) has been generated and is ready to download.",
+                                    NotificationCategory.QC_REPORT_READY, 
+                                    case_id=case_id_val
+                                )
+                            await adb.commit()
+                    
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.ensure_future(async_notify())
+                        else:
+                            loop.run_until_complete(async_notify())
+                    except RuntimeError:
+                        asyncio.run(async_notify())
+                        
             else:
                 logger.warning(f"PERSISTENCE ABORT: Case or Candidate not locatable for ID {case_id}")
         except Exception as db_err:

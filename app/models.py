@@ -89,6 +89,7 @@ class User(Base):
     otp_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True)
+    theme_preference = Column(String(50), default="professional-violet")
 
     # Relationships
     role_rel = relationship("Role", backref="users")

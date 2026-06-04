@@ -2280,11 +2280,7 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
 
 @router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def get_allocation_stats(db: AsyncSession = Depends(get_read_db)):
-    FINAL_STATUSES = [
-        'FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE',
-        'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT',
-        'QC_VERIFIED', 'CLOSED'
-    ]
+    FINAL_STATUSES = ['FINALIZED', 'COMPLETED', 'CLOSED']
 
     # Cases not yet assigned to anyone — covers all pre-assignment statuses
     unallocated_stmt = select(func.count(models.Case.id)).filter(
@@ -2527,24 +2523,20 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(personal_filter)
     
     # 3. Dynamic Filtering
-    ALL_FINAL_STATUSES = [
-        'FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE',
-        'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT',
-        'QC_VERIFIED', 'CLOSED'
-    ]
+    ALL_FINAL_STATUSES = ['FINALIZED', 'COMPLETED', 'CLOSED']
     if status and str(status).strip().upper() not in ['ALL', '']:
         status_up = str(status).strip().upper()
-        if status_up == 'VERIFICATION':
-            # WIP: strictly only active verification stage, not pending intake
-            s_filter = models.Case.status == 'VERIFICATION'
-        elif status_up == 'QC':
-            # QC Active Pipeline: include all stages including verified but not yet finalized COMPLETED
-            s_filter = models.Case.status.in_(['QC', 'QC_PENDING', 'QA_PENDING', 'QC_VERIFIED'])
-        elif status_up in ('COMPLETED', 'FINALIZED'):
-            # Treat COMPLETED/FINALIZED as an alias for ALL terminal verdict statuses
+        if status_up in ['POSITIVE', 'NEGATIVE', 'AMBER', 'STOP_CHECK', 'INTERIM', 'INSUFFICIENCY', 'DISCREPANCY', 'UNABLE TO VERIFY', 'INSUFFICIENT', 'HOLD']:
+            # The user is filtering by verification result
+            s_filter = models.Case.final_result == status_up
+        elif status_up in ('VERIFICATION', 'IN_PROGRESS'):
+            s_filter = models.Case.status.in_(['VERIFICATION', 'IN_PROGRESS'])
+        elif status_up in ('QC', 'UNDER_REVIEW'):
+            s_filter = models.Case.status.in_(['QC', 'UNDER_REVIEW', 'QC_PENDING', 'QA_PENDING'])
+        elif status_up in ('COMPLETED', 'FINALIZED', 'CLOSED'):
             s_filter = models.Case.status.in_(ALL_FINAL_STATUSES)
         else:
-            s_filter = models.Case.status == status
+            s_filter = models.Case.status == status_up
             
         stmt = stmt.filter(s_filter)
         base_count_stmt = base_count_stmt.filter(s_filter)
@@ -2592,7 +2584,7 @@ async def read_cases(
         stmt = stmt.filter(models.Case.candidate_id == candidate_id)
         base_count_stmt = base_count_stmt.filter(models.Case.candidate_id == candidate_id)
     if assigned is not None:
-        _FINAL_S = ['FINALIZED','COMPLETED','POSITIVE','NEGATIVE','DISCREPANCY','UNABLE TO VERIFY','HOLD','INSUFFICIENT','QC_VERIFIED','CLOSED']
+        _FINAL_S = ['FINALIZED','COMPLETED','CLOSED']
         if assigned:
             # Active Allocations: cases that have an assigned verifier and are not yet finalized
             active_filter = and_(
@@ -2611,7 +2603,7 @@ async def read_cases(
             base_count_stmt = base_count_stmt.filter(unassigned_filter)
     
     if exclude_completed:
-        _EXCL = ['FINALIZED','COMPLETED','POSITIVE','NEGATIVE','DISCREPANCY','UNABLE TO VERIFY','HOLD','INSUFFICIENT','QC_VERIFIED','CLOSED']
+        _EXCL = ['FINALIZED','COMPLETED','CLOSED']
         comp_filter = models.Case.status.notin_(_EXCL)
         stmt = stmt.filter(comp_filter)
         base_count_stmt = base_count_stmt.filter(comp_filter)
@@ -2634,7 +2626,7 @@ async def read_cases(
         # BUT exclude finalized/archived cases
         risk_threshold = datetime.utcnow() - timedelta(days=7)
         risk_filter = and_(
-            models.Case.status.notin_(['COMPLETED', 'QC_VERIFIED']),
+            models.Case.status.notin_(['FINALIZED', 'COMPLETED', 'CLOSED']),
             or_(
                 models.Case.is_in_tat == 0,
                 models.Case.received_date < risk_threshold
@@ -2760,7 +2752,7 @@ async def read_cases(
             p_tat = tat_utils.calculate_predictive_tat(check_types)
             case_data.predicted_tat = p_tat
             # Suppress risk alerts for archived protocols
-            if str(case.status).upper() in ["COMPLETED", "QC_VERIFIED"]:
+            if str(case.status).upper() in ["FINALIZED", "COMPLETED", "CLOSED"]:
                 case_data.is_at_risk = False
             else:
                 case_data.is_at_risk = tat_utils.check_is_at_risk(case.received_date, p_tat)
@@ -4313,6 +4305,18 @@ async def update_insufficiency_evidence(id: str, data: Dict[str, Any], db: Async
     insuff.updated_at = datetime.utcnow()
     # In a real app, we might set updated_by to current_user.id if it's a customer
     
+    # Notify verifier if assigned
+    c_res = await db.execute(select(models.Case).filter(models.Case.id == insuff.case_id))
+    db_case = c_res.scalar_one_or_none()
+    if db_case and db_case.assigned_to:
+        await notification_utils.create_notification(
+            db, db_case.assigned_to,
+            "Evidence Uploaded",
+            f"Evidence has been uploaded by the customer for insufficiency on case {db_case.case_ref_no}.",
+            enums.NotificationCategory.FORM_SUBMITTED,
+            case_id=db_case.id
+        )
+    
     await db.commit()
     return {"status": "success", "message": "Evidence uploaded successfully"}
 
@@ -4357,6 +4361,18 @@ async def resolve_insufficiency(id: str, data: Dict[str, str], db: AsyncSession 
     if check:
         check.status = "VERIFICATION"
             
+    # Notify the customer
+    if db_case and db_case.customer_id:
+        cust_users_res = await db.execute(select(models.User).filter(models.User.customer_id == db_case.customer_id))
+        for cu in cust_users_res.scalars().all():
+            await notification_utils.create_notification(
+                db, cu.id,
+                "Insufficiency Resolved",
+                f"The insufficiency for {db_case.case_ref_no} has been marked as resolved.",
+                enums.NotificationCategory.SYSTEM_ALERT,
+                case_id=db_case.id
+            )
+
     await db.commit()
     return {"status": "success"}
 

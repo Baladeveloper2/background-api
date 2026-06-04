@@ -70,6 +70,20 @@ async def read_user(
         raise HTTPException(status_code=404, detail="User not found")
     return db_user
 
+@router.patch("/me/theme", response_model=schemas.User)
+async def update_my_theme(
+    theme_update: dict,
+    db: AsyncSession = Depends(database.get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if "theme_preference" not in theme_update:
+        raise HTTPException(status_code=400, detail="Missing theme_preference")
+        
+    current_user.theme_preference = theme_update["theme_preference"]
+    await db.commit()
+    await db.refresh(current_user)
+    return current_user
+
 @router.patch("/{user_id}", response_model=schemas.User)
 async def update_user(
     user_id: str, 
