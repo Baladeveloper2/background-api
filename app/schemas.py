@@ -848,3 +848,51 @@ class FinalizeCaseRequest(BaseModel):
     case_id: str
     remarks: Optional[str] = None
     final_result: Optional[str] = None
+
+
+class SystemSettingBase(BaseModel):
+    key: str
+    value: str
+
+class SystemSettingRead(SystemSettingBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class SystemSettingUpdate(BaseModel):
+    value: str
+
+class OcrJobCreate(BaseModel):
+    file_name: str
+    file_url: str
+    s3_key: Optional[str] = None
+    candidate_id: Optional[str] = None
+
+class OcrJobRead(BaseModel):
+    id: str
+    file_name: str
+    file_url: str
+    s3_key: Optional[str] = None
+    status: str
+    progress: int
+    document_type: str
+    confidence_score: float
+    extracted_data: Dict[str, Any]
+    confidence_scores: Dict[str, Any]
+    fraud_flags: List[str]
+    review_status: str
+    is_verified: bool
+    candidate_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class OcrJobUpdate(BaseModel):
+    extracted_data: Optional[Dict[str, Any]] = None
+    review_status: Optional[str] = None
+    is_verified: Optional[bool] = None
+
+class OcrJobAction(BaseModel):
+    action: str # APPROVE, REJECT, REPROCESS
+

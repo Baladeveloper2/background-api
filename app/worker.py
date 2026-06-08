@@ -7,7 +7,10 @@ from io import BytesIO
 import boto3
 from dotenv import load_dotenv
 import time
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 from sqlalchemy.orm.attributes import flag_modified
 from .database import SessionLocal, AsyncSessionLocal
 from . import models
@@ -28,6 +31,10 @@ def generate_case_pdf(self, case_id: str, user_token: str, custom_frontend_url: 
     authenticates via direct localStorage injection, renders a pixel-perfect PDF, 
     and streams resultant binary directly to AWS S3.
     """
+    if not sync_playwright:
+        logger.error("Playwright library is not installed/available. Cannot generate PDF report.")
+        raise RuntimeError("Playwright is not installed on this host environment. Headless PDF generation is disabled.")
+
     base_url = custom_frontend_url or FRONTEND_URL
     report_url = f"{base_url}/report/{case_id}" 
 
@@ -171,3 +178,176 @@ def generate_case_pdf(self, case_id: str, user_token: str, custom_frontend_url: 
     except Exception as e:
         logger.error(f"CRITICAL RENDER ABORT: {str(e)}")
         raise self.retry(exc=e, countdown=15)
+
+
+@celery_app.task(name="app.worker.process_ocr_document_task")
+def process_ocr_document_task(job_id: str):
+    import requests
+    from .ocr_utils import get_scanner, check_duplicate_records
+    from .ws import manager
+    import asyncio
+    
+    logger.info(f"OCR TASK: Started processing job {job_id}")
+    
+    db = SessionLocal()
+    try:
+        job = db.query(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id).first()
+        if not job:
+            logger.error(f"OCR TASK: Job {job_id} not found in database.")
+            return
+            
+        # 1. Fetch settings from DB
+        settings = {}
+        for s in db.query(models.SystemSetting).all():
+            settings[s.key] = s.value.lower() == "true"
+            
+        enable_ocr = settings.get("enable_ocr", True)
+        enable_ai_validation = settings.get("enable_ai_validation", True)
+        enable_fraud_detection = settings.get("enable_fraud_detection", True)
+        
+        # Async broadcast helper
+        def broadcast_progress(status: str, progress: int, doc_type: str = "Unknown", extra: dict = None):
+            msg = {
+                "type": "OCR_PROGRESS",
+                "job_id": job_id,
+                "status": status,
+                "progress": progress,
+                "document_type": doc_type
+            }
+            if extra:
+                msg.update(extra)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(manager.broadcast(msg))
+                else:
+                    loop.run_until_complete(manager.broadcast(msg))
+            except Exception as e:
+                logger.warning(f"Failed to broadcast websocket progress: {e}")
+
+        # If OCR is disabled, skip processing
+        if not enable_ocr:
+            job.status = "COMPLETED"
+            job.progress = 100
+            db.commit()
+            broadcast_progress("COMPLETED", 100)
+            return
+
+        # Update to processing (20%)
+        job.status = "PROCESSING"
+        job.progress = 20
+        db.commit()
+        broadcast_progress("PROCESSING", 20)
+
+        # 2. Download the document
+        try:
+            res = requests.get(job.file_url, timeout=20)
+            if res.status_code != 200:
+                raise Exception(f"HTTP GET returned status code {res.status_code}")
+            file_bytes = res.content
+        except Exception as dl_err:
+            logger.error(f"OCR TASK: Download failed for {job.file_url}: {dl_err}")
+            job.status = "FAILED"
+            job.progress = 100
+            db.commit()
+            broadcast_progress("FAILED", 100, extra={"error": "Failed to retrieve document"})
+            return
+
+        # 3. OCR Text Extraction (50%)
+        job.status = "EXTRACTING"
+        job.progress = 50
+        db.commit()
+        broadcast_progress("EXTRACTING", 50)
+        
+        scanner = get_scanner()
+        text = scanner.extract_text(file_bytes)
+        
+        # 4. Field Extraction and Classification (80%)
+        job.status = "VALIDATING"
+        job.progress = 80
+        db.commit()
+        broadcast_progress("VALIDATING", 80)
+        
+        extracted = scanner.parse_id(text, job.file_url)
+        doc_type = extracted["document_type"]
+        fields = extracted["fields"]
+        confidence_scores = extracted["confidence_scores"]
+        overall_conf = extracted["overall_confidence"]
+        
+        # 5. Fraud Detection and Verification Rules
+        fraud_flags = []
+        if enable_fraud_detection:
+            # Check Blur
+            if scanner.detect_blur(file_bytes):
+                fraud_flags.append("Blurred Document Detected")
+            # Check Crop
+            if scanner.detect_crop(file_bytes):
+                fraud_flags.append("Cropped Document Detected")
+            # Check Watermarks/Tampering
+            if scanner.detect_tamper(text):
+                fraud_flags.append("Watermark/Possible Tampering Detected")
+            # Check Duplicate Upload
+            if scanner.check_file_duplicate(db, file_bytes):
+                fraud_flags.append("Duplicate File Uploaded (Already exists)")
+                
+            # Duplicate Candidate ID check
+            # For Aadhaar, PAN, Passport
+            id_no = fields.get("id_number")
+            if id_no:
+                # Run async duplicate scan
+                async def run_dup():
+                    return await check_duplicate_records(AsyncSessionLocal(), doc_type, id_no)
+                    
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        dup_emp = asyncio.run_coroutine_threadsafe(run_dup(), loop).result()
+                    else:
+                        dup_emp = asyncio.run(run_dup())
+                except Exception:
+                    dup_emp = None
+                    
+                if dup_emp:
+                    fraud_flags.append(f"Document already linked with Candidate {dup_emp}")
+
+        # Write results to DB
+        job.status = "COMPLETED"
+        job.progress = 100
+        job.document_type = doc_type
+        job.confidence_score = float(overall_conf)
+        job.extracted_data = fields
+        job.confidence_scores = confidence_scores
+        job.fraud_flags = fraud_flags
+        
+        db.commit()
+        broadcast_progress("COMPLETED", 100, doc_type, extra={
+            "document_type": doc_type,
+            "fields": fields,
+            "confidence_scores": confidence_scores,
+            "fraud_flags": fraud_flags
+        })
+        logger.info(f"OCR TASK: Completed job {job_id} successfully.")
+
+    except Exception as e:
+        logger.error(f"OCR TASK: Failed processing job {job_id}: {str(e)}", exc_info=True)
+        try:
+            job = db.query(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id).first()
+            if job:
+                job.status = "FAILED"
+                job.progress = 100
+                db.commit()
+                # Broadcast failure
+                msg = {
+                    "type": "OCR_PROGRESS",
+                    "job_id": job_id,
+                    "status": "FAILED",
+                    "progress": 100,
+                    "document_type": "Unknown",
+                    "error": str(e)
+                }
+                asyncio.run(manager.broadcast(msg))
+        except Exception as db_err:
+            logger.error(f"OCR TASK: DB update on failure failed: {db_err}")
+    finally:
+        db.close()
+

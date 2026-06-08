@@ -600,3 +600,96 @@ class Invoice(Base):
     creator = relationship("User", foreign_keys=[generated_by], backref="created_invoices")
     modifier = relationship("User", foreign_keys=[modified_by], backref="modified_invoices")
     cases = relationship("Case", backref="invoice_rel")
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    key = Column(String(255), unique=True, index=True, nullable=False)
+    value = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OcrProcessingJob(Base):
+    __tablename__ = "ocr_processing_jobs"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    file_name = Column(String(255), nullable=False)
+    file_url = Column(String(512), nullable=False)
+    s3_key = Column(String(255), nullable=True)
+    status = Column(String(50), default="QUEUED", index=True) # QUEUED, PROCESSING, EXTRACTING, VALIDATING, COMPLETED, FAILED
+    progress = Column(Integer, default=0)
+    document_type = Column(String(100), default="Unknown")
+    confidence_score = Column(Float, default=0.0)
+    extracted_data = Column(JSONEncodedDict, default=lambda: {})
+    confidence_scores = Column(JSONEncodedDict, default=lambda: {})
+    fraud_flags = Column(JSONEncodedList, default=lambda: [])
+    review_status = Column(String(50), default="PENDING", index=True) # PENDING, APPROVED, REJECTED
+    is_verified = Column(Boolean, default=False)
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    candidate = relationship("Candidate")
+
+
+class AddressVerification(Base):
+    __tablename__ = "address_verifications"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False)
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    accuracy = Column(Float, nullable=True)
+    altitude = Column(Float, nullable=True)
+    captured_address = Column(Text, nullable=True)
+    submitted_address = Column(Text, nullable=True)
+    submitted_latitude = Column(Float, nullable=True)
+    submitted_longitude = Column(Float, nullable=True)
+    distance_meters = Column(Float, nullable=True)
+    verification_status = Column(String(50), default="PENDING", index=True) # PENDING, VERIFIED, PARTIALLY_VERIFIED, INSUFFICIENT, ADDRESS_MISMATCH, UNABLE_TO_LOCATE, REJECTED
+    verified_at = Column(DateTime, nullable=True)
+    verified_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    
+    # Questionnaire details
+    residence_type = Column(String(50), nullable=True) # Owned, Rented, Company Accommodation
+    years_at_address = Column(Integer, default=0)
+    neighbour_confirmation = Column(String(10), nullable=True) # Yes, No
+    remarks = Column(Text, nullable=True)
+    neighbour_remarks = Column(Text, nullable=True)
+
+    # Face verification details
+    face_match_score = Column(Float, nullable=True)
+    executive_selfie_url = Column(String(512), nullable=True)
+    candidate_selfie_url = Column(String(512), nullable=True)
+
+    # Risk metrics
+    risk_score = Column(Integer, default=0)
+    risk_flags = Column(JSONEncodedList, default=lambda: []) # Location Mismatch, Fake GPS, repeated upload, VPN, Mock Location, Rooted Device
+    device_info = Column(JSONEncodedDict, default=lambda: {})
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    candidate = relationship("Candidate")
+    case = relationship("Case")
+    check = relationship("VerificationCheck")
+    verifier = relationship("User")
+
+
+class AddressVerificationPhoto(Base):
+    __tablename__ = "address_verification_photos"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    verification_id = Column(String(36), ForeignKey("address_verifications.id", ondelete="CASCADE"), nullable=False)
+    image_url = Column(String(512), nullable=False)
+    s3_key = Column(String(255), nullable=True)
+    photo_type = Column(String(50), nullable=True) # front_house, street_view, door_number, nearby_landmark, selfie, utility_bill, rental_agreement, neighbour_proof
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    captured_at = Column(DateTime, default=datetime.utcnow)
+    watermark_text = Column(Text, nullable=True)
+    file_hash = Column(String(64), nullable=True, index=True)
+
+    verification = relationship("AddressVerification", backref="photos")
+

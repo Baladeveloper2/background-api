@@ -5,7 +5,7 @@ from . import (
     user_routes, candidate_routes, batch_routes, case_routes, 
     verification_routes, stats_routes, role_routes, media_routes,
     notification_routes, ai_routes, billing_routes, client_doc_routes,
-    public_routes, bulk_invite_routes, search_routes
+    public_routes, bulk_invite_routes, search_routes, ocr_routes
 )
 
 from .database import engine, Base, get_async_db, async_engine
@@ -31,9 +31,37 @@ async def lifespan(app: FastAPI):
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
     instrument_sqlalchemy(async_engine.sync_engine)
     
+    try:
+        from fastapi.concurrency import run_in_threadpool
+        # Ensure new tables are created
+        await run_in_threadpool(Base.metadata.create_all, bind=engine)
+        logger.info("Database tables verified/created successfully.")
+        
+        # Seed settings
+        from .database import AsyncSessionLocal
+        from . import models
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as session:
+            for key, value in [
+                ("enable_ocr", "true"),
+                ("enable_ai_validation", "true"),
+                ("enable_auto_mapping", "true"),
+                ("enable_fraud_detection", "true"),
+                ("enable_manual_review", "true")
+            ]:
+                res = await session.execute(select(models.SystemSetting).filter(models.SystemSetting.key == key))
+                if not res.scalar_one_or_none():
+                    setting = models.SystemSetting(key=key, value=value)
+                    session.add(setting)
+            await session.commit()
+            logger.info("OCR System settings seeded.")
+    except Exception as e:
+        logger.error(f"Lifespan startup table check failed: {str(e)}")
+    
     yield
     # Shutdown: Dispose of the async engine to avoid event loop errors
     await async_engine.dispose()
+
 
 # Database tables should be managed by alembic migrations in production, not auto-generated
 # Base.metadata.create_all(bind=engine)
@@ -125,6 +153,7 @@ api_v1.include_router(client_doc_routes.router)
 api_v1.include_router(public_routes.router)
 api_v1.include_router(bulk_invite_routes.router)
 api_v1.include_router(search_routes.router)
+api_v1.include_router(ocr_routes.router)
 
 # Alias routes for Customer MIS Export to ensure all path variations resolve perfectly
 from .stats_routes import export_customer_mis_data
