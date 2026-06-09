@@ -611,8 +611,8 @@ class SystemSetting(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class OcrProcessingJob(Base):
-    __tablename__ = "ocr_processing_jobs"
+class OcrExtraction(Base):
+    __tablename__ = "ocr_extractions"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     file_name = Column(String(255), nullable=False)
     file_url = Column(String(512), nullable=False)
@@ -627,10 +627,53 @@ class OcrProcessingJob(Base):
     review_status = Column(String(50), default="PENDING", index=True) # PENDING, APPROVED, REJECTED
     is_verified = Column(Boolean, default=False)
     candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
+    batch_id = Column(String(36), nullable=True, index=True) # For bulk OCR grouping
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     candidate = relationship("Candidate")
+
+
+class OcrClassification(Base):
+    __tablename__ = "ocr_classifications"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    extraction_id = Column(String(36), ForeignKey("ocr_extractions.id", ondelete="CASCADE"), nullable=False, index=True)
+    detected_type = Column(String(100), nullable=False)
+    confidence = Column(Float, default=0.0)
+    manual_override_type = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OcrProcessingLog(Base):
+    __tablename__ = "ocr_processing_logs"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    extraction_id = Column(String(36), ForeignKey("ocr_extractions.id", ondelete="CASCADE"), nullable=False, index=True)
+    step = Column(String(100), nullable=False) # e.g. "DESKEW", "DENOISE", "EXTRACTION"
+    status = Column(String(50), default="SUCCESS")
+    details = Column(Text, nullable=True)
+    duration_ms = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OcrReviewQueue(Base):
+    __tablename__ = "ocr_review_queue"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    extraction_id = Column(String(36), ForeignKey("ocr_extractions.id", ondelete="CASCADE"), nullable=False, index=True)
+    confidence_score = Column(Float, nullable=False)
+    assigned_to = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(50), default="PENDING", index=True) # PENDING, REVIEWED
+    reviewer_comments = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime, nullable=True)
+
+
+class OcrFieldMapping(Base):
+    __tablename__ = "ocr_field_mappings"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    document_type = Column(String(100), nullable=False, index=True)
+    ocr_field_name = Column(String(100), nullable=False)
+    bgv_field_name = Column(String(100), nullable=False)
+    is_active = Column(Boolean, default=True)
 
 
 class AddressVerification(Base):
@@ -693,3 +736,27 @@ class AddressVerificationPhoto(Base):
 
     verification = relationship("AddressVerification", backref="photos")
 
+
+class AddressChangeRequest(Base):
+    __tablename__ = "address_change_requests"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True, index=True)
+    
+    old_address = Column(Text, nullable=False)
+    new_address = Column(Text, nullable=False)
+    reason = Column(Text, nullable=True)
+    proof_url = Column(String(512), nullable=True)
+    
+    status = Column(String(50), default="PENDING", index=True) # PENDING, APPROVED, REJECTED
+    ip_address = Column(String(100), nullable=True)
+    
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    remarks = Column(Text, nullable=True)
+    
+    # Relationships
+    candidate = relationship("Candidate")
+    case = relationship("Case")
+    reviewer = relationship("User", foreign_keys=[reviewed_by])

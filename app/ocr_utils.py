@@ -173,23 +173,49 @@ class OCRScanner:
 
         combined_text = f"{hint_text} {text}"
         
-        # Classification
-        doc_type = "Unknown"
+        # Comprehensive Classification
+        doc_type = "Unknown Document"
         if re.search(r'aadhaar|uidai|unique\s?identification|government\s?of\s?india', combined_text, re.IGNORECASE):
             doc_type = "Aadhaar Card"
         elif re.search(r'income\s?tax|permanent\s?account\s?number|pan\s?card', combined_text, re.IGNORECASE) or re.search(r'[a-z]{5}[0-9]{4}[a-z]{1}', combined_text, re.IGNORECASE):
             doc_type = "PAN Card"
         elif re.search(r'passport|republic\s?of\s?india|national\s?status', combined_text, re.IGNORECASE) or re.search(r'^[a-z]{1}[0-9]{7}', hint_text, re.IGNORECASE):
             doc_type = "Passport"
-        elif re.search(r'payslip|pay\s?slip|salary\s?slip|earnings\s?statement|employer|joining|relieving|experience\s?letter', combined_text, re.IGNORECASE):
-            doc_type = "Employment Document"
-        elif re.search(r'degree|diploma|certificate|graduation|marksheet|university|college|passing\s?certificate|academic', combined_text, re.IGNORECASE):
-            doc_type = "Education Document"
+        elif re.search(r'driving\s?license|transport\s?department|driver\s?license', combined_text, re.IGNORECASE):
+            doc_type = "Driving License"
+        elif re.search(r'election\s?commission|voter\s?id|elector\s?photo\s?identity', combined_text, re.IGNORECASE):
+            doc_type = "Voter ID"
+        elif re.search(r'degree\s?certificate|graduation|university|convocation', combined_text, re.IGNORECASE):
+            doc_type = "Degree Certificate"
+        elif re.search(r'marksheet|mark\s?sheet|statement\s?of\s?marks|grade\s?card', combined_text, re.IGNORECASE):
+            doc_type = "Marksheet"
+        elif re.search(r'payslip|pay\s?slip|salary\s?slip|earnings\s?statement', combined_text, re.IGNORECASE):
+            doc_type = "Salary Slip"
+        elif re.search(r'experience\s?letter|relieving\s?letter|service\s?certificate', combined_text, re.IGNORECASE):
+            doc_type = "Experience Letter"
+        elif re.search(r'offer\s?letter|appointment\s?letter', combined_text, re.IGNORECASE):
+            doc_type = "Offer Letter"
+        elif re.search(r'utility\s?bill|electricity\s?bill|water\s?bill|gas\s?bill|telecom|broadband', combined_text, re.IGNORECASE):
+            doc_type = "Utility Bill"
+        elif re.search(r'bank\s?statement|statement\s?of\s?account', combined_text, re.IGNORECASE):
+            doc_type = "Bank Statement"
+        elif re.search(r'rental\s?agreement|lease\s?agreement|leave\s?and\s?license', combined_text, re.IGNORECASE):
+            doc_type = "Rental Agreement"
+        elif re.search(r'police\s?clearance|pcc|criminal\s?record\s?check|police\s?verification', combined_text, re.IGNORECASE):
+            doc_type = "Police Clearance"
+        elif re.search(r'drug\s?test|toxicology|substance\s?abuse\s?panel|medical\s?report', combined_text, re.IGNORECASE):
+            doc_type = "Drug Test Report"
+        elif re.search(r'reference\s?letter|letter\s?of\s?recommendation', combined_text, re.IGNORECASE):
+            doc_type = "Reference Letter"
+        elif re.search(r'resume|curriculum\s?vitae|cv', combined_text, re.IGNORECASE):
+            doc_type = "Resume"
+        elif re.search(r'employment\s?contract|employment\s?agreement', combined_text, re.IGNORECASE):
+            doc_type = "Employment Contract"
         else:
             if "degree" in hint_text or "edu" in hint_text or "cert" in hint_text:
-                doc_type = "Education Document"
+                doc_type = "Degree Certificate"
             elif "payslip" in hint_text or "salary" in hint_text or "job" in hint_text:
-                doc_type = "Employment Document"
+                doc_type = "Salary Slip"
 
         fields = {}
         confidence = {}
@@ -258,7 +284,7 @@ class OCRScanner:
             exp_date = exp_match.group(1) if exp_match else "10-05-2032"
             add_field("expiry_date", exp_date, 92 if exp_match else 65)
 
-        elif doc_type == "Employment Document":
+        elif doc_type in ["Salary Slip", "Experience Letter", "Offer Letter", "Employment Contract"]:
             emp_match = re.search(r'([A-Za-z0-9\s]+ (?:Pvt|Ltd|Limited|Solutions|Corp|Co))', text, re.IGNORECASE)
             employer = emp_match.group(1).strip() if emp_match else "STOX ZO SOLUTIONS PVT LTD"
             add_field("employer_name", employer.upper(), 92 if emp_match else 70)
@@ -274,12 +300,13 @@ class OCRScanner:
             doj_match = re.search(r'(?:doj|date\s?of\s?joining|joined):?\s?(\d{2}[-/]\d{2}[-/]\d{4})', text, re.IGNORECASE)
             doj = doj_match.group(1) if doj_match else "01-06-2021"
             add_field("joining_date", doj, 93 if doj_match else 65)
+            
+            if doc_type == "Experience Letter":
+                dol_match = re.search(r'(?:dol|date\s?of\s?leaving|relieved):?\s?(\d{2}[-/]\d{2}[-/]\d{4})', text, re.IGNORECASE)
+                dol = dol_match.group(1) if dol_match else "30-11-2024"
+                add_field("relieving_date", dol, 92 if dol_match else 65)
 
-            dol_match = re.search(r'(?:dol|date\s?of\s?leaving|relieved):?\s?(\d{2}[-/]\d{2}[-/]\d{4})', text, re.IGNORECASE)
-            dol = dol_match.group(1) if dol_match else "30-11-2024"
-            add_field("relieving_date", dol, 92 if dol_match else 65)
-
-        elif doc_type == "Education Document":
+        elif doc_type in ["Degree Certificate", "Marksheet"]:
             univ_match = re.search(r'([A-Za-z\s]+ (?:University|College|Institute|Academy))', text, re.IGNORECASE)
             univ = univ_match.group(1).strip() if univ_match else "ANNA UNIVERSITY CHENNAI"
             add_field("university", univ.upper(), 93 if univ_match else 70)
@@ -305,8 +332,11 @@ class OCRScanner:
             add_field("id_number", "123456789012", 55)
             add_field("dob_on_id", "11-06-1999", 60)
 
+        # Dynamic confidence penalty for blurry/tampered docs
         overall_conf = int(sum(confidence.values()) / len(confidence)) if confidence else 50
-
+        if self.detect_tamper(text):
+            overall_conf = min(overall_conf, 40)
+            
         return {
             "document_type": doc_type,
             "fields": fields,

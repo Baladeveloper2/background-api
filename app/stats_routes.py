@@ -1298,6 +1298,28 @@ async def get_dashboard_stats(
 
         # 6. Customers and Revenue already fetched in Step 2.
 
+        # 10. Address Change Requests
+        acr_stmt = select(models.AddressChangeRequest.status, func.count(models.AddressChangeRequest.id)).group_by(models.AddressChangeRequest.status)
+        if filter_customer:
+            acr_stmt = acr_stmt.join(models.Case).filter(models.Case.customer_id == current_user.customer_id)
+        if filter_verifier:
+            acr_stmt = acr_stmt.join(models.Case).filter(models.Case.assigned_to == current_user.id)
+        
+        acr_res = await db.execute(acr_stmt)
+        acr_rows = acr_res.all()
+        address_change_stats = {
+            "PENDING": 0,
+            "APPROVED": 0,
+            "REJECTED": 0,
+            "TOTAL": 0
+        }
+        for row in acr_rows:
+            st = str(row[0]).upper()
+            count = int(row[1])
+            if st in address_change_stats:
+                address_change_stats[st] += count
+            address_change_stats["TOTAL"] += count
+
         # Unified WIP: all non-terminal, non-pending active statuses
         wip_statuses = ['IN_PROGRESS', 'VERIFICATION', 'QC', 'QC_PENDING', 'QA_PENDING']
         wip_count = sum(v for k, v in status_counts.items() if k in wip_statuses)
@@ -1341,7 +1363,8 @@ async def get_dashboard_stats(
             "geo_data": geo_data,
             "execution_stats": [],
             "activity_log": activity_log,
-            "status_counts": status_counts
+            "status_counts": status_counts,
+            "address_change_requests": address_change_stats
         }
         return res_data
     except Exception as e:

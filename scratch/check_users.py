@@ -1,32 +1,20 @@
+import os
+import sys
 import asyncio
+
+# Add the parent directory to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from app.database import AsyncSessionLocal
-from app import models, enums
+from app import models
 from sqlalchemy import select
 
-async def check():
-    async with AsyncSessionLocal() as db:
-        res = await db.execute(select(models.User.email, models.User.role, models.User.customer_id))
+async def main():
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(models.User.email, models.User.role))
         users = res.all()
-        print("--- All Users ---")
         for u in users:
-            print(u)
-        
-        # Check specific case customer
-        # Let's find David D's case
-        stmt = select(models.Case).join(models.Candidate).filter(models.Candidate.name.ilike("%David%"))
-        res = await db.execute(stmt)
-        case = res.scalar_one_or_none()
-        if case:
-            print(f"\n--- Case for David (ID: {case.id}) ---")
-            print(f"Customer ID: {case.customer_id}")
-            
-            # Find users for this customer
-            u_stmt = select(models.User).filter(models.User.customer_id == case.customer_id)
-            u_res = await db.execute(u_stmt)
-            c_users = u_res.scalars().all()
-            print(f"Users for this customer: {[u.email + ' (' + u.role + ')' for u in c_users]}")
-        else:
-            print("\nCase for David not found")
+            print(f"Email: {u[0]}, Role: {u[1]}")
 
 if __name__ == "__main__":
-    asyncio.run(check())
+    asyncio.run(main())

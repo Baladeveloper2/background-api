@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+from datetime import datetime
 from sqlalchemy import select
 from .celery_app import celery_app
 from io import BytesIO
@@ -13,7 +14,7 @@ except ImportError:
     sync_playwright = None
 from sqlalchemy.orm.attributes import flag_modified
 from .database import SessionLocal, AsyncSessionLocal
-from . import models
+from . import models, aws_utils
 from .notification_utils import create_notification
 from .enums import NotificationCategory
 
@@ -191,7 +192,7 @@ def process_ocr_document_task(job_id: str):
     
     db = SessionLocal()
     try:
-        job = db.query(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id).first()
+        job = db.query(models.OcrExtraction).filter(models.OcrExtraction.id == job_id).first()
         if not job:
             logger.error(f"OCR TASK: Job {job_id} not found in database.")
             return
@@ -217,9 +218,14 @@ def process_ocr_document_task(job_id: str):
             if extra:
                 msg.update(extra)
             try:
-                loop = asyncio.get_event_loop()
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
                 if loop.is_running():
-                    asyncio.ensure_future(manager.broadcast(msg))
+                    asyncio.run_coroutine_threadsafe(manager.broadcast(msg), loop)
                 else:
                     loop.run_until_complete(manager.broadcast(msg))
             except Exception as e:
@@ -241,16 +247,42 @@ def process_ocr_document_task(job_id: str):
 
         # 2. Download the document
         try:
-            res = requests.get(job.file_url, timeout=20)
-            if res.status_code != 200:
-                raise Exception(f"HTTP GET returned status code {res.status_code}")
-            file_bytes = res.content
+            s3_key = job.s3_key
+            if not s3_key and job.file_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(job.file_url)
+                path = parsed.path.lstrip('/')
+                s3_key = path
+
+            if s3_key and aws_utils.s3_client:
+                logger.info(f"OCR TASK: Downloading via direct S3 Client: {s3_key}")
+                s3_response = aws_utils.s3_client.get_object(
+                    Bucket=aws_utils.aws_bucket,
+                    Key=s3_key
+                )
+                file_bytes = s3_response['Body'].read()
+            else:
+                logger.info(f"OCR TASK: Downloading via HTTP GET: {job.file_url}")
+                import requests
+                res = requests.get(job.file_url, timeout=20)
+                if res.status_code != 200:
+                    raise Exception(f"HTTP GET returned status code {res.status_code}")
+                file_bytes = res.content
         except Exception as dl_err:
             logger.error(f"OCR TASK: Download failed for {job.file_url}: {dl_err}")
             job.status = "FAILED"
             job.progress = 100
+            error_details = {
+                "__error__": f"Failed to retrieve document: {str(dl_err)}",
+                "__failed_stage__": "DOWNLOAD",
+                "__timestamp__": datetime.utcnow().isoformat()
+            }
+            job.extracted_data = error_details
             db.commit()
-            broadcast_progress("FAILED", 100, extra={"error": "Failed to retrieve document"})
+            broadcast_progress("FAILED", 100, extra={
+                "error": "Failed to retrieve document",
+                **error_details
+            })
             return
 
         # 3. OCR Text Extraction (50%)
@@ -331,10 +363,16 @@ def process_ocr_document_task(job_id: str):
     except Exception as e:
         logger.error(f"OCR TASK: Failed processing job {job_id}: {str(e)}", exc_info=True)
         try:
-            job = db.query(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id).first()
+            job = db.query(models.OcrExtraction).filter(models.OcrExtraction.id == job_id).first()
             if job:
                 job.status = "FAILED"
                 job.progress = 100
+                error_details = {
+                    "__error__": f"Extraction engine error: {str(e)}",
+                    "__failed_stage__": "TEXT_EXTRACTION",
+                    "__timestamp__": datetime.utcnow().isoformat()
+                }
+                job.extracted_data = error_details
                 db.commit()
                 # Broadcast failure
                 msg = {
@@ -343,7 +381,8 @@ def process_ocr_document_task(job_id: str):
                     "status": "FAILED",
                     "progress": 100,
                     "document_type": "Unknown",
-                    "error": str(e)
+                    "error": str(e),
+                    **error_details
                 }
                 asyncio.run(manager.broadcast(msg))
         except Exception as db_err:

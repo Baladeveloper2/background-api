@@ -17,6 +17,7 @@ logger = logging.getLogger("ocr_routes")
 router = APIRouter(prefix="/ocr", tags=["OCR / Document Intelligence"])
 
 def parse_date_string(date_str: str) -> Optional[date]:
+    
     if not date_str:
         return None
     cleaned = date_str.strip().replace("/", "-")
@@ -62,7 +63,7 @@ async def update_ocr_settings(
     res = await db.execute(stmt)
     return res.scalars().all()
 
-@router.post("/upload", response_model=schemas.OcrJobRead)
+@router.post("/upload", response_model=schemas.OcrExtractionRead)
 async def upload_ocr_document(
     file: UploadFile = File(...),
     candidate_id: Optional[str] = None,
@@ -98,7 +99,7 @@ async def upload_ocr_document(
         file_url = f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}"
         
         # Create OCR Processing Job record
-        job = models.OcrProcessingJob(
+        job = models.OcrExtraction(
             file_name=file.filename,
             file_url=file_url,
             s3_key=unique_filename,
@@ -125,43 +126,128 @@ async def upload_ocr_document(
         await db.refresh(job)
 
         # Trigger background Celery Task (using delay or threadpool since celery is configured)
-        process_ocr_document_task.delay(job.id)
+        try:
+            process_ocr_document_task.delay(job.id)
+        except Exception:
+            pass
+        
+        import threading
+        threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
         
         return job
     except Exception as e:
         logger.error(f"OCR document upload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to upload document for OCR: {str(e)}")
 
-@router.get("/jobs", response_model=List[schemas.OcrJobRead])
+@router.post("/bulk-process", response_model=List[schemas.OcrExtractionRead])
+async def bulk_upload_ocr_documents(
+    files: List[UploadFile] = File(...),
+    candidate_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if not aws_utils.s3_client:
+        raise HTTPException(status_code=503, detail="S3 Storage service unavailable")
+
+    batch_id = str(uuid.uuid4())
+    created_jobs = []
+
+    for file in files:
+        try:
+            ext = os.path.splitext(file.filename)[1].lower()
+            allowed_exts = ['.pdf', '.jpg', '.jpeg', '.png', '.tiff', '.heic', '.zip', '.rar']
+            if ext not in allowed_exts:
+                continue
+
+            file_data = await file.read()
+            file_size_mb = len(file_data) / (1024 * 1024)
+            if file_size_mb > 20.0:
+                continue
+
+            unique_filename = f"ocr_documents/{uuid.uuid4()}_{file.filename}"
+            await db.run_sync(
+                lambda session: aws_utils.s3_client.put_object(
+                    Bucket=aws_utils.aws_bucket,
+                    Key=unique_filename,
+                    Body=file_data,
+                    ContentType=file.content_type
+                )
+            )
+            
+            file_url = f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}"
+            
+            job = models.OcrExtraction(
+                file_name=file.filename,
+                file_url=file_url,
+                s3_key=unique_filename,
+                status="QUEUED",
+                progress=0,
+                candidate_id=candidate_id,
+                batch_id=batch_id
+            )
+            
+            import hashlib
+            file_hash = hashlib.sha256(file_data).hexdigest()
+            meta = models.DocumentMetadata(
+                file_hash=file_hash,
+                file_name=file.filename,
+                mime_type=file.content_type,
+                size=len(file_data),
+                uploader_id=current_user.id,
+                candidate_id=candidate_id
+            )
+            
+            db.add(job)
+            db.add(meta)
+            created_jobs.append(job)
+            
+        except Exception as e:
+            logger.error(f"Bulk OCR document upload failed for {file.filename}: {e}", exc_info=True)
+            continue
+            
+    await db.commit()
+    
+    import threading
+    for job in created_jobs:
+        await db.refresh(job)
+        try:
+            process_ocr_document_task.delay(job.id)
+        except Exception:
+            pass
+        threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
+        
+    return created_jobs
+
+@router.get("/jobs", response_model=List[schemas.OcrExtractionRead])
 async def list_ocr_jobs(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    stmt = select(models.OcrProcessingJob).order_by(models.OcrProcessingJob.created_at.desc())
+    stmt = select(models.OcrExtraction).order_by(models.OcrExtraction.created_at.desc())
     res = await db.execute(stmt)
     return res.scalars().all()
 
-@router.get("/jobs/{job_id}", response_model=schemas.OcrJobRead)
+@router.get("/jobs/{job_id}", response_model=schemas.OcrExtractionRead)
 async def get_ocr_job(
     job_id: str,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    stmt = select(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id)
+    stmt = select(models.OcrExtraction).filter(models.OcrExtraction.id == job_id)
     res = await db.execute(stmt)
     job = res.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="OCR job not found.")
     return job
 
-@router.post("/jobs/{job_id}/action", response_model=schemas.OcrJobRead)
+@router.post("/jobs/{job_id}/action", response_model=schemas.OcrExtractionRead)
 async def execute_ocr_action(
     job_id: str,
-    payload: schemas.OcrJobAction,
+    payload: schemas.OcrExtractionAction,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    stmt = select(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id)
+    stmt = select(models.OcrExtraction).filter(models.OcrExtraction.id == job_id)
     res = await db.execute(stmt)
     job = res.scalar_one_or_none()
     if not job:
@@ -179,7 +265,12 @@ async def execute_ocr_action(
         job.progress = 0
         job.review_status = "PENDING"
         job.is_verified = False
-        process_ocr_document_task.delay(job.id)
+        try:
+            process_ocr_document_task.delay(job.id)
+        except Exception:
+            pass
+        import threading
+        threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
     else:
         raise HTTPException(status_code=400, detail=f"Invalid action: {act}")
 
@@ -187,14 +278,14 @@ async def execute_ocr_action(
     await db.refresh(job)
     return job
 
-@router.post("/jobs/{job_id}/save", response_model=schemas.OcrJobRead)
+@router.post("/jobs/{job_id}/save", response_model=schemas.OcrExtractionRead)
 async def save_ocr_job_results(
     job_id: str,
-    payload: schemas.OcrJobUpdate,
+    payload: schemas.OcrExtractionUpdate,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    stmt = select(models.OcrProcessingJob).filter(models.OcrProcessingJob.id == job_id)
+    stmt = select(models.OcrExtraction).filter(models.OcrExtraction.id == job_id)
     res = await db.execute(stmt)
     job = res.scalar_one_or_none()
     if not job:
@@ -328,3 +419,43 @@ async def save_ocr_job_results(
     await db.commit()
     await db.refresh(job)
     return job
+
+@router.post("/process-existing", response_model=schemas.OcrExtractionRead)
+async def process_existing_file(
+    payload: dict,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    try:
+        file_url = payload.get("file_url")
+        file_name = payload.get("file_name", "document")
+        candidate_id = payload.get("candidate_id")
+
+        if not file_url:
+            raise HTTPException(status_code=400, detail="file_url is required")
+
+        job = models.OcrExtraction(
+            file_name=file_name,
+            file_url=file_url,
+            s3_key=file_url.split(".com/")[-1] if ".com/" in file_url else file_url,
+            status="QUEUED",
+            progress=0,
+            candidate_id=candidate_id,
+            batch_id=str(uuid.uuid4())
+        )
+        
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+
+        try:
+            process_ocr_document_task.delay(job.id)
+        except Exception:
+            pass
+        import threading
+        threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
+        
+        return job
+    except Exception as e:
+        logger.error(f"Failed to process existing document for OCR: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to trigger OCR: {str(e)}")

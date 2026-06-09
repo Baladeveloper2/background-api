@@ -660,6 +660,7 @@ class DashboardStats(BaseModel):
     execution_stats: List[ExecutionPoint] = []
     activity_log: List[ActivityLogItem] = []
     status_counts: Dict[str, int] = {}
+    address_change_requests: Dict[str, int] = {}
 class DailyStat(BaseModel):
     customer: str
     received: int
@@ -863,13 +864,52 @@ class SystemSettingRead(SystemSettingBase):
 class SystemSettingUpdate(BaseModel):
     value: str
 
-class OcrJobCreate(BaseModel):
+class OcrExtractionCreate(BaseModel):
     file_name: str
     file_url: str
     s3_key: Optional[str] = None
     candidate_id: Optional[str] = None
+    batch_id: Optional[str] = None
 
-class OcrJobRead(BaseModel):
+class OcrClassificationRead(BaseModel):
+    id: str
+    extraction_id: str
+    detected_type: str
+    confidence: float
+    manual_override_type: Optional[str] = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class OcrProcessingLogRead(BaseModel):
+    id: str
+    extraction_id: str
+    step: str
+    status: str
+    details: Optional[str] = None
+    duration_ms: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class OcrReviewQueueRead(BaseModel):
+    id: str
+    extraction_id: str
+    confidence_score: float
+    assigned_to: Optional[str] = None
+    status: str
+    reviewer_comments: Optional[str] = None
+    created_at: datetime
+    reviewed_at: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class OcrFieldMappingRead(BaseModel):
+    id: str
+    document_type: str
+    ocr_field_name: str
+    bgv_field_name: str
+    is_active: bool
+    model_config = ConfigDict(from_attributes=True)
+
+class OcrExtractionRead(BaseModel):
     id: str
     file_name: str
     file_url: str
@@ -884,15 +924,16 @@ class OcrJobRead(BaseModel):
     review_status: str
     is_verified: bool
     candidate_id: Optional[str] = None
+    batch_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
-class OcrJobUpdate(BaseModel):
+class OcrExtractionUpdate(BaseModel):
     extracted_data: Optional[Dict[str, Any]] = None
     review_status: Optional[str] = None
     is_verified: Optional[bool] = None
 
-class OcrJobAction(BaseModel):
+class OcrExtractionAction(BaseModel):
     action: str # APPROVE, REJECT, REPROCESS
 
