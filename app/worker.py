@@ -285,51 +285,77 @@ def process_ocr_document_task(job_id: str):
             })
             return
 
-        # 3. OCR Text Extraction (50%)
+        # 3. OCR Text Extraction via Multi-Engine Pipeline (50%)
         job.status = "EXTRACTING"
         job.progress = 50
         db.commit()
         broadcast_progress("EXTRACTING", 50)
         
         scanner = get_scanner()
-        text = scanner.extract_text(file_bytes)
+        extraction_start = time.time()
         
+        # Use multi-engine pipeline: PaddleOCR → DocTR → EasyOCR → Tesseract
+        text, ocr_confidence, engine_used, retry_count, preprocessing_steps = \
+            scanner.extract_text_multiengine(file_bytes, source_url=job.file_url)
+        
+        extraction_time_ms = int((time.time() - extraction_start) * 1000)
+        logger.info(f"OCR TASK: Multi-engine extraction complete. Engine={engine_used}, "
+                     f"Confidence={ocr_confidence:.1f}%, Retries={retry_count}, Time={extraction_time_ms}ms")
+
         # 4. Field Extraction and Classification (80%)
         job.status = "VALIDATING"
         job.progress = 80
         db.commit()
         broadcast_progress("VALIDATING", 80)
-        
+
         extracted = scanner.parse_id(text, job.file_url)
         doc_type = extracted["document_type"]
         fields = extracted["fields"]
         confidence_scores = extracted["confidence_scores"]
         overall_conf = extracted["overall_confidence"]
-        
+
+        # 4b. QR / Barcode / Signature detection
+        is_pdf = file_bytes[:4] == b'%PDF'
+        qr_barcode = {"qr_data": None, "barcode_data": None}
+        signature_detected = False
+        if not is_pdf:
+            try:
+                qr_barcode = scanner.detect_qr_and_barcode(file_bytes)
+            except Exception:
+                pass
+            try:
+                signature_detected = scanner.detect_signature(file_bytes)
+            except Exception:
+                pass
+
+        # Enrich fields with ancillary detections
+        if qr_barcode.get("qr_data"):
+            fields["qr_code_data"] = qr_barcode["qr_data"]
+            confidence_scores["qr_code_data"] = 99
+        if qr_barcode.get("barcode_data"):
+            fields["barcode_data"] = qr_barcode["barcode_data"]
+            confidence_scores["barcode_data"] = 99
+        fields["signature_detected"] = "Yes" if signature_detected else "No"
+        confidence_scores["signature_detected"] = 85
+
         # 5. Fraud Detection and Verification Rules
         fraud_flags = []
         if enable_fraud_detection:
-            # Check Blur
             if scanner.detect_blur(file_bytes):
                 fraud_flags.append("Blurred Document Detected")
-            # Check Crop
             if scanner.detect_crop(file_bytes):
-                fraud_flags.append("Cropped Document Detected")
-            # Check Watermarks/Tampering
+                fraud_flags.append("Cropped / Unusual Aspect Ratio Detected")
             if scanner.detect_tamper(text):
-                fraud_flags.append("Watermark/Possible Tampering Detected")
-            # Check Duplicate Upload
+                fraud_flags.append("Watermark / Possible Tampering Detected")
+            if not is_pdf and scanner.detect_low_resolution(file_bytes):
+                fraud_flags.append("Low Resolution Image (< 400x300px)")
             if scanner.check_file_duplicate(db, file_bytes):
-                fraud_flags.append("Duplicate File Uploaded (Already exists)")
-                
-            # Duplicate Candidate ID check
-            # For Aadhaar, PAN, Passport
+                fraud_flags.append("Duplicate File Uploaded (Already exists in system)")
+
             id_no = fields.get("id_number")
-            if id_no:
-                # Run async duplicate scan
+            if id_no and id_no != "N/A":
                 async def run_dup():
                     return await check_duplicate_records(AsyncSessionLocal(), doc_type, id_no)
-                    
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
@@ -338,11 +364,15 @@ def process_ocr_document_task(job_id: str):
                         dup_emp = asyncio.run(run_dup())
                 except Exception:
                     dup_emp = None
-                    
                 if dup_emp:
-                    fraud_flags.append(f"Document already linked with Candidate {dup_emp}")
+                    fraud_flags.append(f"Document ID already linked with Candidate {dup_emp}")
 
-        # Write results to DB
+        # 6. Compute missing fields for analytics
+        missing_fields = [k for k, v in fields.items() 
+                          if not v or v == "N/A" or str(v).strip() == ""
+                          if k not in ("qr_code_data", "barcode_data", "signature_detected", "raw_text_preview")]
+
+        # 7. Write results to DB
         job.status = "COMPLETED"
         job.progress = 100
         job.document_type = doc_type
@@ -350,15 +380,81 @@ def process_ocr_document_task(job_id: str):
         job.extracted_data = fields
         job.confidence_scores = confidence_scores
         job.fraud_flags = fraud_flags
-        
+
+        # 8. Persist OcrAnalytics record
+        try:
+            analytics_record = models.OcrAnalytics(
+                extraction_id=job.id,
+                engine_used=engine_used,
+                processing_time_ms=extraction_time_ms,
+                retry_count=retry_count,
+                overall_confidence=float(overall_conf),
+                missing_fields=missing_fields,
+                preprocessing_steps=preprocessing_steps
+            )
+            db.add(analytics_record)
+        except Exception as analytics_err:
+            logger.warning(f"OCR TASK: Failed to persist analytics: {analytics_err}")
+
+        # 9. Persist OcrProcessingLog records for each preprocessing step
+        try:
+            for step_name in preprocessing_steps:
+                log_entry = models.OcrProcessingLog(
+                    extraction_id=job.id,
+                    step=step_name,
+                    status="SUCCESS",
+                    details=f"Applied {step_name} during preprocessing",
+                    duration_ms=0  # Individual step timing not tracked
+                )
+                db.add(log_entry)
+            
+            # Log the OCR engine execution step
+            engine_log = models.OcrProcessingLog(
+                extraction_id=job.id,
+                step="OCR_EXTRACTION",
+                status="SUCCESS",
+                details=f"Engine: {engine_used}, Confidence: {ocr_confidence:.1f}%, Retries: {retry_count}",
+                duration_ms=extraction_time_ms
+            )
+            db.add(engine_log)
+            
+            # Log validation step
+            validation_log = models.OcrProcessingLog(
+                extraction_id=job.id,
+                step="FIELD_VALIDATION",
+                status="SUCCESS",
+                details=f"Document: {doc_type}, Fields: {len(fields)}, Missing: {len(missing_fields)}",
+                duration_ms=0
+            )
+            db.add(validation_log)
+            
+            # Log fraud detection step if enabled
+            if enable_fraud_detection:
+                fraud_log = models.OcrProcessingLog(
+                    extraction_id=job.id,
+                    step="FRAUD_DETECTION",
+                    status="FLAGGED" if fraud_flags else "CLEAN",
+                    details=f"Flags: {len(fraud_flags)} - {', '.join(fraud_flags) if fraud_flags else 'None'}",
+                    duration_ms=0
+                )
+                db.add(fraud_log)
+        except Exception as log_err:
+            logger.warning(f"OCR TASK: Failed to persist processing logs: {log_err}")
+
         db.commit()
         broadcast_progress("COMPLETED", 100, doc_type, extra={
             "document_type": doc_type,
             "fields": fields,
             "confidence_scores": confidence_scores,
-            "fraud_flags": fraud_flags
+            "fraud_flags": fraud_flags,
+            "engine_used": engine_used,
+            "processing_time_ms": extraction_time_ms,
+            "retry_count": retry_count,
+            "missing_fields": missing_fields
         })
-        logger.info(f"OCR TASK: Completed job {job_id} successfully.")
+        logger.info(f"OCR TASK: Completed job {job_id} successfully. "
+                     f"Engine={engine_used}, Confidence={overall_conf:.1f}%, "
+                     f"Missing={len(missing_fields)} fields, Flags={len(fraud_flags)}")
 
     except Exception as e:
         logger.error(f"OCR TASK: Failed processing job {job_id}: {str(e)}", exc_info=True)

@@ -655,6 +655,22 @@ class OcrProcessingLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class OcrAnalytics(Base):
+    __tablename__ = "ocr_analytics"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    extraction_id = Column(String(36), ForeignKey("ocr_extractions.id", ondelete="CASCADE"), nullable=False, index=True)
+    engine_used = Column(String(50), nullable=True)       # PADDLE, DOCTR, EASYOCR, TESSERACT
+    processing_time_ms = Column(Integer, default=0)
+    retry_count = Column(Integer, default=0)
+    overall_confidence = Column(Float, default=0.0)
+    missing_fields = Column(JSONEncodedList, default=lambda: [])
+    preprocessing_steps = Column(JSONEncodedList, default=lambda: [])
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    extraction = relationship("OcrExtraction")
+
+
+
 class OcrReviewQueue(Base):
     __tablename__ = "ocr_review_queue"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

@@ -937,3 +937,17 @@ class OcrExtractionUpdate(BaseModel):
 class OcrExtractionAction(BaseModel):
     action: str # APPROVE, REJECT, REPROCESS
 
+
+class OcrAnalyticsRead(BaseModel):
+    id: str
+    extraction_id: str
+    engine_used: Optional[str] = None
+    processing_time_ms: int
+    retry_count: int
+    overall_confidence: float
+    missing_fields: List[str]
+    preprocessing_steps: List[str]
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+

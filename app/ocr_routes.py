@@ -218,6 +218,20 @@ async def bulk_upload_ocr_documents(
         
     return created_jobs
 
+@router.get("/analytics", response_model=List[schemas.OcrAnalyticsRead])
+async def get_ocr_analytics(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if "SUPER_ADMIN" not in user_role and "SUPER_ADMINISTRATOR" not in user_role and "SUPER ADMIN" not in user_role:
+        raise HTTPException(status_code=403, detail="Access denied. Only Super Administrators can view OCR analytics.")
+
+    stmt = select(models.OcrAnalytics).order_by(models.OcrAnalytics.created_at.desc())
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
 @router.get("/jobs", response_model=List[schemas.OcrExtractionRead])
 async def list_ocr_jobs(
     db: AsyncSession = Depends(get_async_db),
@@ -226,6 +240,7 @@ async def list_ocr_jobs(
     stmt = select(models.OcrExtraction).order_by(models.OcrExtraction.created_at.desc())
     res = await db.execute(stmt)
     return res.scalars().all()
+
 
 @router.get("/jobs/{job_id}", response_model=schemas.OcrExtractionRead)
 async def get_ocr_job(

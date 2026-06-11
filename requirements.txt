@@ -23,4 +23,12 @@ boto3
 requests
 httpx
 reportlab>=3.6.12
-websockets
+websockets
+python-doctr
+pytesseract
+pymupdf
+pdf2image
+paddlepaddle
+paddleocr
+easyocr
+
