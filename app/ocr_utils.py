@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 import hashlib
 import logging
 import time
@@ -33,12 +34,17 @@ class OCRScanner:
     def _load_paddle(self):
         if self.paddle_reader is None and self.cv2 and self.np:
             try:
-                from paddleocr import PaddleOCR as POCR
+                from paddleocr import PaddleOCR
                 try:
-                    self.paddle_reader = POCR(use_angle_cls=True, lang='en')
-                except TypeError:
-                    self.paddle_reader = POCR(lang='en')
-                logger.info("PaddleOCR engine loaded successfully.")
+                    self.paddle_reader = PaddleOCR(lang="en", use_angle_cls=True)
+                except Exception:
+                    try:
+                        self.paddle_reader = PaddleOCR(lang="en")
+                    except Exception:
+                        self.paddle_reader = None
+                
+                if self.paddle_reader:
+                    logger.info("PaddleOCR engine loaded successfully.")
             except Exception as e:
                 logger.warning(f"PaddleOCR not available: {e}.")
         return self.paddle_reader
@@ -574,15 +580,38 @@ class OCRScanner:
 
     # Engine Runners
     def _run_paddle(self, engine, img) -> Tuple[str, float]:
-        result = engine.ocr(img, cls=True)
         text_parts = []
         confidences = []
+        
+        if hasattr(engine, "predict"):
+            result = engine.predict(img)
+        elif hasattr(engine, "ocr"):
+            result = engine.ocr(img, cls=True)
+        else:
+            raise Exception("Unsupported PaddleOCR version")
+            
         if result:
-            for line in result:
-                if line:
-                    for word in line:
-                        text_parts.append(word[1][0])
-                        confidences.append(word[1][1])
+            # Handle different output formats between predict and ocr
+            if isinstance(result, tuple) and len(result) >= 2:
+                # Format from some predict() returns (text_list, score_list, ...)
+                if isinstance(result[0], list) and isinstance(result[1], list):
+                    for i in range(len(result[0])):
+                        text_parts.append(result[0][i])
+                        confidences.append(result[1][i])
+                else:
+                     # Fallback iteration for ocr() style lists
+                     for page in result:
+                        if page:
+                            for line in page:
+                                text_parts.append(line[1][0])
+                                confidences.append(line[1][1])
+            else:
+                for page in result:
+                    if page:
+                        for line in page:
+                            text_parts.append(line[1][0])
+                            confidences.append(line[1][1])
+                            
         text = " ".join(text_parts)
         avg_conf = sum(confidences) / len(confidences) if confidences else 0.5
         if avg_conf <= 1.0:

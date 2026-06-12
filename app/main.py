@@ -1,3 +1,4 @@
+import sys
 from fastapi import FastAPI, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from . import (
@@ -52,11 +53,25 @@ async def lifespan(app: FastAPI):
     import importlib
     for engine_name, mod_name in ocr_engines:
         try:
-            importlib.import_module(mod_name)
-            logger.info(f"✓ {engine_name} Loaded")
+            mod = importlib.import_module(mod_name)
+            if engine_name == "PaddleOCR":
+                version = getattr(mod, "__version__", "unknown")
+                logger.info(f"✓ {engine_name} Loaded (Version {version})")
+            else:
+                logger.info(f"✓ {engine_name} Loaded")
         except Exception as e:
-            logger.warning(f"✗ {engine_name} Failed\nReason: {e}")
-            
+            pass # Suppressed individual failed logs to avoid noise if fallback is intentional
+
+    try:
+        from paddleocr import PaddleOCR
+        # Fast dummy init just to check API surface
+        ocr = PaddleOCR(lang="en")
+        api_method = "predict" if hasattr(ocr, "predict") else "ocr"
+        logger.info(f"Active OCR Engine: PaddleOCR")
+        logger.info(f"API Method: {api_method}")
+    except Exception:
+        pass
+        
     logger.info("=" * 50)
 
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)

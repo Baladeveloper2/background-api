@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import asyncio
 from datetime import datetime
@@ -313,12 +314,15 @@ def process_ocr_document_task(job_id: str):
         retry_count = result.get("retry_count", 0)
         preprocessing_steps = result.get("preprocessing_steps", [])
         
-        logger.info(f"Python Executable:\n{sys.executable}\n\n"
-                    f"OCR Engine:\n{engine_used}\n\n"
-                    f"Document Type:\n{result.get('documentType', 'Unknown Document')}\n\n"
-                    f"Processing Time:\n{extraction_time_ms / 1000.0} sec\n\n"
-                    f"Confidence:\n{ocr_confidence:.1f}%\n\n"
-                    f"Fallback:\n{'Yes' if retry_count > 0 or is_manual_review else 'No'}")
+        try:
+            logger.info(f"Python Executable:\n{sys.executable}\n\n"
+                        f"OCR Engine:\n{engine_used}\n\n"
+                        f"Document Type:\n{result.get('documentType', 'Unknown Document')}\n\n"
+                        f"Processing Time:\n{extraction_time_ms / 1000.0} sec\n\n"
+                        f"Confidence:\n{ocr_confidence:.1f}%\n\n"
+                        f"Fallback:\n{'Yes' if retry_count > 0 or is_manual_review else 'No'}")
+        except Exception as log_err:
+            logger.warning(f"Diagnostic logging failed: {log_err}")
 
         # 4. Field Extraction and Classification (80%)
         job.status = "VALIDATING"
