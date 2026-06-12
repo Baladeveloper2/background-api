@@ -448,6 +448,21 @@ async def process_existing_file(
 
         if not file_url:
             raise HTTPException(status_code=400, detail="file_url is required")
+            
+        # Duplicate Prevention: Check if job already exists
+        from sqlalchemy import select
+        stmt = select(models.OcrExtraction).where(
+            models.OcrExtraction.file_url == file_url,
+            models.OcrExtraction.candidate_id == candidate_id,
+            models.OcrExtraction.status.in_(["QUEUED", "PROCESSING", "COMPLETED"])
+        ).order_by(models.OcrExtraction.created_at.desc())
+        
+        result = await db.execute(stmt)
+        existing_job = result.scalars().first()
+        
+        if existing_job:
+            logger.info(f"Duplicate OCR request for {file_url}. Returning existing job {existing_job.id}")
+            return existing_job
 
         job = models.OcrExtraction(
             file_name=file_name,

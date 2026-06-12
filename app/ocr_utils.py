@@ -34,7 +34,10 @@ class OCRScanner:
         if self.paddle_reader is None and self.cv2 and self.np:
             try:
                 from paddleocr import PaddleOCR as POCR
-                self.paddle_reader = POCR(use_angle_cls=True, lang='en', show_log=False)
+                try:
+                    self.paddle_reader = POCR(use_angle_cls=True, lang='en')
+                except TypeError:
+                    self.paddle_reader = POCR(lang='en')
                 logger.info("PaddleOCR engine loaded successfully.")
             except Exception as e:
                 logger.warning(f"PaddleOCR not available: {e}.")

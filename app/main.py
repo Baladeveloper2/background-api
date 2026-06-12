@@ -29,6 +29,36 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import sys
+    import os
+    import site
+    
+    logger.info("=" * 50)
+    logger.info("STARTUP DIAGNOSTICS")
+    logger.info(f"Python Executable: {sys.executable}")
+    logger.info(f"Python Version: {sys.version}")
+    logger.info(f"Site Packages: {site.getsitepackages() if hasattr(site, 'getsitepackages') else 'N/A'}")
+    logger.info(f"CWD: {os.getcwd()}")
+    logger.info("-" * 50)
+    logger.info("OCR DEPENDENCIES VERIFICATION:")
+    
+    ocr_engines = [
+        ("PaddleOCR", "paddleocr"),
+        ("EasyOCR", "easyocr"),
+        ("DocTR", "doctr"),
+        ("Tesseract", "pytesseract")
+    ]
+    
+    import importlib
+    for engine_name, mod_name in ocr_engines:
+        try:
+            importlib.import_module(mod_name)
+            logger.info(f"✓ {engine_name} Loaded")
+        except Exception as e:
+            logger.warning(f"✗ {engine_name} Failed\nReason: {e}")
+            
+    logger.info("=" * 50)
+
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
     instrument_sqlalchemy(async_engine.sync_engine)
     

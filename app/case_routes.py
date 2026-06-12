@@ -3819,20 +3819,16 @@ async def ocr_extract(data: schemas.OcrExtractRequest, background_tasks: Backgro
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to fetch document")
             
-        from .ocr_utils import get_scanner
-        scanner = get_scanner()
+        from .idp.engine import get_idp_engine
+        engine = get_idp_engine()
         
-        # Offload blocking EasyOCR model execution to thread pool
-        text = await run_in_threadpool(scanner.reader.readtext, response.content, detail=0)
-        full_text = " ".join(text)
-        
-        # Offload blocking ID parsing to thread pool
-        extracted = await run_in_threadpool(scanner.parse_id, full_text, url)
+        # Offload blocking extraction to thread pool
+        result = await run_in_threadpool(engine.process_document, response.content, url)
         
         return {
             "success": True,
-            "extracted_data": extracted,
-            "raw_text_debug": str(full_text)[:500] 
+            "extracted_data": result,
+            "raw_text_debug": "Replaced by modular engine" 
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

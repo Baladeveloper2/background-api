@@ -141,6 +141,62 @@ class CandidateUpdate(BaseModel):
     db_dob: Optional[date] = None
     database_scope: Optional[str] = None
 
+import re
+
+class CandidateCreateFull(CandidateBase):
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Name is required")
+        if not re.match(r'^[A-Za-z\s]+$', v):
+            raise ValueError("Name can only contain letters and spaces")
+        return v
+        
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            raise ValueError("Mobile Number is required")
+        if not re.match(r'^[6-9]\d{9}$', v):
+            raise ValueError("Enter a valid 10-digit mobile number")
+        return v
+        
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v: Optional[EmailStr]) -> Optional[EmailStr]:
+        if not v:
+            raise ValueError("Email is required")
+        return v
+        
+    @field_validator('dob')
+    @classmethod
+    def validate_dob(cls, v: Optional[date]) -> Optional[date]:
+        if not v:
+            raise ValueError("DOB is required")
+        if v > date.today():
+            raise ValueError("DOB cannot be a future date")
+        age = (date.today() - v).days / 365.25
+        if age < 18:
+            raise ValueError("Candidate must be at least 18 years old")
+        return v
+        
+    @field_validator('gender')
+    @classmethod
+    def validate_gender(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            raise ValueError("Gender is required")
+        return v
+        
+    @field_validator('client_emp_code')
+    @classmethod
+    def validate_emp_code(cls, v: Optional[str]) -> Optional[str]:
+        if not v or not v.strip():
+            raise ValueError("Client Emp Code is required")
+        if ' ' in v:
+            raise ValueError("Client Emp Code cannot contain spaces")
+        return v
+
 class Candidate(CandidateBase):
     id: str
 
@@ -462,7 +518,7 @@ class CaseUpdate(BaseModel):
 class CaseCreateExtended(BaseModel):
     batch_id: str
     customer_id: str
-    candidate: CandidateCreate
+    candidate: CandidateCreateFull
     services: List[str]
     case_ref_no: Optional[str] = None
     check_rates: Optional[Dict[str, float]] = None

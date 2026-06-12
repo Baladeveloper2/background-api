@@ -184,7 +184,8 @@ def generate_case_pdf(self, case_id: str, user_token: str, custom_frontend_url: 
 @celery_app.task(name="app.worker.process_ocr_document_task")
 def process_ocr_document_task(job_id: str):
     import requests
-    from .ocr_utils import get_scanner, check_duplicate_records
+    from .idp.engine import get_idp_engine
+    from .ocr_utils import check_duplicate_records
     from .ws import manager
     import asyncio
     
@@ -291,16 +292,33 @@ def process_ocr_document_task(job_id: str):
         db.commit()
         broadcast_progress("EXTRACTING", 50)
         
-        scanner = get_scanner()
+        engine = get_idp_engine()
         extraction_start = time.time()
         
-        # Use multi-engine pipeline: PaddleOCR → DocTR → EasyOCR → Tesseract
-        text, ocr_confidence, engine_used, retry_count, preprocessing_steps = \
-            scanner.extract_text_multiengine(file_bytes, source_url=job.file_url)
+        result = engine.process_document(file_bytes, source_url=job.file_url)
         
         extraction_time_ms = int((time.time() - extraction_start) * 1000)
-        logger.info(f"OCR TASK: Multi-engine extraction complete. Engine={engine_used}, "
-                     f"Confidence={ocr_confidence:.1f}%, Retries={retry_count}, Time={extraction_time_ms}ms")
+        
+        if not result.get("success"):
+            error_msg = result.get("reason", "Unknown OCR engine error")
+            if "No OCR engine installed" in error_msg:
+                error_msg = "No OCR engine configured. Please install PaddleOCR or EasyOCR."
+            logger.error(f"OCR TASK: Extraction failed. Reason: {error_msg}")
+            raise Exception(error_msg)
+            
+        is_manual_review = result.get("status") == "MANUAL_REVIEW_REQUIRED"
+
+        engine_used = result.get("engine_used", "UNKNOWN")
+        ocr_confidence = result.get("confidence", 0.0)
+        retry_count = result.get("retry_count", 0)
+        preprocessing_steps = result.get("preprocessing_steps", [])
+        
+        logger.info(f"Python Executable:\n{sys.executable}\n\n"
+                    f"OCR Engine:\n{engine_used}\n\n"
+                    f"Document Type:\n{result.get('documentType', 'Unknown Document')}\n\n"
+                    f"Processing Time:\n{extraction_time_ms / 1000.0} sec\n\n"
+                    f"Confidence:\n{ocr_confidence:.1f}%\n\n"
+                    f"Fallback:\n{'Yes' if retry_count > 0 or is_manual_review else 'No'}")
 
         # 4. Field Extraction and Classification (80%)
         job.status = "VALIDATING"
@@ -308,49 +326,16 @@ def process_ocr_document_task(job_id: str):
         db.commit()
         broadcast_progress("VALIDATING", 80)
 
-        extracted = scanner.parse_id(text, job.file_url)
-        doc_type = extracted["document_type"]
-        fields = extracted["fields"]
-        confidence_scores = extracted["confidence_scores"]
-        overall_conf = extracted["overall_confidence"]
+        doc_type = result["documentType"]
+        fields = result["extractedFields"]
+        confidence_scores = {k: 99 if result["validation"].get(k, False) else 50 for k in fields}
+        overall_conf = ocr_confidence
 
-        # 4b. QR / Barcode / Signature detection
-        is_pdf = file_bytes[:4] == b'%PDF'
-        qr_barcode = {"qr_data": None, "barcode_data": None}
-        signature_detected = False
-        if not is_pdf:
-            try:
-                qr_barcode = scanner.detect_qr_and_barcode(file_bytes)
-            except Exception:
-                pass
-            try:
-                signature_detected = scanner.detect_signature(file_bytes)
-            except Exception:
-                pass
-
-        # Enrich fields with ancillary detections
-        if qr_barcode.get("qr_data"):
-            fields["qr_code_data"] = qr_barcode["qr_data"]
-            confidence_scores["qr_code_data"] = 99
-        if qr_barcode.get("barcode_data"):
-            fields["barcode_data"] = qr_barcode["barcode_data"]
-            confidence_scores["barcode_data"] = 99
-        fields["signature_detected"] = "Yes" if signature_detected else "No"
-        confidence_scores["signature_detected"] = 85
-
-        # 5. Fraud Detection and Verification Rules
         fraud_flags = []
-        if enable_fraud_detection:
-            if scanner.detect_blur(file_bytes):
-                fraud_flags.append("Blurred Document Detected")
-            if scanner.detect_crop(file_bytes):
-                fraud_flags.append("Cropped / Unusual Aspect Ratio Detected")
-            if scanner.detect_tamper(text):
-                fraud_flags.append("Watermark / Possible Tampering Detected")
-            if not is_pdf and scanner.detect_low_resolution(file_bytes):
-                fraud_flags.append("Low Resolution Image (< 400x300px)")
-            if scanner.check_file_duplicate(db, file_bytes):
-                fraud_flags.append("Duplicate File Uploaded (Already exists in system)")
+        if enable_fraud_detection and result["fraudScore"] > 0:
+            fraud_flags.append(f"Fraud Score calculated as {result['fraudScore']}/100")
+            if result["fraudScore"] >= 50:
+                 fraud_flags.append("High probability of document tampering or fake document.")
 
             id_no = fields.get("id_number")
             if id_no and id_no != "N/A":
@@ -371,12 +356,18 @@ def process_ocr_document_task(job_id: str):
         missing_fields = [k for k, v in fields.items() 
                           if not v or v == "N/A" or str(v).strip() == ""
                           if k not in ("qr_code_data", "barcode_data", "signature_detected", "raw_text_preview")]
+                          
+        logger.info(f"Extracted Fields:\n{len(fields) - len(missing_fields)}/{len(fields)}")
 
         # 7. Write results to DB
-        job.status = "COMPLETED"
+        final_status = "LOW_CONFIDENCE" if (overall_conf < 80.0 or is_manual_review) else "COMPLETED"
+        job.status = final_status
         job.progress = 100
         job.document_type = doc_type
         job.confidence_score = float(overall_conf)
+        
+        # Ensure extracted_data explicitly maps to the exact required schema representation if needed, 
+        # though the frontend typically just reads the fields directly from job.extracted_data
         job.extracted_data = fields
         job.confidence_scores = confidence_scores
         job.fraud_flags = fraud_flags
