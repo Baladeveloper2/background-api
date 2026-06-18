@@ -57,18 +57,23 @@ async def lifespan(app: FastAPI):
         from . import models
         from sqlalchemy import select
         async with AsyncSessionLocal() as session:
-            for key, value in [
-                ("enable_ocr", "true"),
-                ("enable_ai_validation", "true"),
-                ("enable_auto_mapping", "true"),
-                ("enable_fraud_detection", "true"),
-                ("enable_manual_review", "true")
-            ]:
-                res = await session.execute(select(models.SystemSetting).filter(models.SystemSetting.key == key))
-                if not res.scalar_one_or_none():
-                    setting = models.SystemSetting(key=key, value=value)
-                    session.add(setting)
-            await session.commit()
+            default_settings = {
+                "enable_ocr": "true",
+                "enable_ai_validation": "true",
+                "enable_auto_mapping": "true",
+                "enable_fraud_detection": "true",
+                "enable_manual_review": "true"
+            }
+            res = await session.execute(select(models.SystemSetting).filter(models.SystemSetting.key.in_(default_settings.keys())))
+            existing_keys = {s.key for s in res.scalars().all()}
+            
+            new_settings = [
+                models.SystemSetting(key=k, value=v)
+                for k, v in default_settings.items() if k not in existing_keys
+            ]
+            if new_settings:
+                session.add_all(new_settings)
+                await session.commit()
             logger.info("OCR System settings seeded.")
             
             # Check/Add due_date to insufficiencies table if not exist
