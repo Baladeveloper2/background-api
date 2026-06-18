@@ -1,5 +1,0 @@
-{
-  "status": "ok",
-  "database": "connected",
-  "user_query": "bala@bgvms.com"
-}

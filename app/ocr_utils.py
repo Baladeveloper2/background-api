@@ -20,18 +20,24 @@ class OCRScanner:
         self.doctr_predictor = None
         self.easy_reader = None
         self._cache = {}  # Thread-safe result cache keyed by text MD5
+        # cv2 and numpy are loaded lazily on first use via _ensure_cv2()
 
-        try:
-            import cv2
-            import numpy as np
-            self.cv2 = cv2
-            self.np = np
-            logger.info("OpenCV and Numpy loaded successfully in EnterpriseOCRScanner.")
-        except Exception as e:
-            logger.warning(f"OpenCV/Numpy not available: {e}. Visual checks will be mocked.")
+    def _ensure_cv2(self):
+        """Lazy-load cv2 and numpy only when first needed."""
+        if self.cv2 is None:
+            try:
+                import cv2
+                import numpy as np
+                self.cv2 = cv2
+                self.np = np
+                logger.info("OpenCV and Numpy loaded successfully (lazy).")
+            except Exception as e:
+                logger.warning(f"OpenCV/Numpy not available: {e}. Visual checks will be mocked.")
+
 
     # Lazy loaders
     def _load_paddle(self):
+        self._ensure_cv2()
         if self.paddle_reader is None and self.cv2 and self.np:
             try:
                 from paddleocr import PaddleOCR
@@ -50,6 +56,7 @@ class OCRScanner:
         return self.paddle_reader
 
     def _load_doctr(self):
+        self._ensure_cv2()
         if self.doctr_predictor is None and self.cv2 and self.np:
             try:
                 from doctr.models import ocr_predictor
@@ -60,6 +67,7 @@ class OCRScanner:
         return self.doctr_predictor
 
     def _load_easyocr(self):
+        self._ensure_cv2()
         if self.easy_reader is None and self.cv2 and self.np:
             try:
                 import easyocr
@@ -249,6 +257,7 @@ class OCRScanner:
 
     def preprocess_image(self, image_bytes: bytes):
         """Full preprocessing pipeline: deskew → denoise → enhance → sharpen."""
+        self._ensure_cv2()
         if not self.cv2 or not self.np:
             return None
         try:
@@ -378,10 +387,12 @@ class OCRScanner:
         Orchestrates PaddleOCR -> DocTR -> EasyOCR -> Tesseract.
         Returns (text, overall_confidence, engine_used, retry_count, preprocessing_steps).
         """
+        self._ensure_cv2()
         start_time = time.time()
         preprocessing_steps = []
         engine_used = "NONE"
         retry_count = 0
+
         
         # 1. Image Preprocessing & Format handling
         image_bytes = self._correct_exif_orientation(image_bytes)

@@ -1,3 +1,40 @@
+# Python cache
 .pytest_cache/
 __pycache__/
 *.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Local SQLite databases (dev only, never deploy)
+*.db
+
+# Log & debug dump files
+*.log
+*.txt
+out*.json
+api_dump*
+bgvms_log*
+patch_log*
+
+# One-off migration / debug scripts
+migrate_*.py
+init_flow.py
+
+# Dev-only scratch scripts
+scratch/
+
+# Local test output folders
+xerox_outputs/
+
+# Uploads (should be cloud-hosted, not committed)
+uploads/
+
+# Env secrets
+.env
+
+# IDE
+.vscode/

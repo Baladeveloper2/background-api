@@ -23,7 +23,6 @@ from .cache import get_redis_client
 from contextlib import asynccontextmanager
 from fastapi.middleware.gzip import GZipMiddleware
 import os
-import asyncio
 
 # Initialize structured logging
 setup_logging()
@@ -40,43 +39,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Python Version: {sys.version}")
     logger.info(f"Site Packages: {site.getsitepackages() if hasattr(site, 'getsitepackages') else 'N/A'}")
     logger.info(f"CWD: {os.getcwd()}")
+    logger.info("OCR engines will be loaded lazily on first use (to save memory).")
     logger.info("-" * 50)
-    async def verify_ocr_dependencies_bg():
-        from fastapi.concurrency import run_in_threadpool
-        import importlib
-        
-        def verify_sync():
-            logger.info("OCR DEPENDENCIES VERIFICATION (Background):")
-            ocr_engines = [
-                ("PaddleOCR", "paddleocr"),
-                ("EasyOCR", "easyocr"),
-                ("DocTR", "doctr"),
-                ("Tesseract", "pytesseract")
-            ]
-            for engine_name, mod_name in ocr_engines:
-                try:
-                    mod = importlib.import_module(mod_name)
-                    if engine_name == "PaddleOCR":
-                        version = getattr(mod, "__version__", "unknown")
-                        logger.info(f"✓ {engine_name} Loaded (Version {version})")
-                    else:
-                        logger.info(f"✓ {engine_name} Loaded")
-                except Exception:
-                    pass
 
-            try:
-                from paddleocr import PaddleOCR
-                ocr = PaddleOCR(lang="en")
-                api_method = "predict" if hasattr(ocr, "predict") else "ocr"
-                logger.info(f"Active OCR Engine: PaddleOCR")
-                logger.info(f"API Method: {api_method}")
-            except Exception:
-                pass
-            logger.info("-" * 50)
-
-        await run_in_threadpool(verify_sync)
-
-    asyncio.create_task(verify_ocr_dependencies_bg())
 
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
     instrument_sqlalchemy(async_engine.sync_engine)
