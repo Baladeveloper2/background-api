@@ -196,6 +196,63 @@ async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_lin
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
 
+
+DIGITAL_ADDRESS_EMAIL_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; }}
+        .container {{ max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }}
+        .header {{ background-color: #7c3aed; padding: 30px; text-align: center; }}
+        .header h1 {{ color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; }}
+        .content {{ padding: 40px; line-height: 1.6; }}
+        .content p {{ margin-bottom: 20px; }}
+        .button-container {{ text-align: center; margin: 35px 0; }}
+        .button {{ background-color: #7c3aed; color: #ffffff !important; padding: 14px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px -1px rgba(124, 58, 237, 0.2); }}
+        .footer {{ background-color: #f1f5f9; padding: 30px; text-align: center; font-size: 13px; color: #64748b; border-top: 1px solid #e2e8f0; }}
+        .link-text {{ color: #7c3aed; word-break: break-all; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Digital Address Verification</h1>
+        </div>
+        <div class="content">
+            <p>Dear <strong>{candidate_name}</strong>,</p>
+            <p>A digital address verification has been initiated for your application.</p>
+            <p>This process requires a live location check and a geotagged camera capture using your smartphone/device. Please ensure you are physically present at the registered residence address to complete this verification.</p>
+            <div class="button-container">
+                <a href="{verification_link}" class="button">Start Address Verification</a>
+            </div>
+            <p>If the button doesn't work, copy and paste this link into your browser:</p>
+            <p class="link-text">{verification_link}</p>
+            <p>Best regards,<br>The Verification Team</p>
+        </div>
+        <div class="footer">
+            <p>This verification link is secure and will expire in 24 hours.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+async def send_digital_address_verification_email(to_email: str, candidate_name: str, verification_link: str):
+    """
+    Sends the digital address verification link to the candidate.
+    """
+    site_name = os.getenv("SITE_NAME", "BGVMS")
+    html_content = DIGITAL_ADDRESS_EMAIL_TEMPLATE.format(
+        candidate_name=candidate_name,
+        verification_link=verification_link
+    )
+    subject = f"Action Required: Digital Address Verification for {site_name}"
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
+
+
 # Template for Submission Notification
 SUBMISSION_NOTIFICATION_TEMPLATE = """
 <!DOCTYPE html>

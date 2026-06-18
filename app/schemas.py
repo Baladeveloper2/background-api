@@ -559,6 +559,7 @@ class InsufficiencyRead(BaseModel):
     resolved_remarks: Optional[str] = None
     created_at: datetime
     check_name: Optional[str] = None
+    due_date: Optional[datetime] = None
     notification_count: Optional[int] = 0
     last_notified_at: Optional[datetime] = None
     response_at: Optional[datetime] = None
@@ -970,8 +971,16 @@ class OcrExtractionRead(BaseModel):
     file_name: str
     file_url: str
     s3_key: Optional[str] = None
-    status: str
-    progress: int
+    ocr_status: str
+    ocr_progress: int
+    ocr_started_at: Optional[datetime] = None
+    ocr_completed_at: Optional[datetime] = None
+    ocr_duration_ms: int = 0
+    ocr_json: Dict[str, Any] = {}
+    ocr_engine: Optional[str] = None
+    ocr_error: Optional[str] = None
+    ocr_version: str = "2.0"
+    last_retry_at: Optional[datetime] = None
     document_type: str
     confidence_score: float
     extracted_data: Dict[str, Any]

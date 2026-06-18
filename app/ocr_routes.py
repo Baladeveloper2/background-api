@@ -103,8 +103,8 @@ async def upload_ocr_document(
             file_name=file.filename,
             file_url=file_url,
             s3_key=unique_filename,
-            status="QUEUED",
-            progress=0,
+            ocr_status="UPLOADED",
+            ocr_progress=0,
             candidate_id=candidate_id
         )
         
@@ -125,14 +125,8 @@ async def upload_ocr_document(
         await db.commit()
         await db.refresh(job)
 
-        # Trigger background Celery Task (using delay or threadpool since celery is configured)
-        try:
-            process_ocr_document_task.delay(job.id)
-        except Exception:
-            pass
-        
-        import threading
-        threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
+        # DO NOT trigger background Celery Task automatically here.
+        # Wait for user to explicitly click "Run OCR".
         
         return job
     except Exception as e:
@@ -180,8 +174,8 @@ async def bulk_upload_ocr_documents(
                 file_name=file.filename,
                 file_url=file_url,
                 s3_key=unique_filename,
-                status="QUEUED",
-                progress=0,
+                ocr_status="UPLOADED",
+                ocr_progress=0,
                 candidate_id=candidate_id,
                 batch_id=batch_id
             )
@@ -207,15 +201,7 @@ async def bulk_upload_ocr_documents(
             
     await db.commit()
     
-    import threading
-    for job in created_jobs:
-        await db.refresh(job)
-        try:
-            process_ocr_document_task.delay(job.id)
-        except Exception:
-            pass
-        threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
-        
+    # Do NOT trigger celery worker here automatically
     return created_jobs
 
 @router.get("/analytics", response_model=List[schemas.OcrAnalyticsRead])
@@ -255,6 +241,34 @@ async def get_ocr_job(
         raise HTTPException(status_code=404, detail="OCR job not found.")
     return job
 
+@router.post("/jobs/{job_id}/run-ocr", response_model=schemas.OcrExtractionRead)
+async def run_manual_ocr(
+    job_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    stmt = select(models.OcrExtraction).filter(models.OcrExtraction.id == job_id)
+    res = await db.execute(stmt)
+    job = res.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="OCR job not found.")
+
+    job.ocr_status = "QUEUED"
+    job.ocr_progress = 0
+    job.ocr_error = None
+    job.last_retry_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(job)
+
+    try:
+        process_ocr_document_task.delay(job.id)
+    except Exception:
+        pass
+    import threading
+    threading.Thread(target=process_ocr_document_task, args=(job.id,), daemon=True).start()
+
+    return job
+
 @router.post("/jobs/{job_id}/action", response_model=schemas.OcrExtractionRead)
 async def execute_ocr_action(
     job_id: str,
@@ -276,8 +290,8 @@ async def execute_ocr_action(
         job.review_status = "REJECTED"
         job.is_verified = False
     elif act == "REPROCESS":
-        job.status = "QUEUED"
-        job.progress = 0
+        job.ocr_status = "QUEUED"
+        job.ocr_progress = 0
         job.review_status = "PENDING"
         job.is_verified = False
         try:
@@ -454,7 +468,7 @@ async def process_existing_file(
         stmt = select(models.OcrExtraction).where(
             models.OcrExtraction.file_url == file_url,
             models.OcrExtraction.candidate_id == candidate_id,
-            models.OcrExtraction.status.in_(["QUEUED", "PROCESSING", "COMPLETED"])
+            models.OcrExtraction.ocr_status.in_(["QUEUED", "PROCESSING", "COMPLETED"])
         ).order_by(models.OcrExtraction.created_at.desc())
         
         result = await db.execute(stmt)
@@ -468,8 +482,8 @@ async def process_existing_file(
             file_name=file_name,
             file_url=file_url,
             s3_key=file_url.split(".com/")[-1] if ".com/" in file_url else file_url,
-            status="QUEUED",
-            progress=0,
+            ocr_status="QUEUED",
+            ocr_progress=0,
             candidate_id=candidate_id,
             batch_id=str(uuid.uuid4())
         )
@@ -477,6 +491,34 @@ async def process_existing_file(
         db.add(job)
         await db.commit()
         await db.refresh(job)
+
+        # Check Cache Layer
+        import requests
+        import hashlib
+        try:
+            res = requests.get(file_url, timeout=10)
+            if res.status_code == 200:
+                file_hash = hashlib.sha256(res.content).hexdigest()
+                cache_stmt = select(models.OcrResultCache).filter(models.OcrResultCache.file_hash == file_hash)
+                cache_res = await db.execute(cache_stmt)
+                cached = cache_res.scalar_one_or_none()
+                
+                if cached:
+                    logger.info(f"Instant Cache Hit for OCR file {file_hash}")
+                    job.ocr_status = "COMPLETED"
+                    job.ocr_progress = 100
+                    job.document_type = cached.document_type
+                    job.confidence_score = cached.overall_confidence
+                    job.extracted_data = cached.extracted_fields
+                    job.ocr_json = cached.extracted_fields
+                    job.confidence_scores = cached.confidence_scores
+                    job.fraud_flags = []
+                    job.is_verified = False
+                    await db.commit()
+                    await db.refresh(job)
+                    return job
+        except Exception as cache_err:
+            logger.warning(f"Failed to check OCR cache: {cache_err}")
 
         try:
             process_ocr_document_task.delay(job.id)

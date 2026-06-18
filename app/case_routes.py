@@ -363,6 +363,7 @@ async def resolve_insufficiency(
     case_id: str,
     data: schemas.ResolveInsufficiencyRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -385,6 +386,15 @@ async def resolve_insufficiency(
         content=f"INSUFFICIENCY CLEARED: {remarks}" + (f" (Check: {data.check_id})" if data.check_id else "")
     )
     db.add(comment)
+
+    # Audit Log
+    audit = models.AuditLog(
+        user_id=current_user.id,
+        action="RESOLVE_INSUFFICIENCY",
+        resource_id=case.id,
+        details=f"User: {current_user.full_name or current_user.email} | Role: {current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role)} | IP: {request.client.host} | Action: RESOLVE_INSUFFICIENCY | Remarks: {remarks}"
+    )
+    db.add(audit)
     
     # Resolve the specific check if check_id provided
     if data.check_id:
@@ -4317,7 +4327,7 @@ async def update_insufficiency_evidence(id: str, data: Dict[str, Any], db: Async
     return {"status": "success", "message": "Evidence uploaded successfully"}
 
 @router.post("/insufficiencies/{id}/resolve")
-async def resolve_insufficiency(id: str, data: Dict[str, str], db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+async def resolve_insufficiency(id: str, data: Dict[str, str], request: Request, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     """Mark an insufficiency as resolved."""
     stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id)
     res = await db.execute(stmt)
@@ -4334,9 +4344,9 @@ async def resolve_insufficiency(id: str, data: Dict[str, str], db: AsyncSession 
     # Log audit
     audit_log = models.AuditLog(
         user_id=current_user.id,
-        action="INSUFFICIENCY_RESOLVED",
+        action="RESOLVE_INSUFFICIENCY",
         resource_id=insuff.case_id,
-        details=f"Insufficiency resolved for check {insuff.check_id}. Remarks: {insuff.resolved_remarks}"
+        details=f"User: {current_user.full_name or current_user.email} | Role: {current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role)} | IP: {request.client.host} | Action: RESOLVE_INSUFFICIENCY | Remarks: {insuff.resolved_remarks}"
     )
     db.add(audit_log)
     
@@ -4580,10 +4590,15 @@ async def get_case_check_details(
         sla_status = "SLA Breached"
 
     # Fetch insufficiency details for this check
-    insuff_stmt = select(models.Insufficiency).filter(
-        models.Insufficiency.check_id == check_id,
-        models.Insufficiency.case_id == case_id
-    ).order_by(models.Insufficiency.created_at.desc())
+    insuff_stmt = (
+        select(models.Insufficiency)
+        .options(joinedload(models.Insufficiency.user))
+        .filter(
+            models.Insufficiency.check_id == check_id,
+            models.Insufficiency.case_id == case_id
+        )
+        .order_by(models.Insufficiency.created_at.desc())
+    )
     insuff_res = await db.execute(insuff_stmt)
     insuff_list = insuff_res.scalars().all()
     
@@ -4596,7 +4611,11 @@ async def get_case_check_details(
             "is_resolved": ins.is_resolved,
             "created_at": ins.created_at.strftime("%Y-%m-%d %H:%M") if ins.created_at else None,
             "resolved_at": ins.resolved_at.strftime("%Y-%m-%d %H:%M") if ins.resolved_at else None,
-            "resolved_remarks": ins.resolved_remarks or ""
+            "resolved_remarks": ins.resolved_remarks or "",
+            "raised_by": ins.user.full_name if ins.user else "Verifier",
+            "notification_count": ins.notification_count,
+            "response_at": ins.response_at.strftime("%Y-%m-%d %H:%M") if ins.response_at else None,
+            "timeline": ins.timeline or []
         })
 
     return {

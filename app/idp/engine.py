@@ -4,7 +4,8 @@ import re
 import hashlib
 import time
 import logging
-from typing import Dict, Any, Optional, Tuple, List
+import concurrent.futures
+from typing import Dict, Any, Optional, Tuple, List, Callable
 from .preprocessing import ImagePreprocessor
 from .fraud_detection import FraudDetector
 from .parsers.registry import get_registered_parsers, get_default_parser
@@ -26,6 +27,9 @@ class DocumentIntelligenceEngine:
         
         self.parsers = [parser_cls() for parser_cls in get_registered_parsers()]
         self.default_parser = get_default_parser()()
+        
+        # Pre-load PaddleOCR immediately as a singleton
+        self._load_paddle()
         
     def _load_paddle(self):
         if self.paddle_reader is None and self.preprocessor.cv2 and self.preprocessor.np:
@@ -228,7 +232,7 @@ class DocumentIntelligenceEngine:
             
         return "Unknown Document"
 
-    def process_document(self, image_bytes: bytes, source_url: Optional[str] = None) -> Dict[str, Any]:
+    def process_document(self, image_bytes: bytes, source_url: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Main entry point for extracting and processing document intelligence."""
         
         if not self.preprocessor.cv2 or not self.preprocessor.np:
@@ -243,15 +247,24 @@ class DocumentIntelligenceEngine:
         if source_url:
             hint_text = os.path.basename(source_url).lower().replace("_", " ").replace("-", " ")
             
+        def safe_callback(status, progress, doc_type="Unknown"):
+            if kwargs.get("progress_callback"):
+                try:
+                    kwargs["progress_callback"](status, progress, doc_type)
+                except Exception as e:
+                    logger.warning(f"Progress callback failed: {e}")
+
         # Fraud Detection (runs concurrently conceptually)
         fraud_score = self.fraud_detector.calculate_fraud_score("", image_bytes)
 
         # 1. Pre-classification
         preprocessing_steps = []
+        safe_callback("PREPARING_DOCUMENT", 10)
         pre_classified_type = self._pre_classify_document(image_bytes, hint_text)
         preprocessing_steps.append(f"PRE_CLASSIFIED_AS_{pre_classified_type.upper().replace(' ', '_')}")
 
         # 2. Preprocessing
+        safe_callback("CONVERTING_TO_IMAGES", 20, pre_classified_type)
         image_bytes = self.preprocessor.correct_exif_orientation(image_bytes)
         is_pdf = image_bytes[:4] == b'%PDF'
         
@@ -275,7 +288,11 @@ class DocumentIntelligenceEngine:
                 "extractedFields": {}
             }
 
+        if pre_classified_type in ["Aadhaar Card", "PAN Card", "Passport", "Driving License", "Voter ID"]:
+            pages = pages[:1]
+
         preprocessed_pages = []
+        safe_callback("IMAGE_PREPROCESSING", 35, pre_classified_type)
         for page in pages:
             prep_page, page_steps = self.preprocessor.preprocess_image_pipeline(page)
             preprocessed_pages.append(prep_page)
@@ -284,16 +301,27 @@ class DocumentIntelligenceEngine:
                     preprocessing_steps.append(ps)
 
         # 3. Multi-engine text extraction (Free Local Python Libraries Only)
-        engines = [
-            ("PADDLE", self._load_paddle, self._run_paddle),
-            ("EASYOCR", self._load_easyocr, self._run_easyocr),
-            ("DOCTR", self._load_doctr, self._run_doctr),
-            ("TESSERACT", self._load_tesseract, self._run_tesseract)
-        ]
+        safe_callback("RUNNING_OCR_ENGINE", 50, pre_classified_type)
+        
+        is_manual_retry = kwargs.get("is_manual_retry", False)
+        
+        if is_manual_retry:
+            engines = [
+                ("DOCTR", self._load_doctr, self._run_doctr)
+            ]
+        else:
+            engines = [
+                ("PADDLE", self._load_paddle, self._run_paddle),
+                ("EASYOCR", self._load_easyocr, self._run_easyocr)
+            ]
 
         runs = []
         retry_count = 0
+        
+        workers = min(os.cpu_count() or 4, 4)
+        
         for name, loader_fn, runner_fn in engines:
+            safe_callback(f"INITIALIZING_ENGINE_{name}", 55, pre_classified_type)
             engine_inst = loader_fn()
             if not engine_inst:
                 continue
@@ -301,10 +329,15 @@ class DocumentIntelligenceEngine:
             page_texts = []
             page_confs = []
             try:
-                for prep_page in preprocessed_pages:
-                    text, conf = runner_fn(engine_inst, prep_page)
-                    page_texts.append(text)
-                    page_confs.append(conf)
+                safe_callback(f"EXTRACTING_TEXT_VIA_{name}", 65, pre_classified_type)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = []
+                    for prep_page in preprocessed_pages:
+                        futures.append(executor.submit(runner_fn, engine_inst, prep_page))
+                    for future in concurrent.futures.as_completed(futures):
+                        text, conf = future.result()
+                        page_texts.append(text)
+                        page_confs.append(conf)
             except Exception as e:
                 logger.error(f"OCR execution failed for {name}: {e}")
                 retry_count += 1
@@ -313,9 +346,12 @@ class DocumentIntelligenceEngine:
             full_text = "\n".join(page_texts)
             avg_ocr_conf = sum(page_confs) / len(page_confs) if page_confs else 50.0
             
+            safe_callback("EXTRACTING_FIELDS", 80, pre_classified_type)
             combined_text = f"{hint_text} {full_text}"
             parser = self._get_best_parser(combined_text, hint_text)
             fields, field_confs = parser.evaluate_extraction(full_text, avg_ocr_conf)
+            
+            safe_callback("CALCULATING_CONFIDENCE", 90, parser.document_type)
             weighted_conf = self._weighted_confidence(parser, field_confs)
             
             id_val = fields.get("id_number", "N/A")
@@ -326,8 +362,10 @@ class DocumentIntelligenceEngine:
             
             runs.append((name, full_text, parser, fields, field_confs, weighted_conf))
             
-            if weighted_conf >= 95.0 and id_ok:
+            if weighted_conf >= 60.0 and id_ok:
                 fraud_score = max(fraud_score, self.fraud_detector.calculate_fraud_score(full_text, image_bytes))
+                safe_callback("CLEANING_TEXT", 95, parser.document_type)
+                safe_callback("OCR_COMPLETED", 100, parser.document_type)
                 return {
                     "success": True,
                     "documentType": parser.document_type,

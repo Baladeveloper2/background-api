@@ -246,10 +246,11 @@ class ImagePreprocessor:
             return img, steps
         try:
             h, w = img.shape[:2]
-            if w < 2000 or h < 2000:
-                scale = max(2000 / w, 2000 / h)
-                img = self.cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=self.cv2.INTER_CUBIC)
-                steps.append("DPI_ENHANCEMENT")
+            # Resize maximum width to 1500px to speed up processing
+            if w > 1500:
+                scale = 1500 / w
+                img = self.cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=self.cv2.INTER_AREA)
+                steps.append("RESIZE_1500PX")
 
             cropped = self.crop_to_boundary(img)
             if cropped.shape[0] != img.shape[0] or cropped.shape[1] != img.shape[1]:
@@ -276,10 +277,13 @@ class ImagePreprocessor:
                 img = bg_removed
                 steps.append("BACKGROUND_REMOVAL")
 
-            super_res = self.super_resolution(img)
-            if super_res.shape[0] != img.shape[0]:
-                img = super_res
-                steps.append("SUPER_RESOLUTION")
+            # Convert grayscale
+            if len(img.shape) == 3:
+                gray = self.cv2.cvtColor(img, self.cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img
+            img = gray
+            steps.append("GRAYSCALE")
 
             denoised = self.denoise(img)
             if denoised is not img:
@@ -295,7 +299,13 @@ class ImagePreprocessor:
             if sharpened is not img:
                 img = sharpened
                 steps.append("SHARPENING")
-                
+
+            # Adaptive Threshold
+            img = self.cv2.adaptiveThreshold(
+                img, 255, self.cv2.ADAPTIVE_THRESH_GAUSSIAN_C, self.cv2.THRESH_BINARY, 11, 2
+            )
+            steps.append("ADAPTIVE_THRESHOLD")
+
             return img, steps
         except Exception as e:
             logger.warning(f"Internal preprocessing failed: {e}")

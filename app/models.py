@@ -514,6 +514,7 @@ class Insufficiency(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # New lifecycle and outreach columns
+    due_date = Column(DateTime(timezone=True), nullable=True)
     notification_count = Column(Integer, default=0)
     last_notified_at = Column(DateTime(timezone=True), nullable=True)
     response_at = Column(DateTime(timezone=True), nullable=True)
@@ -617,8 +618,16 @@ class OcrExtraction(Base):
     file_name = Column(String(255), nullable=False)
     file_url = Column(String(512), nullable=False)
     s3_key = Column(String(255), nullable=True)
-    status = Column(String(50), default="QUEUED", index=True) # QUEUED, PROCESSING, EXTRACTING, VALIDATING, COMPLETED, FAILED
-    progress = Column(Integer, default=0)
+    ocr_status = Column(String(50), default="QUEUED", index=True) # QUEUED, PROCESSING, EXTRACTING, VALIDATING, COMPLETED, FAILED
+    ocr_progress = Column(Integer, default=0)
+    ocr_started_at = Column(DateTime, nullable=True)
+    ocr_completed_at = Column(DateTime, nullable=True)
+    ocr_duration_ms = Column(Integer, default=0)
+    ocr_json = Column(JSONEncodedDict, default=lambda: {}) # Storing standard payload
+    ocr_engine = Column(String(50), nullable=True)
+    ocr_error = Column(Text, nullable=True)
+    ocr_version = Column(String(50), default="2.0")
+    last_retry_at = Column(DateTime, nullable=True)
     document_type = Column(String(100), default="Unknown")
     confidence_score = Column(Float, default=0.0)
     extracted_data = Column(JSONEncodedDict, default=lambda: {})
@@ -670,6 +679,17 @@ class OcrAnalytics(Base):
     extraction = relationship("OcrExtraction")
 
 
+
+class OcrResultCache(Base):
+    __tablename__ = "ocr_result_cache"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    file_hash = Column(String(64), unique=True, index=True, nullable=False)
+    document_type = Column(String(100), nullable=False)
+    extracted_fields = Column(JSONEncodedDict, default=lambda: {})
+    confidence_scores = Column(JSONEncodedDict, default=lambda: {})
+    overall_confidence = Column(Float, default=0.0)
+    engine_used = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class OcrReviewQueue(Base):
     __tablename__ = "ocr_review_queue"

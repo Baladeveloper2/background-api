@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
@@ -27,6 +27,20 @@ async def get_public_insufficiency(token: str, db: AsyncSession = Depends(get_as
     if not insuff:
         raise HTTPException(status_code=404, detail="Invalid or expired resolution link")
         
+    # Check and append CANDIDATE_OPENED event
+    existing_tl = list(insuff.timeline or [])
+    has_opened = any(t.get("event") == "CANDIDATE_OPENED" for t in existing_tl)
+    if not has_opened:
+        existing_tl.append({
+            "event": "CANDIDATE_OPENED",
+            "title": "Candidate Opened Link",
+            "description": "Candidate opened the secure document upload link.",
+            "timestamp": datetime.utcnow().isoformat(),
+            "actor": "Candidate (Self-Service Portal)"
+        })
+        insuff.timeline = existing_tl
+        await db.commit()
+
     return {
         "id": insuff.id,
         "case_ref": insuff.case.case_ref_no or insuff.case.id,
@@ -42,6 +56,7 @@ async def submit_candidate_insufficiency(
     token: str, 
     data: schemas.PublicInsufficiencySubmit, 
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_async_db)
 ):
     """Candidate submits evidence via public portal."""
@@ -61,17 +76,30 @@ async def submit_candidate_insufficiency(
     insuff.updated_at = datetime.utcnow()
     
     # Append timeline event
-    import json as _json
-    existing_timeline = insuff.timeline or []
+    existing_timeline = list(insuff.timeline or [])
     existing_timeline.append({
         "event": "CANDIDATE_RESPONDED",
-        "title": "Candidate Responded",
-        "description": f"Candidate {insuff.case.candidate.name if insuff.case and insuff.case.candidate else 'Candidate'} submitted evidence via secure link.",
+        "title": "Candidate Uploaded Document",
+        "description": f"Candidate {insuff.case.candidate.name if insuff.case and insuff.case.candidate else 'Candidate'} uploaded document(s) via secure link.",
         "timestamp": datetime.utcnow().isoformat(),
-        "actor": "Candidate (Self-Service Portal)"
+        "actor": "Candidate (Self-Service Portal)",
+        "details": {
+            "remarks": data.remarks if hasattr(data, "remarks") else "Uploaded files",
+            "documents_count": len(data.documents)
+        }
     })
     insuff.timeline = existing_timeline
     
+    # Add audit log
+    candidate_name = insuff.case.candidate.name if insuff.case and insuff.case.candidate else "Candidate"
+    audit_log = models.AuditLog(
+        user_id=None,  # Unauthenticated public candidate action
+        action="CANDIDATE_UPLOAD_EVIDENCE",
+        resource_id=insuff.case_id,
+        details=f"User: {candidate_name} (Candidate) | Role: CANDIDATE | IP: {request.client.host} | Action: CANDIDATE_UPLOAD_EVIDENCE | Remarks: Uploaded evidence documents."
+    )
+    db.add(audit_log)
+
     # Update case status if needed
     db_case = insuff.case
     if db_case.status == "INSUFFICIENT":

@@ -7,7 +7,7 @@ from . import (
     verification_routes, stats_routes, role_routes, media_routes,
     notification_routes, ai_routes, billing_routes, client_doc_routes,
     public_routes, bulk_invite_routes, search_routes, ocr_routes,
-    address_change_routes
+    address_change_routes, address_verification_routes
 )
 
 from .database import engine, Base, get_async_db, async_engine
@@ -41,38 +41,42 @@ async def lifespan(app: FastAPI):
     logger.info(f"Site Packages: {site.getsitepackages() if hasattr(site, 'getsitepackages') else 'N/A'}")
     logger.info(f"CWD: {os.getcwd()}")
     logger.info("-" * 50)
-    logger.info("OCR DEPENDENCIES VERIFICATION:")
-    
-    ocr_engines = [
-        ("PaddleOCR", "paddleocr"),
-        ("EasyOCR", "easyocr"),
-        ("DocTR", "doctr"),
-        ("Tesseract", "pytesseract")
-    ]
-    
-    import importlib
-    for engine_name, mod_name in ocr_engines:
-        try:
-            mod = importlib.import_module(mod_name)
-            if engine_name == "PaddleOCR":
-                version = getattr(mod, "__version__", "unknown")
-                logger.info(f"✓ {engine_name} Loaded (Version {version})")
-            else:
-                logger.info(f"✓ {engine_name} Loaded")
-        except Exception as e:
-            pass # Suppressed individual failed logs to avoid noise if fallback is intentional
-
-    try:
-        from paddleocr import PaddleOCR
-        # Fast dummy init just to check API surface
-        ocr = PaddleOCR(lang="en")
-        api_method = "predict" if hasattr(ocr, "predict") else "ocr"
-        logger.info(f"Active OCR Engine: PaddleOCR")
-        logger.info(f"API Method: {api_method}")
-    except Exception:
-        pass
+    async def verify_ocr_dependencies_bg():
+        from fastapi.concurrency import run_in_threadpool
+        import importlib
         
-    logger.info("=" * 50)
+        def verify_sync():
+            logger.info("OCR DEPENDENCIES VERIFICATION (Background):")
+            ocr_engines = [
+                ("PaddleOCR", "paddleocr"),
+                ("EasyOCR", "easyocr"),
+                ("DocTR", "doctr"),
+                ("Tesseract", "pytesseract")
+            ]
+            for engine_name, mod_name in ocr_engines:
+                try:
+                    mod = importlib.import_module(mod_name)
+                    if engine_name == "PaddleOCR":
+                        version = getattr(mod, "__version__", "unknown")
+                        logger.info(f"✓ {engine_name} Loaded (Version {version})")
+                    else:
+                        logger.info(f"✓ {engine_name} Loaded")
+                except Exception:
+                    pass
+
+            try:
+                from paddleocr import PaddleOCR
+                ocr = PaddleOCR(lang="en")
+                api_method = "predict" if hasattr(ocr, "predict") else "ocr"
+                logger.info(f"Active OCR Engine: PaddleOCR")
+                logger.info(f"API Method: {api_method}")
+            except Exception:
+                pass
+            logger.info("-" * 50)
+
+        await run_in_threadpool(verify_sync)
+
+    asyncio.create_task(verify_ocr_dependencies_bg())
 
     # Startup: Instrument SQLAlchemy for Performance Profiling (Slow Query Detection)
     instrument_sqlalchemy(async_engine.sync_engine)
@@ -101,6 +105,18 @@ async def lifespan(app: FastAPI):
                     session.add(setting)
             await session.commit()
             logger.info("OCR System settings seeded.")
+            
+            # Check/Add due_date to insufficiencies table if not exist
+            try:
+                await session.execute(text("SELECT due_date FROM insufficiencies LIMIT 1"))
+            except Exception:
+                logger.info("Adding due_date column to insufficiencies table...")
+                try:
+                    await session.execute(text("ALTER TABLE insufficiencies ADD COLUMN due_date DATETIME NULL"))
+                    await session.commit()
+                    logger.info("Successfully added due_date column.")
+                except Exception as alter_err:
+                    logger.error(f"Failed to add due_date column: {str(alter_err)}")
     except Exception as e:
         logger.error(f"Lifespan startup table check failed: {str(e)}")
     
@@ -186,6 +202,7 @@ api_v1.include_router(customer_routes.router)
 api_v1.include_router(partner_routes.router)
 api_v1.include_router(user_routes.router)
 api_v1.include_router(candidate_routes.router)
+api_v1.include_router(candidate_routes.singular_router)
 api_v1.include_router(batch_routes.router)
 api_v1.include_router(case_routes.router)
 api_v1.include_router(verification_routes.router)
@@ -201,6 +218,7 @@ api_v1.include_router(bulk_invite_routes.router)
 api_v1.include_router(search_routes.router)
 api_v1.include_router(ocr_routes.router)
 api_v1.include_router(address_change_routes.router)
+api_v1.include_router(address_verification_routes.router)
 
 # Alias routes for Customer MIS Export to ensure all path variations resolve perfectly
 from .stats_routes import export_customer_mis_data

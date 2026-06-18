@@ -235,17 +235,20 @@ def process_ocr_document_task(job_id: str):
 
         # If OCR is disabled, skip processing
         if not enable_ocr:
-            job.status = "COMPLETED"
-            job.progress = 100
+            job.ocr_status = "COMPLETED"
+            job.ocr_progress = 100
             db.commit()
             broadcast_progress("COMPLETED", 100)
             return
 
-        # Update to processing (20%)
-        job.status = "PROCESSING"
-        job.progress = 20
+        # Start timer
+        job.ocr_started_at = datetime.utcnow()
+
+        # Update to Loading OCR Engine (10%)
+        job.ocr_status = "QUEUED"
+        job.ocr_progress = 10
         db.commit()
-        broadcast_progress("PROCESSING", 20)
+        broadcast_progress("Loading OCR Engine", 10)
 
         # 2. Download the document
         try:
@@ -272,14 +275,17 @@ def process_ocr_document_task(job_id: str):
                 file_bytes = res.content
         except Exception as dl_err:
             logger.error(f"OCR TASK: Download failed for {job.file_url}: {dl_err}")
-            job.status = "FAILED"
-            job.progress = 100
+            job.ocr_status = "FAILED"
+            job.ocr_progress = 100
+            job.ocr_completed_at = datetime.utcnow()
             error_details = {
                 "__error__": f"Failed to retrieve document: {str(dl_err)}",
                 "__failed_stage__": "DOWNLOAD",
                 "__timestamp__": datetime.utcnow().isoformat()
             }
             job.extracted_data = error_details
+            job.ocr_json = error_details
+            job.ocr_error = str(dl_err)
             db.commit()
             broadcast_progress("FAILED", 100, extra={
                 "error": "Failed to retrieve document",
@@ -287,16 +293,22 @@ def process_ocr_document_task(job_id: str):
             })
             return
 
-        # 3. OCR Text Extraction via Multi-Engine Pipeline (50%)
-        job.status = "EXTRACTING"
-        job.progress = 50
+        # Preprocessing Image (25%)
+        job.ocr_status = "PROCESSING"
+        job.ocr_progress = 25
         db.commit()
-        broadcast_progress("EXTRACTING", 50)
+        broadcast_progress("Preprocessing Image", 25)
+
+        # 3. OCR Text Extraction via Multi-Engine Pipeline (45%)
+        job.ocr_status = "EXTRACTING"
+        job.ocr_progress = 45
+        db.commit()
+        broadcast_progress("Extracting Text", 45)
         
         engine = get_idp_engine()
         extraction_start = time.time()
         
-        result = engine.process_document(file_bytes, source_url=job.file_url)
+        result = engine.process_document(file_bytes, source_url=job.file_url, progress_callback=broadcast_progress)
         
         extraction_time_ms = int((time.time() - extraction_start) * 1000)
         
@@ -324,16 +336,21 @@ def process_ocr_document_task(job_id: str):
         except Exception as log_err:
             logger.warning(f"Diagnostic logging failed: {log_err}")
 
-        # 4. Field Extraction and Classification (80%)
-        job.status = "VALIDATING"
-        job.progress = 80
+        # 4. Field Extraction and Classification (70%)
+        job.ocr_status = "VALIDATING"
+        job.ocr_progress = 70
         db.commit()
-        broadcast_progress("VALIDATING", 80)
+        broadcast_progress("Mapping Fields", 70)
 
         doc_type = result["documentType"]
         fields = result["extractedFields"]
         confidence_scores = {k: 99 if result["validation"].get(k, False) else 50 for k in fields}
         overall_conf = ocr_confidence
+
+        # Validating Data (85%)
+        job.ocr_progress = 85
+        db.commit()
+        broadcast_progress("Validating Data", 85)
 
         fraud_flags = []
         if enable_fraud_detection and result["fraudScore"] > 0:
@@ -363,16 +380,25 @@ def process_ocr_document_task(job_id: str):
                           
         logger.info(f"Extracted Fields:\n{len(fields) - len(missing_fields)}/{len(fields)}")
 
+        # Saving Results (95%)
+        job.ocr_progress = 95
+        db.commit()
+        broadcast_progress("Saving Results", 95)
+
         # 7. Write results to DB
         final_status = "LOW_CONFIDENCE" if (overall_conf < 80.0 or is_manual_review) else "COMPLETED"
-        job.status = final_status
-        job.progress = 100
+        job.ocr_status = final_status
+        job.ocr_progress = 100
         job.document_type = doc_type
         job.confidence_score = float(overall_conf)
+        job.ocr_duration_ms = extraction_time_ms
+        job.ocr_completed_at = datetime.utcnow()
+        job.ocr_engine = engine_used
         
         # Ensure extracted_data explicitly maps to the exact required schema representation if needed, 
         # though the frontend typically just reads the fields directly from job.extracted_data
         job.extracted_data = fields
+        job.ocr_json = fields
         job.confidence_scores = confidence_scores
         job.fraud_flags = fraud_flags
 
@@ -433,8 +459,25 @@ def process_ocr_document_task(job_id: str):
                     duration_ms=0
                 )
                 db.add(fraud_log)
+                
+            # Write to Cache if successful
+            if final_status == "COMPLETED" and doc_type != "Unknown" and overall_conf >= 90.0:
+                import hashlib
+                file_hash = hashlib.sha256(file_bytes).hexdigest()
+                existing_cache = db.query(models.OcrResultCache).filter_by(file_hash=file_hash).first()
+                if not existing_cache:
+                    new_cache = models.OcrResultCache(
+                        file_hash=file_hash,
+                        document_type=doc_type,
+                        extracted_fields=fields,
+                        confidence_scores=confidence_scores,
+                        overall_confidence=float(overall_conf),
+                        engine_used=engine_used
+                    )
+                    db.add(new_cache)
+                
         except Exception as log_err:
-            logger.warning(f"OCR TASK: Failed to persist processing logs: {log_err}")
+            logger.warning(f"OCR TASK: Failed to persist processing logs/cache: {log_err}")
 
         db.commit()
         broadcast_progress("COMPLETED", 100, doc_type, extra={
@@ -456,14 +499,17 @@ def process_ocr_document_task(job_id: str):
         try:
             job = db.query(models.OcrExtraction).filter(models.OcrExtraction.id == job_id).first()
             if job:
-                job.status = "FAILED"
-                job.progress = 100
+                job.ocr_status = "FAILED"
+                job.ocr_progress = 100
+                job.ocr_completed_at = datetime.utcnow()
                 error_details = {
                     "__error__": f"Extraction engine error: {str(e)}",
                     "__failed_stage__": "TEXT_EXTRACTION",
                     "__timestamp__": datetime.utcnow().isoformat()
                 }
                 job.extracted_data = error_details
+                job.ocr_json = error_details
+                job.ocr_error = str(e)
                 db.commit()
                 # Broadcast failure
                 msg = {
