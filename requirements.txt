@@ -28,8 +28,5 @@ python-doctr
 pytesseract
 pymupdf
 pdf2image
-paddlepaddle
-paddleocr
 easyocr
-opencv-python
-
+opencv-python-headless
