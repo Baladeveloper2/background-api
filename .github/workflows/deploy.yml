@@ -12,18 +12,21 @@ jobs:
     steps:
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.0
-
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-
+          port: 22
+          script_stop: true
           script: |
+            set -e
+
             cd /var/www/myproject/background-api
 
             git config --global --add safe.directory /var/www/myproject/background-api
 
-            git pull origin main
+            git fetch origin
+            git reset --hard origin/main
 
             source /var/www/myproject/venv/bin/activate
 
