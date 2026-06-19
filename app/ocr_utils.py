@@ -689,6 +689,7 @@ class OCRScanner:
 
             # Try pyzbar
             try:
+                # pyrefly: ignore [missing-import]
                 from pyzbar.pyzbar import decode as pyz_decode
                 decoded = pyz_decode(img)
                 for obj in decoded:
