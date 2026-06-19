@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy using SSH
+      - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.0
 
         with:
@@ -21,8 +21,9 @@ jobs:
           script: |
             cd /var/www/myproject/background-api
 
-            git fetch origin
-            git reset --hard origin/main
+            git config --global --add safe.directory /var/www/myproject/background-api
+
+            git pull origin main
 
             source /var/www/myproject/venv/bin/activate
 
