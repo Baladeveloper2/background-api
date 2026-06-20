@@ -41,15 +41,28 @@ def validate_case_completion(case_obj: models.Case):
     
     for chk in case_obj.checks:
         status_val = str(chk.status).upper()
-        is_completed = status_val in ["POSITIVE", "NEGATIVE", "DISCREPANCY", "GREEN", "RED", "AMBER", "STOP", "COMPLETED", "QC_VERIFIED", "QC_PENDING"]
+        
+        is_completed = status_val in [
+            "POSITIVE", "NEGATIVE", "DISCREPANCY", 
+            "GREEN", "RED", "AMBER", "STOP", 
+            "COMPLETED", "QC_VERIFIED", "CLOSED"
+        ]
         
         if not is_completed:
-            incomplete_checks.append(f"{chk.check_type} (Status: {chk.status})")
+            display_status = status_val.replace('_', ' ').title()
+            if status_val in ["VERIFICATION", "INTERIM"]:
+                display_status = "WIP"
+            elif status_val == "PENDING":
+                display_status = "Pending"
+            elif status_val == "INSUFFICIENT":
+                display_status = "Insufficiency Open"
+                
+            incomplete_checks.append(f"{chk.check_type} ({display_status})")
     
     if incomplete_checks:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot finalize case. Incomplete verification checks present: {', '.join(incomplete_checks)}. Complete these actions first."
+            detail=f"Final verification cannot be completed.\nPlease complete all verification modules before selecting the overall verdict.\nRemaining Modules: {', '.join(incomplete_checks)}"
         )
     return True
 
@@ -708,7 +721,7 @@ async def send_bgv_link(
         db, current_user.id, # Internal notification
         "BGV Link Shared",
         f"BGV Link has been shared with {case.candidate.name} ({case.candidate.email})",
-        enums.NotificationCategory.INSUFFICIENT_DOCS,
+        enums.NotificationCategory.EMAIL_TRIGGERED,
         case_id=case.id,
         background_tasks=background_tasks
     )
