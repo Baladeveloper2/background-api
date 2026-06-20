@@ -156,7 +156,7 @@ async def add_security_headers(request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: http://localhost:8000 https://res.cloudinary.com https://*.amazonaws.com; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'self' http://localhost:5173;"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: http://localhost:8000 https://res.cloudinary.com https://*.amazonaws.com https://fastapi.tiangolo.com; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'self' http://localhost:5173;"
         return response
     except RuntimeError as exc:
         if "No response returned" in str(exc):
