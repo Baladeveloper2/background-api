@@ -39,4 +39,4 @@ jobs:
       - name: ✅ Verify Service Status
         run: |
           set -e
-          sudo systemctl status background-api.service --no-pager
+          sudo systemctl status background-api.service
