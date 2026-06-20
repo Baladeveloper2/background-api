@@ -1,4 +1,4 @@
-name: Deploy FastAPI to VPS
+name: Production Deployment
 
 on:
   push:
@@ -7,31 +7,36 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-
+    runs-on: self-hosted
+    concurrency: production_deploy
+    
     steps:
-      - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          script_stop: true
-          script: |
-            set -e
+      - name: 🛡️ Configure Git Safe Directory
+        run: |
+          set -e
+          git config --global --add safe.directory /var/www/myproject/background-api
 
-            cd /var/www/myproject/background-api
-
-            git config --global --add safe.directory /var/www/myproject/background-api
-
-            git fetch origin
-            git reset --hard origin/main
-
-            source /var/www/myproject/venv/bin/activate
-
-            pip install -r requirements.txt
-
-            systemctl restart background-api
-
-            systemctl status background-api --no-pager
+      - name: 🔄 Fetch and Reset Code
+        working-directory: /var/www/myproject/background-api
+        run: |
+          set -e
+          git fetch origin main
+          git reset --hard origin/main
+          
+      - name: 📦 Install Python Dependencies
+        working-directory: /var/www/myproject/background-api
+        run: |
+          set -e
+          source /var/www/myproject/venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: 🚀 Restart Systemd Service
+        run: |
+          set -e
+          sudo systemctl restart background-api.service
+          
+      - name: ✅ Verify Service Status
+        run: |
+          set -e
+          sudo systemctl status background-api.service --no-pager
