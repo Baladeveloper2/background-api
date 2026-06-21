@@ -348,7 +348,10 @@ class VerificationCheck(Base):
         return "APPROVED"
     @qc_status.setter
     def qc_status(self, val):
-        pass
+        if val == "APPROVED":
+            self.status = "QC_VERIFIED"
+        elif val == "REJECTED":
+            self.status = "VERIFICATION"
 
     @property
     def qc_remarks(self):

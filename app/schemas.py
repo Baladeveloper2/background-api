@@ -903,7 +903,7 @@ class QCFieldIssueResolve(BaseModel):
     comment: Optional[str] = None
 
 class FinalizeCaseRequest(BaseModel):
-    case_id: str
+    case_id: Optional[str] = None
     remarks: Optional[str] = None
     final_result: Optional[str] = None
 

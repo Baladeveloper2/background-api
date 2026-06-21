@@ -45,7 +45,7 @@ def validate_case_completion(case_obj: models.Case):
         is_completed = status_val in [
             "POSITIVE", "NEGATIVE", "DISCREPANCY", 
             "GREEN", "RED", "AMBER", "STOP", 
-            "COMPLETED", "QC_VERIFIED", "CLOSED"
+            "COMPLETED", "QC_VERIFIED", "CLOSED", "QC_PENDING"
         ]
         
         if not is_completed:
@@ -3766,11 +3766,22 @@ async def finalize_case(
     except Exception as cache_err:
         logger.error(f"Error invalidating dashboard cache: {cache_err}")
         
-    # Reload case for returning schemas.CaseRead
+    # Reload case for returning schemas.CaseRead — must eagerly load ALL nested
+    # relationships that CaseRead serializes or MissingGreenlet errors occur.
     stmt_reload = select(models.Case).options(
-        selectinload(models.Case.checks).selectinload(models.VerificationCheck.documents),
         joinedload(models.Case.candidate),
-        joinedload(models.Case.customer)
+        joinedload(models.Case.customer),
+        selectinload(models.Case.checks).options(
+            selectinload(models.VerificationCheck.documents).joinedload(models.VerificationDocument.uploader),
+            selectinload(models.VerificationCheck.logs).joinedload(models.VerificationLog.performer),
+            selectinload(models.VerificationCheck.assigned_verifier),
+            selectinload(models.VerificationCheck.finalized_user),
+        ),
+        selectinload(models.Case.verification_logs).joinedload(models.VerificationLog.performer),
+        joinedload(models.Case.batch),
+        joinedload(models.Case.assigned_user),
+        joinedload(models.Case.finalized_user),
+        selectinload(models.Case.insufficiencies),
     ).filter(models.Case.id == target_case_id)
     res_reload = await db.execute(stmt_reload)
     db_case_reloaded = res_reload.unique().scalar_one()

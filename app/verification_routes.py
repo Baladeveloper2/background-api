@@ -97,6 +97,14 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
         raise HTTPException(status_code=404, detail="Check not found")
     
     update_data = check_update.dict(exclude_unset=True)
+    if update_data.get("status") == "QC_PENDING":
+        final_res = update_data.get("final_result") or db_check.final_result
+        if final_res:
+            new_status = str(final_res).upper()
+            update_data["status"] = new_status
+        else:
+            update_data["status"] = "QC_VERIFIED"
+
     for key, value in update_data.items():
         setattr(db_check, key, value)
     
