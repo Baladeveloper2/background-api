@@ -1,6 +1,10 @@
 import enum
 
-class UserRole(str, enum.Enum):
+class StrEnum(str, enum.Enum):
+    def __str__(self) -> str:
+        return self.value
+
+class UserRole(StrEnum):
     SUPER_ADMIN = "SUPER_ADMIN"
     ADMIN = "SUPER_ADMIN"
     MANAGER = "MANAGER"
@@ -11,11 +15,11 @@ class UserRole(str, enum.Enum):
     CANDIDATE = "CANDIDATE"
     USER = "VERIFIER"
 
-class Status(str, enum.Enum):
+class Status(StrEnum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
 
-class CaseStatus(str, enum.Enum):
+class CaseStatus(StrEnum):
     INVITED = "INVITED"
     ASSIGNED = "ASSIGNED"
     WIP = "WIP"
@@ -47,7 +51,7 @@ class CaseStatus(str, enum.Enum):
     HOLD = "HOLD"
     QC_VERIFIED = "QC_VERIFIED"
 
-class CheckStatus(str, enum.Enum):
+class CheckStatus(StrEnum):
     POSITIVE = "POSITIVE"
     NEGATIVE = "NEGATIVE"
     DISCREPANCY = "DISCREPANCY"
@@ -68,14 +72,14 @@ class CheckStatus(str, enum.Enum):
     NOT_AP = "NOT_AP"
     CLEAR_VERIFIED = "CLEAR/VERIFIED"
 
-class QCStatus(str, enum.Enum):
+class QCStatus(StrEnum):
     PENDING_REVIEW = "PENDING_REVIEW"
     QC_IN_REVIEW = "QC_IN_REVIEW"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     ESCALATED = "ESCALATED"
 
-class FinalResult(str, enum.Enum):
+class FinalResult(StrEnum):
     POSITIVE = "POSITIVE"
     NEGATIVE = "NEGATIVE"
     DISCREPANCY = "DISCREPANCY"
@@ -87,12 +91,12 @@ class FinalResult(str, enum.Enum):
     NOT_AP = "NOT_AP"
     CLEAR_VERIFIED = "CLEAR/VERIFIED"
 
-class NotificationChannel(str, enum.Enum):
+class NotificationChannel(StrEnum):
     SYSTEM = "SYSTEM"
     EMAIL = "EMAIL"
     SMS = "SMS"
 
-class NotificationCategory(str, enum.Enum):
+class NotificationCategory(StrEnum):
     CASE_ASSIGNED = "CASE_ASSIGNED"
     INSUFFICIENT_DOCS = "INSUFFICIENT_DOCS"
     CASE_COMPLETED = "CASE_COMPLETED"
@@ -103,15 +107,14 @@ class NotificationCategory(str, enum.Enum):
     QA_REPORT_READY = "QA_REPORT_READY"
     URGENT_PING = "URGENT_PING"
 
-class QCIssueStatus(str, enum.Enum):
+class QCIssueStatus(StrEnum):
     OPEN = "OPEN"
     RESOLVED = "RESOLVED"
     CANCELLED = "CANCELLED"
 
-class QCIssueType(str, enum.Enum):
+class QCIssueType(StrEnum):
     DATA_NOT_PROVIDED = "DATA_NOT_PROVIDED"
     DOCUMENT_UNCLEAR = "DOCUMENT_UNCLEAR"
     FIELD_MISMATCH = "FIELD_MISMATCH"
     VERIFICATION_INCOMPLETE = "VERIFICATION_INCOMPLETE"
     ADDITIONAL_PROOF_REQUIRED = "ADDITIONAL_PROOF_REQUIRED"
-

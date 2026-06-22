@@ -100,7 +100,10 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
     if update_data.get("status") == "QC_PENDING":
         final_res = update_data.get("final_result") or db_check.final_result
         if final_res:
-            new_status = str(final_res).upper()
+            val = final_res.value if hasattr(final_res, "value") else str(final_res)
+            if "." in val:
+                val = val.split(".")[-1]
+            new_status = val.upper()
             update_data["status"] = new_status
         else:
             update_data["status"] = "QC_VERIFIED"

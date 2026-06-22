@@ -124,7 +124,7 @@ async def notify_allocation_to_admin(db: AsyncSession, admin_id: str, verifier_n
     await create_notification(
         db, admin_id,
         "Allocation Confirmed",
-        f"Protocol {case_ref} ({candidate_name}) successfully deployed to {verifier_name}.",
+        f"Candidate {case_ref} ({candidate_name}) has been successfully Allocated to {verifier_name}.",
         enums.NotificationCategory.SYSTEM_ALERT,
         case_id=case_id,
         background_tasks=background_tasks

@@ -2303,7 +2303,12 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
 
 @router.get("/allocation-stats", dependencies=[Depends(check_module_permission("bvs", "verification", action="read"))])
 async def get_allocation_stats(db: AsyncSession = Depends(get_read_db)):
-    FINAL_STATUSES = ['FINALIZED', 'COMPLETED', 'CLOSED']
+    FINAL_STATUSES = [
+        'FINALIZED', 'COMPLETED', 'CLOSED',
+        'POSITIVE', 'NEGATIVE', 'DISCREPANCY',
+        'UNABLE TO VERIFY', 'UNABLE_TO_VERIFY', 'HOLD', 'INSUFFICIENT', 'QC_VERIFIED',
+        'AMBER', 'STOP', 'NOT_AP', 'CLEAR_VERIFIED', 'GREEN', 'RED'
+    ]
 
     # Cases not yet assigned to anyone — covers all pre-assignment statuses
     unallocated_stmt = select(func.count(models.Case.id)).filter(
@@ -2546,7 +2551,12 @@ async def read_cases(
         base_count_stmt = base_count_stmt.filter(personal_filter)
     
     # 3. Dynamic Filtering
-    ALL_FINAL_STATUSES = ['FINALIZED', 'COMPLETED', 'CLOSED']
+    ALL_FINAL_STATUSES = [
+        'FINALIZED', 'COMPLETED', 'CLOSED',
+        'POSITIVE', 'NEGATIVE', 'DISCREPANCY',
+        'UNABLE TO VERIFY', 'UNABLE_TO_VERIFY', 'HOLD', 'INSUFFICIENT', 'QC_VERIFIED',
+        'AMBER', 'STOP', 'NOT_AP', 'CLEAR_VERIFIED', 'GREEN', 'RED'
+    ]
     if status and str(status).strip().upper() not in ['ALL', '']:
         status_up = str(status).strip().upper()
         if status_up in ['POSITIVE', 'NEGATIVE', 'AMBER', 'STOP_CHECK', 'INTERIM', 'INSUFFICIENCY', 'DISCREPANCY', 'UNABLE TO VERIFY', 'INSUFFICIENT', 'HOLD']:
@@ -2607,7 +2617,7 @@ async def read_cases(
         stmt = stmt.filter(models.Case.candidate_id == candidate_id)
         base_count_stmt = base_count_stmt.filter(models.Case.candidate_id == candidate_id)
     if assigned is not None:
-        _FINAL_S = ['FINALIZED','COMPLETED','CLOSED']
+        _FINAL_S = ALL_FINAL_STATUSES
         if assigned:
             # Active Allocations: cases that have an assigned verifier and are not yet finalized
             active_filter = and_(
@@ -2626,7 +2636,7 @@ async def read_cases(
             base_count_stmt = base_count_stmt.filter(unassigned_filter)
     
     if exclude_completed:
-        _EXCL = ['FINALIZED','COMPLETED','CLOSED']
+        _EXCL = ALL_FINAL_STATUSES
         comp_filter = models.Case.status.notin_(_EXCL)
         stmt = stmt.filter(comp_filter)
         base_count_stmt = base_count_stmt.filter(comp_filter)
@@ -2649,7 +2659,7 @@ async def read_cases(
         # BUT exclude finalized/archived cases
         risk_threshold = datetime.utcnow() - timedelta(days=7)
         risk_filter = and_(
-            models.Case.status.notin_(['FINALIZED', 'COMPLETED', 'CLOSED']),
+            models.Case.status.notin_(ALL_FINAL_STATUSES),
             or_(
                 models.Case.is_in_tat == 0,
                 models.Case.received_date < risk_threshold
@@ -2775,7 +2785,7 @@ async def read_cases(
             p_tat = tat_utils.calculate_predictive_tat(check_types)
             case_data.predicted_tat = p_tat
             # Suppress risk alerts for archived protocols
-            if str(case.status).upper() in ["FINALIZED", "COMPLETED", "CLOSED"]:
+            if str(case.status).upper() in ALL_FINAL_STATUSES:
                 case_data.is_at_risk = False
             else:
                 case_data.is_at_risk = tat_utils.check_is_at_risk(case.received_date, p_tat)
@@ -3827,7 +3837,7 @@ async def bulk_allocate(data: schemas.BulkAllocateRequest, background_tasks: Bac
         await notification_utils.create_notification(
             db, current_user.id,
             "Allocation Strategy Finalized",
-            f"Successfully deployed {len(case_ids)} cases to {verifier_name}. Mission protocols are now active.",
+            f"Successfully Assigned  {len(case_ids)} cases to {verifier_name}",
             enums.NotificationCategory.SYSTEM_ALERT,
             extra_data={"type": "BULK_ALLOCATE", "verifier": verifier_name, "cases": bulk_info}
         )
@@ -4558,6 +4568,13 @@ async def get_case_check_details(
             if k in check_type_lower:
                 submitted_info = candidate.address_details.get(v)
                 break
+
+    # For database/global checks: fall back to check.data.global_db_verification if submitted_info is empty
+    if (not submitted_info or (isinstance(submitted_info, list) and len(submitted_info) == 0)):
+        if ('database' in check_type_lower or 'global' in check_type_lower):
+            check_data = check.data or {}
+            if isinstance(check_data, dict) and check_data.get('global_db_verification'):
+                submitted_info = check_data['global_db_verification']
 
     findings = check.data or {}
 
