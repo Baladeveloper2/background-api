@@ -57,6 +57,8 @@ async def generate_presigned_url(path, as_attachment=False, filename=None):
         from urllib.parse import quote
         safe_filename = quote(final_filename)
         params['ResponseContentDisposition'] = f"attachment; filename*=UTF-8''{safe_filename}"
+    else:
+        params['ResponseContentDisposition'] = 'inline'
         
     return s3_client.generate_presigned_url(
         'get_object',
