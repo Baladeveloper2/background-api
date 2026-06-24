@@ -2281,6 +2281,23 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     
     await db.commit()
     
+    # Update Batch Status to ENTRY COMPLETED and delete draft
+    if resolved_batch_id:
+        batch_stmt = select(models.Batch).filter(models.Batch.id == resolved_batch_id)
+        b_res_obj = await db.execute(batch_stmt)
+        batch_obj = b_res_obj.scalar_one_or_none()
+        if batch_obj:
+            batch_obj.status = "ENTRY COMPLETED"
+            
+            # Delete Draft
+            draft_stmt = select(models.CandidateDraft).filter(models.CandidateDraft.batch_id == resolved_batch_id)
+            d_res = await db.execute(draft_stmt)
+            draft_obj = d_res.scalar_one_or_none()
+            if draft_obj:
+                await db.delete(draft_obj)
+            
+            await db.commit()
+    
     # Reload with relationships for response validation
     stmt = select(models.Case).options(
         joinedload(models.Case.candidate),

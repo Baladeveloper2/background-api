@@ -209,6 +209,18 @@ class Batch(Base):
     cases_count = Column(Integer, default=0)
     tat_days = Column(Integer, default=10)
     case_rate = Column(Float, default=0.0)
+    status = Column(String(50), default="DRAFT", index=True)
+
+class CandidateDraft(Base):
+    __tablename__ = "candidate_drafts"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), index=True, unique=True)
+    form_data = Column(JSONEncodedDict, default=lambda: {})
+    last_saved_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_by = Column(String(36), ForeignKey("users.id"))
+    
+    batch = relationship("Batch", backref="draft")
+    user = relationship("User")
 
 class Case(Base):
     __tablename__ = "cases"

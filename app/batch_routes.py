@@ -273,3 +273,48 @@ async def delete_batch(batch_id: str, db: AsyncSession = Depends(get_async_db)):
     await db.commit()
     await clear_cache("batches")
     return None
+
+# --- Draft Management Routes ---
+
+@router.get("/{batch_id}/draft", response_model=schemas.CandidateDraftResponse)
+async def get_batch_draft(batch_id: str, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="read"))):
+    res = await db.execute(select(models.CandidateDraft).filter(models.CandidateDraft.batch_id == batch_id))
+    draft = res.scalar_one_or_none()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return draft
+
+@router.post("/{batch_id}/draft", response_model=schemas.CandidateDraftResponse)
+async def save_batch_draft(batch_id: str, draft_data: schemas.CandidateDraftCreate, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="write"))):
+    # Verify batch exists
+    batch_res = await db.execute(select(models.Batch).filter(models.Batch.id == batch_id))
+    if not batch_res.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    res = await db.execute(select(models.CandidateDraft).filter(models.CandidateDraft.batch_id == batch_id))
+    draft = res.scalar_one_or_none()
+    
+    if draft:
+        draft.form_data = draft_data.form_data
+        draft.created_by = current_user.id
+    else:
+        draft = models.CandidateDraft(
+            batch_id=batch_id,
+            form_data=draft_data.form_data,
+            created_by=current_user.id
+        )
+        db.add(draft)
+        
+    await db.commit()
+    await db.refresh(draft)
+    return draft
+
+@router.delete("/{batch_id}/draft", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_batch_draft(batch_id: str, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="write"))):
+    res = await db.execute(select(models.CandidateDraft).filter(models.CandidateDraft.batch_id == batch_id))
+    draft = res.scalar_one_or_none()
+    if draft:
+        await db.delete(draft)
+        await db.commit()
+    return None
+

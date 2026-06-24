@@ -229,6 +229,20 @@ class Batch(BatchBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+class CandidateDraftBase(BaseModel):
+    batch_id: str
+    form_data: Dict[str, Any]
+
+class CandidateDraftCreate(CandidateDraftBase):
+    pass
+
+class CandidateDraftResponse(CandidateDraftBase):
+    id: str
+    last_saved_at: datetime
+    created_by: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
 class BatchSummary(BaseModel):
     id: str
     batch_no: str
