@@ -495,7 +495,9 @@ def process_ocr_document_task(job_id: str):
                      f"Missing={len(missing_fields)} fields, Flags={len(fraud_flags)}")
 
     except Exception as e:
-        logger.error(f"OCR TASK: Failed processing job {job_id}: {str(e)}", exc_info=True)
+        import traceback
+        tb_str = traceback.format_exc()
+        logger.error(f"OCR TASK: Failed processing job {job_id}: {str(e)}\n{tb_str}")
         try:
             job = db.query(models.OcrExtraction).filter(models.OcrExtraction.id == job_id).first()
             if job:
@@ -503,7 +505,7 @@ def process_ocr_document_task(job_id: str):
                 job.ocr_progress = 100
                 job.ocr_completed_at = datetime.utcnow()
                 error_details = {
-                    "__error__": f"Extraction engine error: {str(e)}",
+                    "__error__": f"Extraction engine error: {str(e)}\n{tb_str}",
                     "__failed_stage__": "TEXT_EXTRACTION",
                     "__timestamp__": datetime.utcnow().isoformat()
                 }

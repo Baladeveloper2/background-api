@@ -11,8 +11,8 @@ class AadhaarParser(BaseParser):
         fields = {}
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
-        num_m = re.search(r'\b(\d{4}\s?\d{4}\s?\d{4})\b', text)
-        id_val = num_m.group(1).replace(" ", "") if num_m else "N/A"
+        num_m = re.search(r'\b(\d{4}\s\d{4}\s\d{4})\b', text)
+        id_val = num_m.group(1) if num_m else "N/A"
         fields["aadhaar_number"] = {"value": id_val, "base_conf": 98 if num_m else 50}
         fields["id_number"] = {"value": id_val, "base_conf": 98 if num_m else 50}
         
@@ -121,8 +121,7 @@ class AadhaarParser(BaseParser):
 
     def validate_field(self, field_name: str, value: str) -> bool:
         if field_name == "id_number":
-            digits = re.sub(r'\D', '', value)
-            return len(digits) == 12
+            return bool(re.match(r'^\d{4}\s\d{4}\s\d{4}$', value))
         return super().validate_field(field_name, value)
 
     def get_confidence_weights(self):

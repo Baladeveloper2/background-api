@@ -28,8 +28,7 @@ class DocumentIntelligenceEngine:
         self.parsers = [parser_cls() for parser_cls in get_registered_parsers()]
         self.default_parser = get_default_parser()()
         
-        # Pre-load PaddleOCR immediately as a singleton
-        self._load_paddle()
+        # PaddleOCR will be loaded lazily to prevent hanging the main execution without progress updates
         
     def _load_paddle(self):
         if self.paddle_reader is None and self.preprocessor.cv2 and self.preprocessor.np:
@@ -312,7 +311,8 @@ class DocumentIntelligenceEngine:
         else:
             engines = [
                 ("PADDLE", self._load_paddle, self._run_paddle),
-                ("EASYOCR", self._load_easyocr, self._run_easyocr)
+                ("EASYOCR", self._load_easyocr, self._run_easyocr),
+                ("TESSERACT", self._load_tesseract, self._run_tesseract)
             ]
 
         runs = []
@@ -434,6 +434,12 @@ class DocumentIntelligenceEngine:
                 
             overall_merged_conf = self._weighted_confidence(best_parser, merged_confs)
             fraud_score = max(fraud_score, self.fraud_detector.calculate_fraud_score(all_text_combined, image_bytes))
+            
+            # AI Validation Stub
+            if overall_merged_conf < 80.0:
+                safe_callback("AI_VALIDATION", 98, best_parser.document_type)
+                # TODO: Integrate with CloudOCREngines or LLM to refine merged_fields based on all_text_combined
+                preprocessing_steps.append("AI_VALIDATION_REQUESTED")
             
             return {
                 "success": True,

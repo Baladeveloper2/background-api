@@ -44,17 +44,18 @@ def apply_case_filters(
         
     # Apply Executive Filter
     if executive and executive != 'ALL':
+        exec_subq = select(models.User.id).filter(
+            or_(
+                models.User.full_name == executive,
+                models.User.email == executive
+            )
+        )
         query = query.filter(
             or_(
                 models.Case.assigned_to == executive,
-                models.Case.assigned_to.in_(
-                    select(models.User.id).filter(
-                        or_(
-                            models.User.full_name == executive,
-                            models.User.email == executive
-                        )
-                    )
-                )
+                models.Case.assigned_to.in_(exec_subq),
+                models.Case.checks.any(models.VerificationCheck.assigned_verifier_id == executive),
+                models.Case.checks.any(models.VerificationCheck.assigned_verifier_id.in_(exec_subq))
             )
         )
         
@@ -989,7 +990,11 @@ async def get_dashboard_stats(
         # 2. Optimized Combined Queries
         # We'll use a single pass for status counts and date-based counts
         status_stmt = select(models.Case.status, func.count(models.Case.id)).group_by(models.Case.status)
-        if filter_verifier: status_stmt = status_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_verifier: 
+            status_stmt = status_stmt.filter(or_(
+                models.Case.assigned_to == current_user.id,
+                models.Case.checks.any(models.VerificationCheck.assigned_verifier_id == current_user.id)
+            ))
         if filter_customer: status_stmt = status_stmt.filter(models.Case.customer_id == current_user.customer_id)
         if filter_start: status_stmt = status_stmt.filter(models.Case.received_date >= filter_start)
         if filter_end: status_stmt = status_stmt.filter(models.Case.received_date < filter_end)
@@ -1001,7 +1006,11 @@ async def get_dashboard_stats(
             func.count(case(((models.Case.received_date >= today), models.Case.id))).label("today_entry"),
             func.count(case(((models.Case.status.in_(['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT'])) & (models.Case.completed_date >= today), models.Case.id))).label("comp_today")
         )
-        if filter_verifier: date_counts_stmt = date_counts_stmt.filter(models.Case.assigned_to == current_user.id)
+        if filter_verifier: 
+            date_counts_stmt = date_counts_stmt.filter(or_(
+                models.Case.assigned_to == current_user.id,
+                models.Case.checks.any(models.VerificationCheck.assigned_verifier_id == current_user.id)
+            ))
         if filter_customer: date_counts_stmt = date_counts_stmt.filter(models.Case.customer_id == current_user.customer_id)
         date_counts_stmt = apply_case_filters(date_counts_stmt, client, executive, status, tat, search)
 

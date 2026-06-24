@@ -108,8 +108,14 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
         else:
             update_data["status"] = "QC_VERIFIED"
 
+    from sqlalchemy.orm.attributes import flag_modified
     for key, value in update_data.items():
         setattr(db_check, key, value)
+    
+    if "data" in update_data:
+        flag_modified(db_check, "data")
+    
+    db_check.updated_at = datetime.utcnow()
     
     await db.commit()
     
@@ -125,6 +131,25 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
     res = await db.execute(stmt)
     db_check = res.scalar_one()
     
+    # Auto-Finalization Logic
+    if db_check.case_id:
+        from .case_routes import derive_case_final_result_preloaded
+        case_stmt = select(models.Case).options(selectinload(models.Case.checks)).filter(models.Case.id == db_check.case_id)
+        case_res = await db.execute(case_stmt)
+        c_obj = case_res.scalar_one_or_none()
+        if c_obj:
+            completed_states = ['GREEN', 'RED', 'AMBER', 'STOP', 'QC_VERIFIED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'CLOSED', 'QC_PENDING']
+            all_completed = all(
+                (chk.status or '').upper() in completed_states or chk.qc_status == 'APPROVED' 
+                for chk in c_obj.checks
+            )
+            if all_completed and c_obj.status not in ['COMPLETED', 'FINALIZED']:
+                c_obj.status = "COMPLETED"
+                derived_result = derive_case_final_result_preloaded(c_obj) or "POSITIVE"
+                c_obj.final_result = derived_result
+                c_obj.completed_date = datetime.utcnow()
+                await db.commit()
+                
     return enrich_check(db_check)
 
 @router.patch("/checks/{check_id}/generate-link", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])

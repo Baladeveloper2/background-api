@@ -357,7 +357,9 @@ class VerificationCheck(Base):
 
     @property
     def qc_status(self):
-        return "APPROVED"
+        if self.status in ["QC_VERIFIED", "COMPLETED", "GREEN", "RED", "AMBER", "STOP"]:
+            return "APPROVED"
+        return "PENDING_REVIEW"
     @qc_status.setter
     def qc_status(self, val):
         if val == "APPROVED":

@@ -2562,7 +2562,8 @@ async def read_cases(
         personal_filter = or_(
             models.Case.assigned_to == current_user.id,
             models.Case.qa_id == current_user.id,
-            models.Case.qc_id == current_user.id
+            models.Case.qc_id == current_user.id,
+            models.Case.checks.any(models.VerificationCheck.assigned_verifier_id == current_user.id)
         )
         stmt = stmt.filter(personal_filter)
         base_count_stmt = base_count_stmt.filter(personal_filter)

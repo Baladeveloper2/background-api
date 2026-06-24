@@ -253,7 +253,7 @@ async def get_all_verifications(
         # Base query joining VerificationCheck, Case, Candidate, Customer, and AddressVerification
         stmt = (
             select(models.VerificationCheck, models.AddressVerification)
-            .filter(models.VerificationCheck.digital_token.isnot(None))
+            .filter(models.VerificationCheck.check_type.ilike('%address%'))
             .outerjoin(models.Case, models.VerificationCheck.case_id == models.Case.id)
             .outerjoin(models.Candidate, models.Case.candidate_id == models.Candidate.id)
             .outerjoin(models.Customer, models.Case.customer_id == models.Customer.id)
@@ -294,7 +294,7 @@ async def get_all_verifications(
         # Count query
         count_stmt = (
             select(func.count(models.VerificationCheck.id))
-            .filter(models.VerificationCheck.digital_token.isnot(None))
+            .filter(models.VerificationCheck.check_type.ilike('%address%'))
             .outerjoin(models.Case, models.VerificationCheck.case_id == models.Case.id)
             .outerjoin(models.Candidate, models.Case.candidate_id == models.Candidate.id)
             .outerjoin(models.Customer, models.Case.customer_id == models.Customer.id)
