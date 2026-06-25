@@ -795,11 +795,13 @@ class AddressChangeRequest(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False, index=True)
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True, index=True)
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), nullable=True, index=True)
     
     old_address = Column(Text, nullable=False)
     new_address = Column(Text, nullable=False)
     reason = Column(Text, nullable=True)
-    proof_url = Column(String(512), nullable=True)
+    proof_urls = Column(JSONEncodedList, default=lambda: []) # Stores list of S3 URLs
+    distance_meters = Column(Float, nullable=True)
     
     status = Column(String(50), default="PENDING", index=True) # PENDING, APPROVED, REJECTED
     ip_address = Column(String(100), nullable=True)
@@ -812,4 +814,31 @@ class AddressChangeRequest(Base):
     # Relationships
     candidate = relationship("Candidate")
     case = relationship("Case")
+    check = relationship("VerificationCheck")
     reviewer = relationship("User", foreign_keys=[reviewed_by])
+
+class CandidateAddressHistory(Base):
+    __tablename__ = "candidate_address_history"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False, index=True)
+    old_address = Column(Text, nullable=False)
+    new_address = Column(Text, nullable=False)
+    reason = Column(Text, nullable=True)
+    changed_at = Column(DateTime, default=datetime.utcnow)
+    changed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    
+    candidate = relationship("Candidate")
+    changer = relationship("User", foreign_keys=[changed_by])
+
+class VerificationLinkHistory(Base):
+    __tablename__ = "verification_link_history"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), nullable=False, index=True)
+    token = Column(String(100), nullable=False)
+    action = Column(String(50), nullable=False) # GENERATED, RESENT
+    generated_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    generated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    
+    check = relationship("VerificationCheck")
+    generator = relationship("User", foreign_keys=[generated_by])

@@ -361,7 +361,7 @@ async def save_ocr_job_results(
                     "url": job.file_url,
                     "path": job.s3_key,
                     "mimetype": "image/png" if not job.file_name.lower().endswith('.pdf') else "application/pdf",
-                    "check_type": "Identity Verification",
+                    "check_type": "Identity Check",
                     "uploaded_at": datetime.utcnow().isoformat() + "Z"
                 }
                 curr = list(candidate.documents) if candidate.documents else []
@@ -382,7 +382,7 @@ async def save_ocr_job_results(
                     "url": job.file_url,
                     "path": job.s3_key,
                     "mimetype": "image/png" if not job.file_name.lower().endswith('.pdf') else "application/pdf",
-                    "check_type": "Identity Verification",
+                    "check_type": "Identity Check",
                     "uploaded_at": datetime.utcnow().isoformat() + "Z"
                 }
                 curr = list(candidate.documents) if candidate.documents else []
@@ -404,7 +404,7 @@ async def save_ocr_job_results(
                     "url": job.file_url,
                     "path": job.s3_key,
                     "mimetype": "image/png" if not job.file_name.lower().endswith('.pdf') else "application/pdf",
-                    "check_type": "Identity Verification",
+                    "check_type": "Identity Check",
                     "uploaded_at": datetime.utcnow().isoformat() + "Z"
                 }
                 curr = list(candidate.documents) if candidate.documents else []

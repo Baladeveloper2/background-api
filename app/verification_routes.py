@@ -197,10 +197,12 @@ async def generate_verification_link(
         expected_lng = candidate.address_details.get("longitude")
         
     db_check.data["digital_link"] = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "generated_by_name": current_user.full_name or current_user.email,
         "expires_at": expires_at.isoformat(),
         "candidate_id": candidate.id if candidate else None,
         "case_id": db_check.case_id,
-        "status": "UNUSED",
+        "status": "LINK_GENERATED",
         "expected_latitude": expected_lat,
         "expected_longitude": expected_lng
     }
@@ -320,6 +322,18 @@ async def get_public_verification(token: str, db: AsyncSession = Depends(get_asy
     if db_check is None:
         raise HTTPException(status_code=404, detail="Invalid or expired verification link.")
         
+    # Check for pending Address Change Request (Suspended state)
+    acr_stmt = select(models.AddressChangeRequest).filter(
+        models.AddressChangeRequest.check_id == db_check.id,
+        models.AddressChangeRequest.status == "PENDING"
+    )
+    acr_res = await db.execute(acr_stmt)
+    pending_acr = acr_res.scalar_one_or_none()
+    
+    if pending_acr:
+        # If suspended, we might still want to return basic info but indicate suspension
+        pass
+        
     digital_link = db_check.data.get("digital_link") if db_check.data else None
     if not digital_link:
         raise HTTPException(status_code=400, detail="Malformed verification token metadata.")
@@ -342,6 +356,15 @@ async def get_public_verification(token: str, db: AsyncSession = Depends(get_asy
         details=f"Address verification link opened. Candidate: {db_check.case.candidate.name if db_check.case and db_check.case.candidate else 'Unknown'}."
     )
     db.add(audit)
+
+    # Record opened_at and update status to OPENED in digital_link metadata
+    from sqlalchemy.orm.attributes import flag_modified
+    if db_check.data and "digital_link" in db_check.data:
+        if not db_check.data["digital_link"].get("opened_at"):  # Only record first open
+            db_check.data["digital_link"]["opened_at"] = datetime.utcnow().isoformat()
+        db_check.data["digital_link"]["status"] = "OPENED"
+        flag_modified(db_check, "data")
+
     await db.commit()
     
     case_obj = db_check.case
@@ -369,7 +392,8 @@ async def get_public_verification(token: str, db: AsyncSession = Depends(get_asy
         "check_type": db_check.check_type,
         "given_address": given_addr,
         "expected_latitude": digital_link.get("expected_latitude") or db_check.data.get("expected_latitude"),
-        "expected_longitude": digital_link.get("expected_longitude") or db_check.data.get("expected_longitude")
+        "expected_longitude": digital_link.get("expected_longitude") or db_check.data.get("expected_longitude"),
+        "suspension_status": "PENDING_ADMIN_REVIEW" if pending_acr else None
     }
 
 @router.post("/public/{token}")
@@ -416,6 +440,19 @@ async def submit_public_verification(
     captured_address = submission.get("captured_address", "")
     
     candidate = db_check.case.candidate if db_check.case else None
+    
+    # 2b. Strict Validation (DO NOT ALLOW SUBMIT WHEN GPS/photo unavailable)
+    if not lat or not lng:
+        raise HTTPException(status_code=400, detail="Verification Failed: GPS coordinates are mandatory.")
+    
+    # Check if a pending address change exists
+    acr_stmt = select(models.AddressChangeRequest).filter(
+        models.AddressChangeRequest.check_id == db_check.id,
+        models.AddressChangeRequest.status == "PENDING"
+    )
+    acr_res = await db.execute(acr_stmt)
+    if acr_res.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Address request pending. Verification is temporarily suspended.")
     
     # 3. Quality & Spoofing Validations
     if device_info.get("webdriver"):
@@ -495,6 +532,22 @@ async def submit_public_verification(
         if not registered_address_str:
             registered_address_str = candidate.address or ""
             
+    # 5b. Nominatim Reverse Geocoding (free, no API key required)
+    resolved_address = captured_address or f"{lat:.6f}, {lng:.6f}"
+    try:
+        import httpx
+        nominatim_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lng}&format=json&addressdetails=1"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            geo_resp = await client.get(
+                nominatim_url,
+                headers={"User-Agent": "BGVMS-AddressVerification/1.0"}
+            )
+            if geo_resp.status_code == 200:
+                geo_data = geo_resp.json()
+                resolved_address = geo_data.get("display_name") or resolved_address
+    except Exception as geo_err:
+        logger.warning(f"Nominatim reverse geocoding failed: {geo_err}")
+
     # 6. Database storage updates
     # Create AddressVerification row
     verif = models.AddressVerification(
@@ -505,7 +558,7 @@ async def submit_public_verification(
         longitude=lng,
         accuracy=accuracy,
         altitude=altitude,
-        captured_address=captured_address or f"Coordinates: {lat}, {lng}",
+        captured_address=resolved_address,
         submitted_address=registered_address_str,
         submitted_latitude=expected_lat,
         submitted_longitude=expected_lng,
@@ -609,6 +662,71 @@ async def submit_public_verification(
     await db.commit()
     
     return {"status": "success", "message": "Verification submitted successfully", "verification_status": verification_status, "distance": distance}
+
+@router.post("/public/{token}/address-change")
+async def submit_address_change_request(
+    token: str,
+    submission: Dict[str, Any],
+    request: Request,
+    db: AsyncSession = Depends(get_async_db)
+):
+    from sqlalchemy.orm.attributes import flag_modified
+    
+    # 1. Fetch check and validate token
+    stmt = select(models.VerificationCheck).options(
+        selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate)
+    ).filter(models.VerificationCheck.digital_token == token)
+    res = await db.execute(stmt)
+    db_check = res.scalar_one_or_none()
+    
+    if db_check is None:
+        raise HTTPException(status_code=404, detail="Invalid or expired verification link.")
+        
+    candidate = db_check.case.candidate if db_check.case else None
+    
+    # 2. Extract Data
+    new_address = submission.get("new_address", "")
+    reason = submission.get("reason", "")
+    proof_urls = submission.get("proof_urls", [])
+    distance = submission.get("distance_meters")
+    
+    # Registered address extraction
+    registered_address_str = ""
+    if candidate:
+        if candidate.address_details:
+            addr = candidate.address_details.get("address") or {}
+            if isinstance(addr, dict):
+                registered_address_str = addr.get("line1", "")
+            else:
+                registered_address_str = str(addr)
+        if not registered_address_str:
+            registered_address_str = candidate.address or ""
+            
+    # 3. Create AddressChangeRequest
+    acr = models.AddressChangeRequest(
+        candidate_id=db_check.case.candidate_id,
+        case_id=db_check.case_id,
+        check_id=db_check.id,
+        old_address=registered_address_str,
+        new_address=new_address,
+        reason=reason,
+        proof_urls=proof_urls,
+        distance_meters=distance,
+        status="PENDING",
+        ip_address=request.client.host if getattr(request, 'client', None) else None
+    )
+    db.add(acr)
+    
+    # 4. Audit Log
+    db.add(models.AuditLog(
+        action="ADDRESS_CHANGE_REQUESTED",
+        resource_id=db_check.case_id,
+        user_id=None,
+        details=f"Candidate {candidate.name if candidate else 'Unknown'} requested address change to: {new_address[:50]}..."
+    ))
+    
+    await db.commit()
+    return {"status": "ok", "message": "Address change request submitted successfully"}
     
 @router.post("/checks/{check_id}/upload")
 async def upload_verification_document(

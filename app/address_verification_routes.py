@@ -192,50 +192,58 @@ async def submit_address_verification(
         raise HTTPException(500, "Internal Server Error")
 
 def derive_verification_status(check: models.VerificationCheck, verif: Optional[models.AddressVerification]) -> str:
-    # 1. Check if check has digital_link data
-    if check.data and "digital_link" in check.data:
-        dl = check.data["digital_link"]
-        dl_status = dl.get("status")
-        
-        # Check for expiry first
+    """Derives a human-readable status for a digital address verification check."""
+    # 1. No digital_link ever generated OR no token exists — truly uninitiated
+    if not check.data or "digital_link" not in check.data or not check.digital_token:
+        if not verif:
+            return "Initiated"
+
+    dl = check.data["digital_link"]
+    dl_status = dl.get("status", "UNUSED")
+
+    # 2. Check for expiry first (skip if already USED/completed)
+    if dl_status not in ("USED", "COMPLETED"):
         expires_at_str = dl.get("expires_at")
         if expires_at_str:
             try:
                 expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-                if datetime.utcnow().replace(tzinfo=expires_at.tzinfo) > expires_at and dl_status != "USED":
+                now = datetime.utcnow()
+                if expires_at.tzinfo:
+                    from datetime import timezone
+                    now = now.replace(tzinfo=timezone.utc)
+                if now > expires_at:
                     return "Expired"
-            except:
+            except Exception:
                 pass
-                
-        if dl_status == "USED" or dl_status == "COMPLETED" or (verif and verif.verification_status in ["VERIFIED", "Verified"]):
-            return "Completed"
-        elif dl_status in ["LINK_SENT", "SENT"]:
-            return "Sent"
-        elif dl_status == "LINK_GENERATED":
-            return "Link Generated"
-        elif dl_status == "OPENED":
-            return "Opened"
-        elif dl_status == "CAMERA_GRANTED":
-            return "Camera Granted"
-        elif dl_status == "LOCATION_GRANTED" or dl_status == "GPS_CAPTURED":
-            return "Location Granted"
-        elif dl_status == "NOT_INITIATED":
-            return "Not Initiated"
-            
-    # 2. Fallback to verification status field if verif exists
+
+    # 3. Map digital_link.status to display label
+    if dl_status in ("USED", "COMPLETED") or (verif and verif.verification_status in ("VERIFIED", "Verified", "COMPLETED")):
+        return "Completed"
+    elif verif and verif.verification_status in ("ADDRESS_MISMATCH", "REJECTED", "FAILED", "UNABLE_TO_LOCATE"):
+        return "Failed"
+    elif dl_status in ("LINK_SENT", "SENT"):
+        return "Sent"
+    elif dl_status == "OPENED":
+        return "Opened"
+    elif dl_status == "CAMERA_GRANTED":
+        return "Camera Granted"
+    elif dl_status in ("LOCATION_GRANTED", "GPS_CAPTURED"):
+        return "Location Granted"
+    elif dl_status == "LINK_GENERATED" or dl_status == "UNUSED":
+        return "Link Generated"
+
+    # 4. Fallback to AddressVerification row status
     if verif:
         status = (verif.verification_status or "PENDING").upper()
         if status == "PENDING":
             return "Sent"
-        elif status in ["VERIFIED", "PARTIALLY_VERIFIED", "COMPLETED", "VERIFIED_CLEAR"]:
+        elif status in ("VERIFIED", "PARTIALLY_VERIFIED", "COMPLETED", "VERIFIED_CLEAR"):
             return "Completed"
-        elif status in ["REJECTED", "ADDRESS_MISMATCH", "UNABLE_TO_LOCATE", "INSUFFICIENT", "FAILED"]:
+        elif status in ("REJECTED", "ADDRESS_MISMATCH", "UNABLE_TO_LOCATE", "INSUFFICIENT", "FAILED"):
             return "Failed"
-        elif status == "NOT_INITIATED":
-            return "Not Initiated"
         return status.replace("_", " ").title()
-        
-    return "Sent"
+
+    return "Link Generated"
 
 @router.get("/all")
 async def get_all_verifications(
@@ -352,29 +360,55 @@ async def get_all_verifications(
             if verif and verif.verified_at:
                 photo_status = "VERIFIED" if verif.verification_status == "VERIFIED" else "REJECTED"
                 
-            link_status = "PENDING"
+            # Derive link_status string
+            link_status = "INITIATED"
             if v_status == "Completed":
                 link_status = "COMPLETED"
+            elif v_status == "Failed":
+                link_status = "FAILED"
             elif v_status == "Expired":
                 link_status = "EXPIRED"
-            elif v_status in ["Sent", "Opened", "Camera Granted", "Location Granted"]:
+            elif v_status == "Opened":
+                link_status = "OPENED"
+            elif v_status in ("Sent", "Camera Granted", "Location Granted"):
                 link_status = "SENT"
+            elif v_status == "Link Generated":
+                link_status = "LINK_GENERATED"
+            elif v_status == "Initiated":
+                link_status = "INITIATED"
             
+            if not check.digital_token and not verif:
+                link_status = "INITIATED"
+
+            # Extract digital_link metadata for the row
+            dl = (check.data or {}).get("digital_link", {})
+            generated_at_raw = dl.get("generated_at")
+            expires_at_raw = dl.get("expires_at")
+
+            def _fmt_dt(dt_str):
+                if not dt_str:
+                    return "—"
+                try:
+                    return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).strftime("%d %b %Y, %I:%M %p")
+                except Exception:
+                    return dt_str
+
             result.append({
-                "id": verif.id if verif else check.id, # Fallback to check.id if not submitted yet
+                "id": verif.id if verif else check.id,
                 "check_id": check.id,
                 "candidateId": cand.client_emp_code if cand and cand.client_emp_code else (cand.id[:8] if cand else "—"),
                 "candidateName": cand.name if cand else "Unknown",
                 "clientName": cust.name if cust else "—",
                 "mobileNumber": cand.phone if cand else "—",
-                "verificationType": "Address",
+                "verificationType": "Digital Address",
                 "linkStatus": link_status,
                 "gpsStatus": gps_status,
                 "photoStatus": photo_status,
                 "locationCaptured": verif.captured_address if verif else "—",
-                "createdDate": check.verified_date.strftime("%d %b %Y, %I:%M %p") if check.verified_date else (case.received_date.strftime("%d %b %Y, %I:%M %p") if case and case.received_date else "—"),
+                "createdDate": _fmt_dt(generated_at_raw) if generated_at_raw else (case.received_date.strftime("%d %b %Y, %I:%M %p") if case and case.received_date else "—"),
                 "completedDate": verif.verified_at.strftime("%d %b %Y, %I:%M %p") if verif and verif.verified_at else "—",
-                "verificationStatus": v_status
+                "verificationStatus": v_status,
+                "digitalToken": check.digital_token or ""
             })
             
         response.headers["X-Total-Count"] = str(total_count)
@@ -565,13 +599,49 @@ async def get_verification_details(
             for log in audit_logs
         ]
         
+        # Extract digital_link metadata from check data
+        digital_link_meta = {}
+        check_data_obj = check_obj.data if check_obj else {}
+        if check_data_obj and "digital_link" in check_data_obj:
+            digital_link_meta = check_data_obj["digital_link"]
+
+        def _fmt_iso(dt_str):
+            if not dt_str:
+                return None
+            try:
+                return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).strftime("%d %b %Y, %I:%M %p")
+            except Exception:
+                return dt_str
+
+        digital_token = check_obj.digital_token if check_obj else None
+        generated_at_iso = digital_link_meta.get("generated_at")
+        expires_at_iso = digital_link_meta.get("expires_at")
+        opened_at_iso = digital_link_meta.get("opened_at")
+        generated_by_name = digital_link_meta.get("generated_by_name", "System")
+        dl_status = digital_link_meta.get("status", "UNUSED")
+
+        # Derive current lifecycle stage
+        if not digital_link_meta or not digital_token:
+            current_stage = "INITIATED"
+        elif verified_at:
+            current_stage = "SUBMITTED"
+        elif opened_at_iso:
+            current_stage = "OPENED"
+        elif dl_status in ("LINK_SENT", "SENT"):
+            current_stage = "SMS_SENT"
+        else:
+            current_stage = "LINK_GENERATED"
+
         return {
             "id": verification_id,
+            "checkId": check_id,
+            "caseId": case_id,
             "candidateId": cand_obj.client_emp_code if cand_obj and cand_obj.client_emp_code else "—",
             "candidateName": cand_obj.name if cand_obj else "Unknown",
             "candidateEmail": cand_obj.email if cand_obj else "—",
             "candidatePhone": cand_obj.phone if cand_obj else "—",
             "customerName": cust_obj.name if cust_obj else "—",
+            # GPS / Location Data
             "latitude": latitude,
             "longitude": longitude,
             "accuracy": accuracy,
@@ -581,9 +651,21 @@ async def get_verification_details(
             "submittedLatitude": submitted_latitude,
             "submittedLongitude": submitted_longitude,
             "distanceMeters": distance_meters,
+            # Status & Lifecycle
             "verificationStatus": v_status,
+            "currentStage": current_stage,
+            "digitalToken": digital_token,
+            # Lifecycle Timestamps
+            "generatedAt": _fmt_iso(generated_at_iso),
+            "expiresAt": _fmt_iso(expires_at_iso),
+            "openedAt": _fmt_iso(opened_at_iso),
+            "submittedAt": verified_at.strftime("%d %b %Y, %I:%M %p") if verified_at else None,
             "verifiedAt": verified_at.strftime("%d %b %Y, %I:%M %p") if verified_at else None,
             "createdAt": created_at.strftime("%d %b %Y, %I:%M %p") if created_at else None,
+            # Link Metadata
+            "generatedByName": generated_by_name,
+            "dlStatus": dl_status,
+            # Device & Photos
             "deviceInfo": device_info,
             "photos": [
                 {
@@ -603,4 +685,157 @@ async def get_verification_details(
     except Exception as e:
         logger.error(f"Error fetching verification details: {e}")
         raise HTTPException(500, "Internal Server Error")
+
+
+@router.get("/change-requests")
+async def get_address_change_requests(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Admin endpoint to list all pending address change requests."""
+    stmt = (
+        select(models.AddressChangeRequest)
+        .options(
+            joinedload(models.AddressChangeRequest.candidate),
+            joinedload(models.AddressChangeRequest.case).joinedload(models.Case.customer)
+        )
+        .filter(models.AddressChangeRequest.status == "PENDING")
+        .order_by(desc(models.AddressChangeRequest.requested_at))
+    )
+    res = await db.execute(stmt)
+    requests = res.scalars().all()
+    
+    data = []
+    for r in requests:
+        data.append({
+            "id": r.id,
+            "candidateName": r.candidate.name if r.candidate else "Unknown",
+            "clientName": r.case.customer.name if r.case and r.case.customer else "Unknown",
+            "oldAddress": r.old_address,
+            "newAddress": r.new_address,
+            "distanceMeters": r.distance_meters,
+            "reason": r.reason,
+            "proofUrls": r.proof_urls,
+            "requestedAt": r.requested_at.isoformat() if r.requested_at else None,
+            "status": r.status
+        })
+    return data
+
+
+@router.post("/change-requests/{request_id}/approve")
+async def approve_address_change(
+    request_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Approve address change, update master, save history, suspend old link."""
+    stmt = select(models.AddressChangeRequest).options(
+        selectinload(models.AddressChangeRequest.candidate)
+    ).filter(models.AddressChangeRequest.id == request_id)
+    res = await db.execute(stmt)
+    req = res.scalar_one_or_none()
+    
+    if not req:
+        raise HTTPException(404, "Request not found")
+        
+    req.status = "APPROVED"
+    req.reviewed_at = datetime.utcnow()
+    req.reviewed_by = current_user.id
+    
+    # Update candidate address and save history
+    candidate = req.candidate
+    if candidate:
+        # History
+        hist = models.CandidateAddressHistory(
+            candidate_id=candidate.id,
+            old_address=req.old_address,
+            new_address=req.new_address,
+            reason=req.reason,
+            changed_by=current_user.id
+        )
+        db.add(hist)
+        
+        # Update Master
+        candidate.address = req.new_address
+        if not candidate.address_details:
+            candidate.address_details = {}
+        candidate.address_details["address"] = {"line1": req.new_address}
+        
+    # Create audit log
+    db.add(models.AuditLog(
+        action="ADDRESS_CHANGE_APPROVED",
+        resource_id=req.case_id,
+        user_id=current_user.id,
+        details=f"Address change approved. Candidate's master address updated."
+    ))
+    
+    await db.commit()
+    return {"status": "ok", "message": "Address change approved. You can now generate a new link."}
+
+
+@router.post("/change-requests/{request_id}/reject")
+async def reject_address_change(
+    request_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Reject address change request."""
+    remarks = body.get("remarks", "")
+    
+    stmt = select(models.AddressChangeRequest).filter(models.AddressChangeRequest.id == request_id)
+    res = await db.execute(stmt)
+    req = res.scalar_one_or_none()
+    
+    if not req:
+        raise HTTPException(404, "Request not found")
+        
+    req.status = "REJECTED"
+    req.remarks = remarks
+    req.reviewed_at = datetime.utcnow()
+    req.reviewed_by = current_user.id
+    
+    # Audit log
+    db.add(models.AuditLog(
+        action="ADDRESS_CHANGE_REJECTED",
+        resource_id=req.case_id,
+        user_id=current_user.id,
+        details=f"Address change rejected. Reason: {remarks}"
+    ))
+    
+    await db.commit()
+    return {"status": "ok", "message": "Request rejected"}
+
+
+@router.get("/dashboard-stats")
+async def get_dashboard_stats(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Get stats for dashboard widgets."""
+    today = datetime.utcnow().date()
+    
+    # Pending requests
+    pending_stmt = select(func.count(models.AddressChangeRequest.id)).filter(models.AddressChangeRequest.status == "PENDING")
+    pending_count = await db.scalar(pending_stmt)
+    
+    # Approved today
+    approved_stmt = select(func.count(models.AddressChangeRequest.id)).filter(
+        models.AddressChangeRequest.status == "APPROVED",
+        func.date(models.AddressChangeRequest.reviewed_at) == today
+    )
+    approved_count = await db.scalar(approved_stmt)
+    
+    # Rejected today
+    rejected_stmt = select(func.count(models.AddressChangeRequest.id)).filter(
+        models.AddressChangeRequest.status == "REJECTED",
+        func.date(models.AddressChangeRequest.reviewed_at) == today
+    )
+    rejected_count = await db.scalar(rejected_stmt)
+    
+    return {
+        "pendingRequests": pending_count or 0,
+        "approvedToday": approved_count or 0,
+        "rejectedToday": rejected_count or 0
+    }
 
