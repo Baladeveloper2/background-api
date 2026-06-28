@@ -46,11 +46,21 @@ class BulkCreateRequest(BaseModel):
     checks: List[str] = []
     send_links: bool = False
     customer_id: Optional[str] = None
+    send_email: bool = False
+    send_sms: bool = False
+    custom_email_subject: Optional[str] = None
+    custom_email_body: Optional[str] = None
+    custom_sms_body: Optional[str] = None
 
 
 class BulkSendLinksRequest(BaseModel):
     case_ids: List[str]
     checks: List[str]
+    send_email: bool = False
+    send_sms: bool = False
+    custom_email_subject: Optional[str] = None
+    custom_email_body: Optional[str] = None
+    custom_sms_body: Optional[str] = None
 
 
 # ─── Template Download ────────────────────────────────────────────────────────
@@ -74,24 +84,12 @@ async def download_bulk_template():
         required_cols = {"EMPLOYEE_ID", "CANDIDATE_NAME", "EMAIL"}
 
         # Header styles
-        header_fill = PatternFill(start_color="1E1B4B", end_color="1E1B4B", fill_type="solid")
-        required_fill = PatternFill(start_color="7C3AED", end_color="7C3AED", fill_type="solid")
-        header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
-        center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        thin_border = Border(
-            left=Side(style="thin", color="D1D5DB"),
-            right=Side(style="thin", color="D1D5DB"),
-            top=Side(style="thin", color="D1D5DB"),
-            bottom=Side(style="thin", color="D1D5DB"),
-        )
+        header_font = Font(name="Calibri", bold=True, size=11)
 
-        ws.row_dimensions[1].height = 32
+        ws.row_dimensions[1].height = 20
         for col_idx, header in enumerate(headers, start=1):
             cell = ws.cell(row=1, column=col_idx, value=header)
-            cell.fill = required_fill if header in required_cols else header_fill
             cell.font = header_font
-            cell.alignment = center_align
-            cell.border = thin_border
 
         # Sample rows
         sample_rows = [
@@ -99,19 +97,13 @@ async def download_bulk_template():
             ["EMP002", "Priya Sharma", "priya.sharma@company.com", "+91 9123456789"],
         ]
 
-        data_fill_odd = PatternFill(start_color="F5F3FF", end_color="F5F3FF", fill_type="solid")
-        data_fill_even = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-        data_font = Font(name="Calibri", size=10)
+        data_font = Font(name="Calibri", size=11)
 
         for row_idx, row_data in enumerate(sample_rows, start=2):
-            ws.row_dimensions[row_idx].height = 22
-            fill = data_fill_odd if row_idx % 2 else data_fill_even
+            ws.row_dimensions[row_idx].height = 20
             for col_idx, value in enumerate(row_data, start=1):
                 cell = ws.cell(row=row_idx, column=col_idx, value=value)
                 cell.font = data_font
-                cell.alignment = Alignment(vertical="center")
-                cell.border = thin_border
-                cell.fill = fill
 
         # Column widths
         col_widths = [14, 22, 32, 18]
@@ -209,27 +201,24 @@ async def bulk_create_candidates(
 
     for item in payload.candidates:
         try:
-            # Duplicate check — email
+            # Duplicate check — reuse existing candidate or create new one
             dup_email_res = await db.execute(
-                select(models.Candidate.id).filter(models.Candidate.email == item.email)
+                select(models.Candidate).filter(models.Candidate.email == item.email).limit(1)
             )
-            if dup_email_res.scalar_one_or_none():
-                results.append({
-                    "name": item.name, "email": item.email, "emp_id": item.emp_id,
-                    "status": "DUPLICATE_EMAIL", "case_id": None,
-                    "error": "Email already exists in the system"
-                })
-                continue
+            existing_candidate = dup_email_res.scalar_one_or_none()
 
-            # Create candidate
-            candidate = models.Candidate(
-                name=item.name,
-                email=item.email,
-                phone=item.phone,
-                client_emp_code=item.emp_id
-            )
-            db.add(candidate)
-            await db.flush()
+            if existing_candidate:
+                candidate = existing_candidate
+            else:
+                # Create new candidate
+                candidate = models.Candidate(
+                    name=item.name,
+                    email=item.email,
+                    phone=item.phone,
+                    client_emp_code=item.emp_id
+                )
+                db.add(candidate)
+                await db.flush()
 
             # Unique case_ref
             while True:
@@ -253,6 +242,7 @@ async def bulk_create_candidates(
             inv_batch.cases_count = (inv_batch.cases_count or 0) + 1
             suffix_num += 1
 
+
             # If send_links requested — add checks and send email
             if payload.send_links and payload.checks:
                 for check_type in payload.checks:
@@ -264,12 +254,33 @@ async def bulk_create_candidates(
                 new_case.status = enums.CaseStatus.LINK_SHARED
                 new_case.link_shared_at = datetime.utcnow()
                 form_link = f"{frontend_url}/candidate/form/{new_case.id}"
+
+                # Always send email via premium template wrapper
                 background_tasks.add_task(
                     email_utils.send_bgv_invitation_email,
                     to_email=item.email,
-                    candidate_name=item.name,
-                    form_link=form_link
+                    candidate_name=candidate.name or item.name,
+                    form_link=form_link,
+                    checks=payload.checks,
+                    custom_subject=payload.custom_email_subject,
+                    custom_body=payload.custom_email_body,
+                    case_ref=case_ref,
+                    client_name=customer.name if customer else None
                 )
+
+                if payload.send_sms and payload.custom_sms_body and item.phone:
+                    sms_text = (
+                        payload.custom_sms_body
+                        .replace("{{candidate_name}}", candidate.name or item.name)
+                        .replace("{{portal_link}}", form_link)
+                        .replace("{{verification_link}}", form_link)
+                    )
+                    background_tasks.add_task(
+                        email_utils.send_custom_sms,
+                        phone=item.phone,
+                        message=sms_text
+                    )
+
 
             results.append({
                 "name": item.name,
@@ -343,13 +354,30 @@ async def bulk_send_links(
             case.link_shared_at = datetime.utcnow()
 
             form_link = f"{frontend_url}/candidate/form/{case.id}"
-            if case.candidate and case.candidate.email:
-                background_tasks.add_task(
-                    email_utils.send_bgv_invitation_email,
-                    to_email=case.candidate.email,
-                    candidate_name=case.candidate.name,
-                    form_link=form_link
-                )
+            if case.candidate:
+                if payload.send_email and payload.custom_email_body and payload.custom_email_subject and case.candidate.email:
+                    email_html = payload.custom_email_body.replace("{{candidate_name}}", case.candidate.name).replace("{{verification_link}}", form_link)
+                    background_tasks.add_task(
+                        email_utils.send_custom_email,
+                        to_email=case.candidate.email,
+                        subject=payload.custom_email_subject,
+                        html_content=email_html
+                    )
+                elif case.candidate.email:
+                    background_tasks.add_task(
+                        email_utils.send_bgv_invitation_email,
+                        to_email=case.candidate.email,
+                        candidate_name=case.candidate.name,
+                        form_link=form_link
+                    )
+                
+                if payload.send_sms and payload.custom_sms_body and case.candidate.phone:
+                    sms_text = payload.custom_sms_body.replace("{{candidate_name}}", case.candidate.name).replace("{{verification_link}}", form_link)
+                    background_tasks.add_task(
+                        email_utils.send_custom_sms,
+                        phone=case.candidate.phone,
+                        message=sms_text
+                    )
 
             results.append({
                 "case_id": case_id,

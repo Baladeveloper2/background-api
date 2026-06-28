@@ -61,7 +61,8 @@ async def submit_candidate_insufficiency(
 ):
     """Candidate submits evidence via public portal."""
     stmt = select(models.Insufficiency).options(
-        joinedload(models.Insufficiency.case).joinedload(models.Case.candidate)
+        joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
+        joinedload(models.Insufficiency.check)
     ).filter(models.Insufficiency.token == token)
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
@@ -71,9 +72,13 @@ async def submit_candidate_insufficiency(
         
     # Update insufficiency lifecycle status
     insuff.documents = data.documents
-    insuff.status = "CANDIDATE_RESPONDED"
+    insuff.status = "SUBMITTED_FOR_REVIEW"
     insuff.response_at = datetime.utcnow()
     insuff.updated_at = datetime.utcnow()
+
+    if insuff.check:
+        from . import enums
+        insuff.check.status = enums.CheckStatus.SUBMITTED_FOR_REVIEW
     
     # Append timeline event
     existing_timeline = list(insuff.timeline or [])
@@ -99,20 +104,9 @@ async def submit_candidate_insufficiency(
         details=f"User: {candidate_name} (Candidate) | Role: CANDIDATE | IP: {request.client.host} | Action: CANDIDATE_UPLOAD_EVIDENCE | Remarks: Uploaded evidence documents."
     )
     db.add(audit_log)
-
-    # Update case status if needed
-    db_case = insuff.case
-    if db_case.status == "INSUFFICIENT":
-        # Check if all insufficiencies for this case are now uploaded or resolved
-        from sqlalchemy import func
-        rem_stmt = select(func.count(models.Insufficiency.id)).filter(
-            models.Insufficiency.case_id == db_case.id,
-            models.Insufficiency.status.in_(["INSUFFICIENT", "PENDING"]),
-            models.Insufficiency.is_resolved == False
-        )
-        rem_res = await db.execute(rem_stmt)
-        if rem_res.scalar() == 0:
-            db_case.status = "VERIFICATION"  # Move back to queue
+    
+    # We no longer change the overall case status to VERIFICATION here, 
+    # since case status is not set to INSUFFICIENT when raising an insufficiency anymore.
     
     # Notify stakeholders
     try:

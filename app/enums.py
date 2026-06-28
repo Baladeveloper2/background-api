@@ -6,14 +6,17 @@ class StrEnum(str, enum.Enum):
 
 class UserRole(StrEnum):
     SUPER_ADMIN = "SUPER_ADMIN"
-    ADMIN = "SUPER_ADMIN"
+    SUPER_ADMIN_SPACED = "SUPER ADMIN"
+    SYSTEM_ADMIN = "System Admin"
+    ADMIN = "ADMIN"
     MANAGER = "MANAGER"
     VERIFIER = "VERIFIER"
-    QC = "VERIFIER"
-    QA = "VERIFIER"
+    QC = "QC"
+    QA = "QA"
     CUSTOMER = "CUSTOMER"
     CANDIDATE = "CANDIDATE"
-    USER = "VERIFIER"
+    USER = "USER"
+    DATA_ENTRY = "DATA ENTRY"
 
 class Status(StrEnum):
     ACTIVE = "ACTIVE"
@@ -71,7 +74,8 @@ class CheckStatus(StrEnum):
     STOP = "STOP"
     NOT_AP = "NOT_AP"
     CLEAR_VERIFIED = "CLEAR/VERIFIED"
-
+    SUBMITTED_FOR_REVIEW = "SUBMITTED_FOR_REVIEW"
+    PENDING_REVIEW = "PENDING_REVIEW"
 class QCStatus(StrEnum):
     PENDING_REVIEW = "PENDING_REVIEW"
     QC_IN_REVIEW = "QC_IN_REVIEW"

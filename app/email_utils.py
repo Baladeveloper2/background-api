@@ -13,38 +13,46 @@ BGV_INVITATION_TEMPLATE = """
 <head>
     <style>
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; }}
-        .container {{ max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }}
-        .header {{ background-color: #1e293b; padding: 30px; text-align: center; }}
-        .header img {{ max-height: 50px; margin-bottom: 15px; }}
-        .header h1 {{ color: #ffffff; margin: 0; font-size: 24px; font-weight: 600; }}
-        .content {{ padding: 40px; line-height: 1.6; }}
-        .content p {{ margin-bottom: 20px; }}
+        .container { max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+        .header { padding: 30px 40px 10px 40px; text-align: left; }
+        .header img { max-height: 45px; }
+        .content { padding: 10px 40px 40px 40px; line-height: 1.8; font-size: 16px; color: #374151; }
+        .content p { margin: 0 0 18px 0; line-height: 1.8; }
+        .content ul {{ margin: 16px 0 16px 28px; list-style-type: disc; }}
+        .content ol {{ margin: 16px 0 16px 28px; list-style-type: decimal; }}
+        .content h1 {{ font-size: 24px; font-weight: 800; margin: 24px 0 16px 0; }}
+        .content h2 {{ font-size: 20px; font-weight: 700; margin: 24px 0 16px 0; }}
+        .content h3 {{ font-size: 18px; font-weight: 700; margin: 24px 0 16px 0; }}
+        .content a {{ color: #2563eb; text-decoration: underline; }}
+        .content blockquote {{ border-left: 3px solid #e2e8f0; padding-left: 12px; color: #64748b; margin: 16px 0; }}
+        .checks-box {{ background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin: 25px 0; }}
+        .checks-box h4 {{ margin: 0 0 15px 0; font-size: 14px; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; }}
+        .checks-list { list-style-type: none; padding: 0; margin: 0; }
+        .checks-list li { display: flex; align-items: center; margin-bottom: 12px; color: #1e293b; font-weight: 500; }
+        .checks-list li:last-child { margin-bottom: 0; }
+        .checks-list li span.check-icon { background: #dcfce7; color: #166534; width: 22px; height: 22px; min-width: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; margin-right: 12px; font-weight: bold; line-height: 1; }
         .button-container {{ text-align: center; margin: 35px 0; }}
         .button {{ background-color: #2563eb; color: #ffffff !important; padding: 14px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2); }}
+        .fallback-text {{ font-size: 13px; color: #64748b; text-align: center; margin-bottom: 5px; }}
         .footer {{ background-color: #f1f5f9; padding: 30px; text-align: center; font-size: 13px; color: #64748b; border-top: 1px solid #e2e8f0; }}
         .footer p {{ margin: 5px 0; }}
-        .link-text {{ color: #2563eb; word-break: break-all; }}
+        .link-text {{ color: #2563eb; word-break: break-all; font-size: 12px; text-align: center; background: #f8fafc; padding: 10px; border-radius: 6px; border: 1px dashed #cbd5e1; }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             {logo_html}
-            <h1>{site_name} Verification</h1>
         </div>
         <div class="content">
-            <p>Dear <strong>{candidate_name}</strong>,</p>
-            <p>You have been invited to complete your background verification process for <strong>{site_name}</strong>.</p>
-            <p>Please click the button below to securely submit your details and required documents.</p>
+            {custom_email_body}
             
             <div class="button-container">
-                <a href="{form_link}" class="button">Start Verification</a>
+                <a href="{form_link}" class="button">Complete Verification</a>
             </div>
             
-            <p>If the button doesn't work, please copy and paste this link into your browser:</p>
-            <p class="link-text">{form_link}</p>
-            
-            <p>Best regards,<br>The {site_name} Team</p>
+            <p class="fallback-text">If the button doesn't work, please copy and paste this link into your browser:</p>
+            <div class="link-text">{form_link}</div>
         </div>
         <div class="footer">
             <p>&copy; {current_year} {site_name}. All rights reserved.</p>
@@ -170,27 +178,47 @@ async def send_insufficiency_email(to_email: str, candidate_name: str, case_ref:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
 
-async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_link: str):
+async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_link: str, checks: list = None, custom_subject: str = None, custom_body: str = None, case_ref: str = None, client_name: str = None):
     """
-    Sends the BGV form link to the candidate using the premium template.
+    Sends the BGV form link to the candidate using the premium template, supporting dynamic rich text and selected checks.
     """
     import datetime
     site_name = os.getenv("SITE_NAME", "BGVMS")
-    logo_url = os.getenv("LOGO_URL")
+    logo_url = os.getenv("LOGO_URL", "https://checklinetech.com/wp-content/uploads/2023/12/logo-checkline.png") # Fallback to Checkline logo
     support_email = os.getenv("SUPPORT_EMAIL", f"support@{site_name.lower().replace(' ', '')}.com")
+    support_phone = os.getenv("SUPPORT_PHONE", "+91 99999 99999")
     
     logo_html = f'<img src="{logo_url}" alt="{site_name} Logo">' if logo_url else ''
+    current_year = datetime.datetime.now().year
     
+    # Generate Checks HTML dynamically (Removed as per requirements)
+    checks_html = ""
+
+    # Parse body
+    if not custom_body:
+        custom_body = f"<p>Dear <strong>{{candidate_name}}</strong>,</p><p>You have been invited to complete your background verification process for <strong>{{site_name}}</strong>.</p><p>Please click the button below to securely submit your details and required documents.</p>"
+
+    # Replace variables in body
+    body_rendered = custom_body
+    body_rendered = body_rendered.replace('{{candidate_name}}', candidate_name)
+    body_rendered = body_rendered.replace('{{case_reference}}', case_ref or '')
+    body_rendered = body_rendered.replace('{{verification_link}}', form_link)
+    body_rendered = body_rendered.replace('{{company_name}}', site_name)
+    body_rendered = body_rendered.replace('{{client_name}}', client_name or site_name)
+    body_rendered = body_rendered.replace('{{support_email}}', support_email)
+    body_rendered = body_rendered.replace('{{support_phone}}', support_phone)
+    body_rendered = body_rendered.replace('{{site_name}}', site_name)
+
     html_content = BGV_INVITATION_TEMPLATE.format(
-        candidate_name=candidate_name,
-        form_link=form_link,
-        site_name=site_name,
         logo_html=logo_html,
+        site_name=site_name,
+        custom_email_body=body_rendered,
+        form_link=form_link,
         support_email=support_email,
-        current_year=datetime.datetime.now().year
+        current_year=current_year
     )
     
-    subject = f"Action Required: {site_name} Background Verification"
+    subject = custom_subject if custom_subject else f"Background Verification Invitation - {site_name}"
     
     import asyncio
     loop = asyncio.get_running_loop()
@@ -318,3 +346,19 @@ async def send_submission_notification_email(to_email: str, candidate_name: str,
     import asyncio
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
+
+async def send_custom_email(to_email: str, subject: str, html_content: str):
+    """
+    Sends a custom email with pre-rendered HTML content.
+    """
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
+
+async def send_custom_sms(phone: str, message: str):
+    """
+    Mock sending SMS. In production, integrate with Twilio or equivalent SMS provider.
+    """
+    logger.info(f"Mock sending SMS to {phone}: {message}")
+    # Return true for now
+    return True

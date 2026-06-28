@@ -123,7 +123,7 @@ class Customer(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), index=True)
     short_code = Column(String(50), unique=True, index=True, nullable=True)
-    city = Column(String(100), nullable=True)
+    city = Column(String(100), nullable=True, index=True)  # index: covers GROUP BY city query
     contact_person = Column(String(255))
     phone = Column(String(50))
     email = Column(String(255))
@@ -266,6 +266,10 @@ class Case(Base):
         Index("index_assigned_status", "assigned_to", "status"),
         Index("index_status_received", "status", "received_date"),
         Index("index_assigned_status_date", "assigned_to", "status", "received_date"),
+        # Covers comp_today count query: completed_date filter + status IN (...)
+        Index("index_completed_date_status", "completed_date", "status"),
+        # Covers customer + status filter for the revenue SUM join
+        Index("index_customer_invoiced", "customer_id", "is_invoiced", "status"),
         {'extend_existing': True}
     )
 
@@ -396,6 +400,15 @@ class VerificationCheck(Base):
     documents = relationship("VerificationDocument", back_populates="check", cascade="all, delete-orphan")
     logs = relationship("VerificationLog", back_populates="check", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        # Covers revenue SUM query: JOIN cases ON case_id, SUM(rate)
+        Index("index_check_case_rate", "case_id", "rate"),
+        # Covers verifier workload queries: WHERE assigned_verifier_id = ? AND status = ?
+        Index("index_check_verifier_status", "assigned_verifier_id", "status"),
+        {'extend_existing': True}
+    )
+
+
 class VerificationDocument(Base):
     __tablename__ = "verification_documents"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -477,6 +490,7 @@ class Notification(Base):
 
     __table_args__ = (
         Index("index_user_unread", "user_id", "is_read"),
+        Index("index_notification_user_created", "user_id", "created_at"),
         {'extend_existing': True}
     )
 
@@ -521,7 +535,7 @@ class Insufficiency(Base):
     message = Column(Text, nullable=False)
     documents = Column(JSONEncodedList) # Support for customer evidence uploads
     status = Column(String(50), default="PENDING")
-    is_resolved = Column(Boolean, default=False)
+    is_resolved = Column(Boolean, default=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     updated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
@@ -529,6 +543,12 @@ class Insufficiency(Base):
     resolved_remarks = Column(Text, nullable=True)
     token = Column(String(100), unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Composite index: covers the common query WHERE is_resolved = false (covering case_id for COUNT DISTINCT)
+    __table_args__ = (
+        Index("index_insuff_resolved_case", "is_resolved", "case_id"),
+        {'extend_existing': True}
+    )
     
     # New lifecycle and outreach columns
     due_date = Column(DateTime(timezone=True), nullable=True)

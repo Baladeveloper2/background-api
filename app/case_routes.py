@@ -729,6 +729,44 @@ async def send_bgv_link(
     await db.commit()
     return {"message": "BGV Link shared successfully"}
 
+@router.delete("/{case_id}")
+async def delete_case_invitation(
+    case_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Delete a candidate invitation case (PENDING or LINK_SHARED only)."""
+    stmt = select(models.Case).filter(models.Case.id == case_id).options(
+        joinedload(models.Case.candidate)
+    )
+    res = await db.execute(stmt)
+    case = res.scalar_one_or_none()
+
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Permission: customer can only delete their own cases
+    if current_user.role == enums.UserRole.CUSTOMER:
+        if case.customer_id != current_user.customer_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this case")
+
+    # Only allow deletion of invitation-stage cases
+    deletable_statuses = [enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED]
+    if case.status not in deletable_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete a case that is in '{case.status}' status. Only PENDING or LINK_SHARED cases can be deleted."
+        )
+
+    # Delete related verification checks
+    await db.execute(delete(models.VerificationCheck).where(models.VerificationCheck.case_id == case_id))
+
+    # Delete the case
+    await db.delete(case)
+    await db.commit()
+
+    return {"message": "Invitation deleted successfully"}
+
 @router.get("/{case_id}/public")
 async def get_case_public(case_id: str, db: AsyncSession = Depends(get_read_db)):
     """Fetch case details publicly for candidate self-service."""
@@ -801,6 +839,7 @@ async def submit_candidate_documents(
         case.candidate.email = candidate_data.get('email', case.candidate.email)
         case.candidate.phone = candidate_data.get('contact_no', case.candidate.phone)
         case.candidate.gender = candidate_data.get('gender', case.candidate.gender)
+        case.candidate.father_name = candidate_data.get('father_name', case.candidate.father_name)
         case.candidate.address = candidate_data.get('address', case.candidate.address)
 
         dob_str = candidate_data.get('dob')
@@ -1011,7 +1050,7 @@ async def raise_check_insufficiency(
         
     # 2. Update Statuses
     check.status = enums.CheckStatus.INSUFFICIENT
-    case.status = enums.CaseStatus.INSUFFICIENT
+    # Do not change overall case status to INSUFFICIENT so other checks continue normal lifecycle
     
     # Check for existing open insufficiency for this check to avoid duplicates
     exist_stmt = select(models.Insufficiency).filter(
@@ -1976,7 +2015,7 @@ async def get_case_strategic_details(
             selectinload(models.Case.checks).selectinload(models.VerificationCheck.logs).selectinload(models.VerificationLog.performer),
             selectinload(models.Case.checks).selectinload(models.VerificationCheck.assigned_verifier),
             joinedload(models.Case.verification_logs).joinedload(models.VerificationLog.performer)
-        ).filter(models.Case.id == case_id)
+        ).filter(or_(models.Case.id == case_id, models.Case.case_ref_no == case_id))
 
 
         # RBAC Isolation
@@ -2198,7 +2237,7 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
     
     # Trigger Background Summary Refresh
     from .stats_service import refresh_dashboard_summary
-    background_tasks.add_task(refresh_dashboard_summary, db, db_case.customer_id)
+    background_tasks.add_task(refresh_dashboard_summary, db_case.customer_id)
 
     return db_case
 
@@ -2314,7 +2353,7 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
 
     # Trigger Background Summary Refresh
     from .stats_service import refresh_dashboard_summary
-    background_tasks.add_task(refresh_dashboard_summary, db, db_case.customer_id)
+    background_tasks.add_task(refresh_dashboard_summary, db_case.customer_id)
 
     return db_case
 
@@ -3549,7 +3588,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
 
     # Trigger Background Summary Refresh
     from .stats_service import refresh_dashboard_summary
-    background_tasks.add_task(refresh_dashboard_summary, db, db_case.customer_id)
+    background_tasks.add_task(refresh_dashboard_summary, db_case.customer_id)
     
     return db_case
 

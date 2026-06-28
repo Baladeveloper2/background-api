@@ -100,6 +100,7 @@ def apply_case_filters(
 
 # ─── Sidebar live counts ───────────────────────────────────────────────────────
 @router.get("/sidebar-counts")
+@cache_response(ttl=30, key_prefix="stats")
 async def get_sidebar_counts(
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user)
@@ -249,10 +250,14 @@ async def get_customer_dashboard(
 
         now = datetime.utcnow()
 
-        # Get 10 recent cases
+        # Get 10 recent cases — eagerly load candidate and batch in 2 extra queries (IN clause) instead of N+1
         recent_cases_q = (
             select(models.Case)
             .where(models.Case.customer_id == current_user.customer_id)
+            .options(
+                selectinload(models.Case.candidate),
+                selectinload(models.Case.batch)
+            )
             .order_by(models.Case.received_date.desc())
             .limit(10)
         )
@@ -261,17 +266,8 @@ async def get_customer_dashboard(
 
         recent_candidates_list = []
         for c in recent_cases:
-            cand_q = select(models.Candidate).where(models.Candidate.id == c.candidate_id)
-            cand_res = await db.execute(cand_q)
-            cand = cand_res.scalar_one_or_none()
-
-            batch_no = "Manual Entry"
-            if c.batch_id:
-                batch_q = select(models.Batch).where(or_(models.Batch.id == c.batch_id, models.Batch.batch_no == c.batch_id))
-                batch_res = await db.execute(batch_q)
-                batch = batch_res.scalar_one_or_none()
-                if batch:
-                    batch_no = batch.batch_no
+            cand = c.candidate
+            batch_no = c.batch.batch_no if c.batch else "Manual Entry"
 
             age_days = (now - c.received_date.replace(tzinfo=None)).days if c.received_date else 0
             sla_days_left = (c.tat_days or 10) - age_days
@@ -296,7 +292,7 @@ async def get_customer_dashboard(
                 "last_updated": c.completed_date.isoformat() if c.completed_date else (c.received_date.isoformat() if c.received_date else None)
             })
 
-        # Batches
+        # Batches — single aggregated query instead of 3 queries per batch in a Python loop
         batches_q = select(models.Batch).where(models.Batch.customer_id == current_user.customer_id)
         batches_res = await db.execute(batches_q)
         batches_list = batches_res.scalars().all()
@@ -306,43 +302,49 @@ async def get_customer_dashboard(
         delayed_batches = 0
         sla_risk_batches = 0
 
-        for b in batches_list:
-            # Active cases in batch count
-            active_q = select(func.count(models.Case.id)).where(
-                or_(models.Case.batch_id == b.id, models.Case.batch_id == b.batch_no),
-                models.Case.status.notin_(["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"])
+        if batches_list:
+            batch_ids = [b.id for b in batches_list]
+            batch_nos = [b.batch_no for b in batches_list]
+            FINAL_STATUSES = ["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]
+            cutoff_date = now - timedelta(days=10)
+
+            # One query: per-batch counts of active, delayed, and at-risk cases
+            agg_q = await db.execute(
+                select(
+                    models.Case.batch_id,
+                    func.count(models.Case.id).label("active_cnt"),
+                    func.sum(
+                        case((models.Case.received_date <= cutoff_date, 1), else_=0)
+                    ).label("delayed_cnt"),
+                    func.sum(
+                        case((models.Case.risk_score > 70, 1), else_=0)
+                    ).label("risk_cnt"),
+                ).where(
+                    models.Case.batch_id.in_(batch_ids + batch_nos),
+                    models.Case.status.notin_(FINAL_STATUSES)
+                ).group_by(models.Case.batch_id)
             )
-            active_cnt = (await db.execute(active_q)).scalar() or 0
+            agg_rows = {row.batch_id: row for row in agg_q.all()}
 
-            if active_cnt > 0:
-                active_batches += 1
-                # Delayed cases count
-                delayed_q = select(func.count(models.Case.id)).where(
-                    or_(models.Case.batch_id == b.id, models.Case.batch_id == b.batch_no),
-                    models.Case.status.notin_(["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]),
-                    models.Case.received_date <= (now - timedelta(days=10))
-                )
-                delayed_cnt = (await db.execute(delayed_q)).scalar() or 0
-                if delayed_cnt > 0:
-                    delayed_batches += 1
+            for b in batches_list:
+                row = agg_rows.get(b.id) or agg_rows.get(b.batch_no)
+                if row and row.active_cnt > 0:
+                    active_batches += 1
+                    if (row.delayed_cnt or 0) > 0:
+                        delayed_batches += 1
+                    if (row.risk_cnt or 0) > 0:
+                        sla_risk_batches += 1
+                else:
+                    closed_batches += 1
 
-                # Risk cases count
-                risk_q = select(func.count(models.Case.id)).where(
-                    or_(models.Case.batch_id == b.id, models.Case.batch_id == b.batch_no),
-                    models.Case.status.notin_(["FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE", "GREEN", "RED"]),
-                    models.Case.risk_score > 70
-                )
-                risk_cnt = (await db.execute(risk_q)).scalar() or 0
-                if risk_cnt > 0:
-                    sla_risk_batches += 1
-            else:
-                closed_batches += 1
-
-        # Live timeline
+        # Live timeline — eagerly load case + candidate to avoid N+1
         timeline_q = (
             select(models.VerificationLog)
             .join(models.Case, models.VerificationLog.case_id == models.Case.id)
             .where(models.Case.customer_id == current_user.customer_id)
+            .options(
+                selectinload(models.VerificationLog.case).selectinload(models.Case.candidate)
+            )
             .order_by(models.VerificationLog.created_at.desc())
             .limit(10)
         )
@@ -351,14 +353,10 @@ async def get_customer_dashboard(
 
         timeline = []
         for l in logs:
-            case_q = select(models.Case).where(models.Case.id == l.case_id)
-            case_obj = (await db.execute(case_q)).scalar_one_or_none()
+            case_obj = l.case
             cand_name = "Unknown Candidate"
-            if case_obj:
-                cand_q = select(models.Candidate).where(models.Candidate.id == case_obj.candidate_id)
-                cand_obj = (await db.execute(cand_q)).scalar_one_or_none()
-                if cand_obj:
-                    cand_name = cand_obj.name
+            if case_obj and case_obj.candidate:
+                cand_name = case_obj.candidate.name
 
             timeline.append({
                 "id": l.id,
@@ -758,6 +756,7 @@ async def get_customer_summary(
 
 # ─── Dedicated Verifier Workspace Dashboard ────────────────────────────────────
 @router.get("/verifier-dashboard")
+@cache_response(ttl=60, key_prefix="stats")
 async def get_verifier_dashboard(
     db: AsyncSession = Depends(get_read_db),
     current_user: models.User = Depends(get_current_user),
@@ -953,6 +952,7 @@ async def get_verifier_dashboard(
 
 
 @router.get("", response_model=schemas.DashboardStats)
+@cache_response(ttl=60, key_prefix="stats")
 async def get_dashboard_stats(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
@@ -1847,8 +1847,10 @@ async def get_verifier_profile(
             models.Case.completed_date,
             models.Case.is_in_tat,
             models.Case.risk_score,
-            models.Customer.name.label("client_name")
+            models.Customer.name.label("client_name"),
+            models.Candidate.name.label("candidate_name")
         ).join(models.Customer, models.Case.customer_id == models.Customer.id)\
+         .outerjoin(models.Candidate, models.Case.candidate_id == models.Candidate.id)\
          .filter(models.Case.assigned_to == verifier_id)\
          .order_by(models.Case.received_date.desc())
         cases_res = await db.execute(cases_stmt)
@@ -1935,7 +1937,8 @@ async def get_verifier_profile(
                 "completed_date": c[4].strftime("%Y-%m-%d %H:%M") if c[4] else None,
                 "is_in_tat": bool(c[5]),
                 "risk_score": int(c[6] or 0),
-                "client_name": c[7]
+                "client_name": c[7],
+                "candidate_name": c[8]
             })
 
         return {

@@ -2,11 +2,14 @@ from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from . import models
 from datetime import datetime, date
+from .database import get_async_db_context
 
-async def refresh_dashboard_summary(db: AsyncSession, customer_id: str = None, summary_date: date = None):
+async def refresh_dashboard_summary(customer_id: str = None, summary_date: date = None):
     """Updates a single day's summary for a customer or globally."""
     if not summary_date:
         summary_date = date.today()
+    
+    async with get_async_db_context() as db:
     
     # 1. Calculate stats from Case table
     # Received today

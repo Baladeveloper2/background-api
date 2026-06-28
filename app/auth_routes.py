@@ -3,7 +3,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from datetime import timedelta
+from datetime import timedelta, datetime
 from typing import Optional
 from jose import JWTError, jwt
 from . import models, schemas, auth, database
@@ -11,10 +11,45 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from .cache import delete_cache
 import re
+import time
+import threading
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/auth", tags=["auth"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# ---------------------------------------------------------------------------
+# In-process token → user TTL cache
+# Keyed on the raw JWT string; entries expire after USER_CACHE_TTL_SECONDS.
+# This avoids a DB round-trip on every authenticated request (was 6s+).
+# Thread-safe via a simple lock; size is bounded by active token count.
+# ---------------------------------------------------------------------------
+_USER_CACHE: dict = {}          # token -> {"user": User, "ts": float}
+_USER_CACHE_LOCK = threading.Lock()
+USER_CACHE_TTL_SECONDS = 120    # 2 minutes
+
+def _cache_get(token: str):
+    with _USER_CACHE_LOCK:
+        entry = _USER_CACHE.get(token)
+        if entry and (time.monotonic() - entry["ts"]) < USER_CACHE_TTL_SECONDS:
+            return entry["user"]
+        if entry:
+            del _USER_CACHE[token]  # evict stale entry
+    return None
+
+def _cache_set(token: str, user):
+    with _USER_CACHE_LOCK:
+        # Prune entries older than TTL on every write to keep dict bounded
+        now = time.monotonic()
+        stale = [k for k, v in _USER_CACHE.items() if (now - v["ts"]) >= USER_CACHE_TTL_SECONDS]
+        for k in stale:
+            del _USER_CACHE[k]
+        _USER_CACHE[token] = {"user": user, "ts": now}
+
+def invalidate_user_cache(token: str):
+    """Call this after logout or permission changes to force a fresh DB lookup."""
+    with _USER_CACHE_LOCK:
+        _USER_CACHE.pop(token, None)
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(database.get_async_db)):
     credentials_exception = HTTPException(
@@ -30,10 +65,18 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     except JWTError: raise credentials_exception
     except Exception: raise credentials_exception
 
+    # Fast path: return cached user if available (avoids DB hit on every request)
+    cached = _cache_get(token)
+    if cached is not None:
+        return cached
+
+    # Cache miss — fetch from DB and populate cache
     stmt = select(models.User).options(selectinload(models.User.role_rel)).filter(models.User.email == token_data.email)
     res = await db.execute(stmt)
     user = res.unique().scalar_one_or_none()
     if user is None: raise credentials_exception
+
+    _cache_set(token, user)
     return user
 
 async def create_audit_log(db: AsyncSession, user_id: str, action: str, details: str, resource_id: Optional[str] = None):

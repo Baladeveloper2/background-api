@@ -1,12 +1,17 @@
 import pymysql
 import json
+import urllib.parse
+from app.database import resolve_db_url
+
+resolved_url = resolve_db_url("mysql+pymysql://avnadmin:AVNS_ce7C0cV_01nkFa1rYPq@dataentry-dataentry.j.aivencloud.com:14419/defaultdb")
+parsed = urllib.parse.urlsplit(resolved_url)
 
 conn = pymysql.connect(
-    host='dataentry-dataentry.j.aivencloud.com',
-    port=14419,
-    user='avnadmin',
-    password='AVNS_ce7C0cV_01nkFa1rYPq',
-    database='defaultdb',
+    host=parsed.hostname,
+    port=parsed.port,
+    user=parsed.username,
+    password=parsed.password,
+    database=parsed.path.strip("/"),
     cursorclass=pymysql.cursors.DictCursor
 )
 
@@ -29,3 +34,6 @@ try:
                         print("Data:", check['data'])
 finally:
     conn.close()
+
+
+
