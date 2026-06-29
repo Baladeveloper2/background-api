@@ -5,6 +5,7 @@ from typing import List
 from .logging_config import logger
 from . import models, schemas, auth, database
 from .auth_routes import get_current_user, check_module_permission
+from .visibility import get_tenant_filters
 
 router = APIRouter(
     prefix="/users",
@@ -34,6 +35,8 @@ async def create_user(
             territory=user.territory,
             business_unit=user.business_unit,
             customer_id=user.customer_id,
+            zone_id=user.zone_id,
+            branch_id=user.branch_id,
             bvs_permissions=user.bvs_permissions or {}
         )
         db.add(db_user)
@@ -53,7 +56,17 @@ async def read_users(
     db: AsyncSession = Depends(database.get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    stmt = select(models.User).order_by(models.User.created_at.desc()).offset(skip).limit(limit)
+    query = select(models.User).order_by(models.User.created_at.desc())
+    
+    # Enforce Hierarchy Scoping
+    tenant_filter = get_tenant_filters(current_user, models.User)
+    if tenant_filter is not None:
+        if tenant_filter is False:
+            return []
+        elif tenant_filter is not True:
+            query = query.filter(tenant_filter)
+        
+    stmt = query.offset(skip).limit(limit)
     res = await db.execute(stmt)
     users = res.scalars().all()
     return users

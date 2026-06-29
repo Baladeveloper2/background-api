@@ -8,6 +8,7 @@ import io
 from .aws_utils import s3_client, aws_bucket, aws_region
 from anyio import to_thread
 from datetime import datetime
+from .visibility import get_tenant_filters
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -319,6 +320,11 @@ async def create_customer(
     email: Optional[str] = Form(None),
     address: Optional[str] = Form(None),
     status: str = Form("ACTIVE"),
+    zone_id: Optional[str] = Form(None),
+    company_name: Optional[str] = Form(None),
+    company_code: Optional[str] = Form(None),
+    head_office: Optional[str] = Form(None),
+    industry: Optional[str] = Form(None),
     agreement_file: Optional[UploadFile] = File(None),
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer", action="write"))
@@ -353,6 +359,11 @@ async def create_customer(
         email=email,
         address=address,
         status=status,
+        zone_id=zone_id,
+        company_name=company_name,
+        company_code=company_code,
+        head_office=head_office,
+        industry=industry,
         customer_agreement=file_path
     )
     db.add(db_customer)
@@ -383,8 +394,12 @@ def list_customers(
         batch_counts_subq.c.total_batches
     ).outerjoin(batch_counts_subq, models.Customer.id == batch_counts_subq.c.customer_id).order_by(models.Customer.created_at.desc())
     
-    if is_customer and current_user.customer_id:
-        query = query.filter(models.Customer.id == current_user.customer_id)
+    tenant_filter = get_tenant_filters(current_user, models.Customer)
+    if tenant_filter is not None:
+        if tenant_filter is False:
+            return [] # No access
+        elif tenant_filter is not True:
+            query = query.filter(tenant_filter)
     
     res = query.all()
     
@@ -424,6 +439,11 @@ async def update_customer(
     email: Optional[str] = Form(None),
     address: Optional[str] = Form(None),
     status: Optional[str] = Form(None),
+    zone_id: Optional[str] = Form(None),
+    company_name: Optional[str] = Form(None),
+    company_code: Optional[str] = Form(None),
+    head_office: Optional[str] = Form(None),
+    industry: Optional[str] = Form(None),
     agreement_file: Optional[UploadFile] = File(None),
     db: Session = Depends(database.get_db),
     current_user: models.User = Depends(auth_routes.check_module_permission("bms", "customer", action="write"))
@@ -439,6 +459,11 @@ async def update_customer(
     if email is not None: db_customer.email = email
     if address is not None: db_customer.address = address
     if status is not None: db_customer.status = status
+    if zone_id is not None: db_customer.zone_id = zone_id
+    if company_name is not None: db_customer.company_name = company_name
+    if company_code is not None: db_customer.company_code = company_code
+    if head_office is not None: db_customer.head_office = head_office
+    if industry is not None: db_customer.industry = industry
 
     if short_code is not None:
         # Check uniqueness if changed

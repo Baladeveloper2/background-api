@@ -88,12 +88,16 @@ class User(Base):
     otp_code = Column(String(6), nullable=True)
     otp_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True)
+    zone_id = Column(String(36), ForeignKey("zones.id"), nullable=True, index=True)
+    customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True, index=True)
+    branch_id = Column(String(36), ForeignKey("branches.id"), nullable=True, index=True)
     theme_preference = Column(String(50), default="professional-violet")
 
     # Relationships
     role_rel = relationship("Role", backref="users")
+    zone = relationship("Zone", backref="users")
     customer = relationship("Customer", backref="users")
+    branch = relationship("Branch", backref="users")
 
     # Composite index for filtering users by customer and status
     __table_args__ = (
@@ -118,12 +122,26 @@ class Module(Base):
     description = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class Zone(Base):
+    __tablename__ = "zones"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    zone_name = Column(String(255), unique=True, index=True, nullable=False)
+    zone_code = Column(String(50), unique=True, index=True, nullable=False)
+    status = Column(String(50), default=Status.ACTIVE)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
 class Customer(Base):
     __tablename__ = "customers"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    zone_id = Column(String(36), ForeignKey("zones.id"), nullable=True, index=True)
     name = Column(String(255), index=True)
+    company_name = Column(String(255), index=True, nullable=True)
+    company_code = Column(String(50), unique=True, index=True, nullable=True)
+    head_office = Column(String(255), nullable=True)
+    industry = Column(String(100), nullable=True)
     short_code = Column(String(50), unique=True, index=True, nullable=True)
-    city = Column(String(100), nullable=True, index=True)  # index: covers GROUP BY city query
+    city = Column(String(100), nullable=True, index=True)
     contact_person = Column(String(255))
     phone = Column(String(50))
     email = Column(String(255))
@@ -135,13 +153,37 @@ class Customer(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     pricing_config = Column(JSONEncodedDict)
     documents = Column(JSONEncodedList)
-    # White-Labeling Branding
     brand_primary_color = Column(String(20), default="#7c3aed")
     brand_secondary_color = Column(String(20), default="#f5f3ff")
     logo_url = Column(String(512), nullable=True)
     custom_domain = Column(String(255), nullable=True)
     gst_number = Column(String(100), nullable=True)
     billing_config = Column(JSONEncodedDict, nullable=True)
+
+    zone = relationship("Zone", backref="customers")
+
+class Branch(Base):
+    __tablename__ = "branches"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    customer_id = Column(String(36), ForeignKey("customers.id"), nullable=False, index=True)
+    branch_name = Column(String(255), nullable=False)
+    branch_code = Column(String(50), unique=True, index=True, nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(100), nullable=True)
+    country = Column(String(100), nullable=True)
+    address = Column(Text, nullable=True)
+    contact_person = Column(String(255), nullable=True)
+    email = Column(String(255), nullable=True)
+    phone = Column(String(50), nullable=True)
+    status = Column(String(50), default="ACTIVE")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    @property
+    def zone(self):
+        return self.customer.zone if self.customer else None
+
+    customer = relationship("Customer", backref="branches")
 
 class ClientDocument(Base):
     __tablename__ = "client_documents"
@@ -177,6 +219,11 @@ class Partner(Base):
 class Candidate(Base):
     __tablename__ = "candidates"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    zone_id = Column(String(36), ForeignKey("zones.id"), nullable=True, index=True)
+    customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True, index=True)
+    branch_id = Column(String(36), ForeignKey("branches.id"), nullable=True, index=True)
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    assigned_executive_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     name = Column(String(255), nullable=False, index=True)
     email = Column(String(255), index=True)
     phone = Column(String(20), index=True)
@@ -201,7 +248,9 @@ class Candidate(Base):
 class Batch(Base):
     __tablename__ = "batches"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    zone_id = Column(String(36), ForeignKey("zones.id"), nullable=True, index=True)
     customer_id = Column(String(36), ForeignKey("customers.id"), index=True)
+    branch_id = Column(String(36), ForeignKey("branches.id"), nullable=True, index=True)
     batch_no = Column(String(50), unique=True, index=True)
     cl_ref_no = Column(String(50), nullable=True, index=True)
     upload_date = Column(DateTime(timezone=True), server_default=func.now())
@@ -210,6 +259,10 @@ class Batch(Base):
     tat_days = Column(Integer, default=10)
     case_rate = Column(Float, default=0.0)
     status = Column(String(50), default="DRAFT", index=True)
+
+    zone = relationship("Zone")
+    customer = relationship("Customer")
+    branch = relationship("Branch")
 
 class CandidateDraft(Base):
     __tablename__ = "candidate_drafts"
@@ -226,7 +279,9 @@ class Case(Base):
     __tablename__ = "cases"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_ref_no = Column(String(50), unique=True, index=True)
+    zone_id = Column(String(36), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True, index=True)
     customer_id = Column(String(36), ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    branch_id = Column(String(36), ForeignKey("branches.id", ondelete="CASCADE"), nullable=True, index=True)
     candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), index=True)
     batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True)
     status = Column(String(50), default=CaseStatus.PENDING, index=True)
@@ -274,7 +329,9 @@ class Case(Base):
     )
 
     candidate = relationship("Candidate", backref="cases")
+    zone = relationship("Zone", backref="cases")
     customer = relationship("Customer", backref="cases")
+    branch = relationship("Branch", backref="cases")
     batch = relationship("Batch", backref="cases")
     assigned_user = relationship("User", foreign_keys=[assigned_to], backref="assigned_cases")
     finalized_user = relationship("User", foreign_keys=[finalized_by], backref="finalized_cases")

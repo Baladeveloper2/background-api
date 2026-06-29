@@ -220,6 +220,21 @@ async def bulk_create_candidates(
                 db.add(candidate)
                 await db.flush()
 
+            # Check if case already exists for this candidate and customer
+            if existing_candidate:
+                existing_case_res = await db.execute(
+                    select(models.Case).filter(
+                        models.Case.candidate_id == candidate.id,
+                        models.Case.customer_id == final_customer_id
+                    ).limit(1)
+                )
+                if existing_case_res.scalar_one_or_none():
+                    results.append({
+                        "name": item.name, "email": item.email, "emp_id": item.emp_id,
+                        "status": "ERROR", "case_id": None, "error": "A case already exists for this candidate."
+                    })
+                    continue
+
             # Unique case_ref
             while True:
                 case_ref = f"{prefix}{str(suffix_num).zfill(3)}"

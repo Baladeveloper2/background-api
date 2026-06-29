@@ -12,6 +12,8 @@ class UserBase(BaseModel):
     territory: Optional[str] = None
     business_unit: Optional[str] = None
     customer_id: Optional[str] = None
+    zone_id: Optional[str] = None
+    branch_id: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
     phone: Optional[str] = None
     is_2fa_enabled: Optional[bool] = False
@@ -66,6 +68,8 @@ class UserUpdate(BaseModel):
     territory: Optional[str] = None
     business_unit: Optional[str] = None
     customer_id: Optional[str] = None
+    zone_id: Optional[str] = None
+    branch_id: Optional[str] = None
     bvs_permissions: Optional[Dict[str, Any]] = None
     password: Optional[str] = None
     phone: Optional[str] = None
@@ -107,6 +111,11 @@ class CandidateBase(BaseModel):
     db_candidate_name: Optional[str] = None
     db_dob: Optional[date] = None
     database_scope: Optional[str] = None
+    zone_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    branch_id: Optional[str] = None
+    created_by: Optional[str] = None
+    assigned_executive_id: Optional[str] = None
 
     @field_validator('documents', mode='before')
     @classmethod
@@ -140,6 +149,10 @@ class CandidateUpdate(BaseModel):
     db_candidate_name: Optional[str] = None
     db_dob: Optional[date] = None
     database_scope: Optional[str] = None
+    zone_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    branch_id: Optional[str] = None
+    assigned_executive_id: Optional[str] = None
 
 import re
 
@@ -204,6 +217,8 @@ class Candidate(CandidateBase):
 
 class BatchBase(BaseModel):
     customer_id: str
+    zone_id: Optional[str] = None
+    branch_id: Optional[str] = None
     batch_no: Optional[str] = None
     cl_ref_no: Optional[str] = None
     file_url: Optional[str] = None
@@ -217,6 +232,8 @@ class BatchCreate(BatchBase):
 
 class BatchUpdate(BaseModel):
     customer_id: Optional[str] = None
+    zone_id: Optional[str] = None
+    branch_id: Optional[str] = None
     batch_no: Optional[str] = None
     file_url: Optional[str] = None
     cases_count: Optional[int] = None
@@ -375,6 +392,11 @@ class CustomerBase(BaseModel):
     pricing_config: Optional[Dict[str, float]] = None
     customer_agreement: Optional[str] = None
     documents: Optional[List[Dict[str, Any]]] = None
+    zone_id: Optional[str] = None
+    company_name: Optional[str] = None
+    company_code: Optional[str] = None
+    head_office: Optional[str] = None
+    industry: Optional[str] = None
     
     @field_validator('status', mode='before')
     @classmethod
@@ -396,6 +418,8 @@ class Customer(CustomerBase):
 class CaseBase(BaseModel):
     case_ref_no: Optional[str] = None
     customer_id: Optional[str] = None
+    zone_id: Optional[str] = None
+    branch_id: Optional[str] = None
     candidate_id: Optional[str] = None
     batch_id: Optional[str] = None
     status: CaseStatus = CaseStatus.PENDING
@@ -462,6 +486,8 @@ class CaseCreate(CaseBase):
 class CaseUpdate(BaseModel):
     case_ref_no: Optional[str] = None
     customer_id: Optional[str] = None
+    zone_id: Optional[str] = None
+    branch_id: Optional[str] = None
     candidate_id: Optional[str] = None
     batch_id: Optional[str] = None
     status: Optional[CaseStatus] = None
@@ -848,9 +874,12 @@ class ResolveInsufficiencyRequest(BaseModel):
     remarks: str
     check_id: Optional[str] = None
     documents: Optional[List[Dict[str, Any]]] = None
+    status: Optional[str] = None
 
 class SendBgvLinkRequest(BaseModel):
     checks: List[str]
+    email_subject: Optional[str] = None
+    email_message: Optional[str] = None
 
 class BulkInsufficientRequest(BaseModel):
     case_ids: List[str]

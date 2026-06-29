@@ -19,8 +19,23 @@ def create_candidate(candidate: schemas.CandidateCreate, db: Session = Depends(g
     return db_candidate
 
 @router.get("", response_model=List[schemas.Candidate], dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="read"))])
-def read_candidates(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(models.Candidate).offset(skip).limit(limit).all()
+def read_candidates(
+    skip: int = 0, 
+    limit: int = 100, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    query = db.query(models.Candidate)
+    
+    if current_user.role == models.UserRole.CUSTOMER:
+        query = query.filter(models.Candidate.customer_id == current_user.customer_id)
+        
+    if getattr(current_user, "zone_id", None):
+        query = query.filter(models.Candidate.zone_id == current_user.zone_id)
+    if getattr(current_user, "branch_id", None):
+        query = query.filter(models.Candidate.branch_id == current_user.branch_id)
+        
+    return query.offset(skip).limit(limit).all()
 
 @router.get("/{candidate_id}", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="read"))])
 def read_candidate(candidate_id: str, db: Session = Depends(get_db)):

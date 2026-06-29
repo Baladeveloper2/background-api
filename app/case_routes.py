@@ -166,6 +166,11 @@ async def get_insufficient_cases(
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt_new = stmt_new.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
         
+    if getattr(current_user, "zone_id", None):
+        stmt_new = stmt_new.filter(models.Insufficiency.case.has(zone_id=current_user.zone_id))
+    if getattr(current_user, "branch_id", None):
+        stmt_new = stmt_new.filter(models.Insufficiency.case.has(branch_id=current_user.branch_id))
+        
     if from_date:
         try:
             f_dt = datetime.strptime(from_date, "%Y-%m-%d")
@@ -245,6 +250,11 @@ async def get_insufficient_cases(
         if current_user.role == enums.UserRole.CUSTOMER:
             stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
             
+        if getattr(current_user, "zone_id", None):
+            stmt_legacy = stmt_legacy.filter(models.Case.zone_id == current_user.zone_id)
+        if getattr(current_user, "branch_id", None):
+            stmt_legacy = stmt_legacy.filter(models.Case.branch_id == current_user.branch_id)
+            
         if from_date:
             try:
                 f_dt = datetime.strptime(from_date, "%Y-%m-%d")
@@ -310,6 +320,10 @@ async def get_insufficient_summary(
     stmt = select(models.Insufficiency)
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt = stmt.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
+    if getattr(current_user, "zone_id", None):
+        stmt = stmt.filter(models.Insufficiency.case.has(zone_id=current_user.zone_id))
+    if getattr(current_user, "branch_id", None):
+        stmt = stmt.filter(models.Insufficiency.case.has(branch_id=current_user.branch_id))
     
     res = await db.execute(stmt)
     insufficiencies = res.unique().scalars().all()
@@ -348,6 +362,10 @@ async def get_insufficient_summary(
     stmt_legacy = select(models.Case).filter(models.Case.status == enums.CaseStatus.INSUFFICIENT)
     if current_user.role == enums.UserRole.CUSTOMER:
         stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
+    if getattr(current_user, "zone_id", None):
+        stmt_legacy = stmt_legacy.filter(models.Case.zone_id == current_user.zone_id)
+    if getattr(current_user, "branch_id", None):
+        stmt_legacy = stmt_legacy.filter(models.Case.branch_id == current_user.branch_id)
         
     res_legacy = await db.execute(stmt_legacy)
     legacy_cases = res_legacy.unique().scalars().all()
@@ -380,7 +398,7 @@ async def resolve_insufficiency(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Resolve an insufficiency by providing remarks and documents."""
+    """Resolve or update an insufficiency status by a verifier."""
     stmt = select(models.Case).filter(models.Case.id == case_id).options(joinedload(models.Case.candidate))
     res = await db.execute(stmt)
     case = res.scalar_one_or_none()
@@ -390,44 +408,11 @@ async def resolve_insufficiency(
     
     remarks = data.remarks
     if not remarks:
-        raise HTTPException(status_code=400, detail="Remarks are mandatory for clearing insufficiency")
-    
-    # Add comment
-    comment = models.CaseComment(
-        case_id=case.id,
-        user_id=current_user.id,
-        content=f"INSUFFICIENCY CLEARED: {remarks}" + (f" (Check: {data.check_id})" if data.check_id else "")
-    )
-    db.add(comment)
+        raise HTTPException(status_code=400, detail="Remarks are mandatory")
 
-    # Audit Log
-    audit = models.AuditLog(
-        user_id=current_user.id,
-        action="RESOLVE_INSUFFICIENCY",
-        resource_id=case.id,
-        details=f"User: {current_user.full_name or current_user.email} | Role: {current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role)} | IP: {request.client.host} | Action: RESOLVE_INSUFFICIENCY | Remarks: {remarks}"
-    )
-    db.add(audit)
+    action_status = data.status or 'Accepted'
+    now_resolve = datetime.utcnow()
     
-    # Resolve the specific check if check_id provided
-    if data.check_id:
-        check_stmt = select(models.VerificationCheck).filter(models.VerificationCheck.id == data.check_id)
-        check_res = await db.execute(check_stmt)
-        check = check_res.scalar_one_or_none()
-        if check:
-            check.status = enums.CheckStatus.VERIFICATION
-    
-    # Update latest insufficiency log (Legacy)
-    log_filter = [models.InsufficiencyLog.case_id == case_id, models.InsufficiencyLog.resolved_at == None]
-    if data.check_id:
-        log_filter.append(models.InsufficiencyLog.check_id == data.check_id)
-    
-    log_stmt = select(models.InsufficiencyLog).filter(*log_filter).order_by(models.InsufficiencyLog.marked_at.desc()).limit(1)
-    log_res = await db.execute(log_stmt)
-    log = log_res.scalar_one_or_none()
-    if log:
-        log.resolved_at = datetime.utcnow()
-
     # Update New Insufficiency Record (Source of Truth)
     new_insuff_stmt = select(models.Insufficiency).filter(
         models.Insufficiency.case_id == case_id,
@@ -438,54 +423,138 @@ async def resolve_insufficiency(
     
     ni_res = await db.execute(new_insuff_stmt)
     new_insuff = ni_res.scalars().first()
-    now_resolve = datetime.utcnow()
+    
     if new_insuff:
-        new_insuff.status = "RESOLVED"
-        new_insuff.is_resolved = True
-        new_insuff.resolved_at = now_resolve
-        new_insuff.resolved_by = current_user.id
-        new_insuff.documents = data.documents or []
-        new_insuff.updated_at = now_resolve
-        new_insuff.updated_by = current_user.id
-        # Append RESOLVED timeline event
         existing_tl = new_insuff.timeline or []
-        existing_tl.append({
-            "event": "RESOLVED",
-            "title": "Insufficiency Resolved",
-            "description": f"Resolved by {current_user.full_name or current_user.email}. Remarks: {remarks}",
-            "timestamp": now_resolve.isoformat(),
-            "actor": current_user.full_name or current_user.email
-        })
+        
+        if action_status == 'Accepted':
+            new_insuff.status = "RESOLVED"
+            new_insuff.is_resolved = True
+            new_insuff.resolved_at = now_resolve
+            new_insuff.resolved_by = current_user.id
+            if data.documents:
+                new_insuff.documents = data.documents
+            new_insuff.updated_at = now_resolve
+            new_insuff.updated_by = current_user.id
+            existing_tl.append({
+                "event": "RESOLVED",
+                "title": "Insufficiency Resolved",
+                "description": f"Accepted by {current_user.full_name or current_user.email}. Remarks: {remarks}",
+                "timestamp": now_resolve.isoformat(),
+                "actor": current_user.full_name or current_user.email
+            })
+            
+            # Resolve the specific check
+            if data.check_id:
+                check_stmt = select(models.VerificationCheck).filter(models.VerificationCheck.id == data.check_id)
+                check_res = await db.execute(check_stmt)
+                check = check_res.scalar_one_or_none()
+                if check:
+                    check.status = enums.CheckStatus.WIP # Move to WIP per requirement
+            
+            # Check if any REMAINING insufficiencies
+            rem_stmt = select(func.count(models.Insufficiency.id)).filter(
+                models.Insufficiency.case_id == case_id,
+                models.Insufficiency.is_resolved == False
+            )
+            rem_res = await db.execute(rem_stmt)
+            remaining_count = rem_res.scalar() or 0
+            if remaining_count == 0:
+                case.status = enums.CaseStatus.VERIFICATION
+                
+        elif action_status == 'Rejected' or action_status == 'Need More Information':
+            new_insuff.status = "PENDING"
+            new_insuff.updated_at = now_resolve
+            new_insuff.updated_by = current_user.id
+            existing_tl.append({
+                "event": "RAISED",
+                "title": f"Candidate Response {action_status}",
+                "description": f"Reviewed by {current_user.full_name or current_user.email}. Remarks: {remarks}",
+                "timestamp": now_resolve.isoformat(),
+                "actor": current_user.full_name or current_user.email
+            })
+            
+        elif action_status == 'Under Review':
+            new_insuff.status = "UNDER_REVIEW"
+            new_insuff.updated_at = now_resolve
+            new_insuff.updated_by = current_user.id
+            existing_tl.append({
+                "event": "UNDER_REVIEW",
+                "title": "Review In Progress",
+                "description": f"Under review by {current_user.full_name or current_user.email}. Remarks: {remarks}",
+                "timestamp": now_resolve.isoformat(),
+                "actor": current_user.full_name or current_user.email
+            })
+            
         new_insuff.timeline = existing_tl
 
-    # Check if any REMAINING insufficiencies are still in 'INSUFFICIENT' state (not uploaded)
-    rem_stmt = select(func.count(models.Insufficiency.id)).filter(
-        models.Insufficiency.case_id == case_id,
-        models.Insufficiency.status == "INSUFFICIENT",
-        models.Insufficiency.is_resolved == False
+    # Add case comment
+    comment = models.CaseComment(
+        case_id=case.id,
+        user_id=current_user.id,
+        content=f"INSUFFICIENCY {action_status.upper()}: {remarks}" + (f" (Check: {data.check_id})" if data.check_id else "")
     )
-    rem_res = await db.execute(rem_stmt)
-    remaining_count = rem_res.scalar() or 0
-    
-    if remaining_count == 0:
-        # Move case back to VERIFICATION so verifiers see it in their queue for review
-        case.status = enums.CaseStatus.VERIFICATION
-    
-    # Notify internal team
-    if case.assigned_to:
-        await notification_utils.create_notification(
-            db, case.assigned_to,
-            "Insufficiency Response Received",
-            f"Candidate {case.candidate.name} has submitted evidence for insufficiency. Remarks: {remarks}",
-            enums.NotificationCategory.INSUFFICIENT_DOCS,
-            case_id=case.id,
-            background_tasks=background_tasks
-        )
+    db.add(comment)
+
+    # Audit Log
+    audit = models.AuditLog(
+        user_id=current_user.id,
+        action=f"INSUFFICIENCY_{action_status.upper().replace(' ', '_')}",
+        resource_id=case.id,
+        details=f"User: {current_user.full_name or current_user.email} | IP: {request.client.host} | Remarks: {remarks}"
+    )
+    db.add(audit)
     
     await db.commit()
     await manager.broadcast({"type": "CASE_STATUS_UPDATE", "case_id": case.id, "status": case.status})
     
-    return {"message": "Insufficiency response submitted successfully"}
+    return {"message": f"Insufficiency {action_status.lower()} successfully"}
+
+@router.post("/insufficiencies/{insuff_id}/reminder")
+async def send_insufficiency_reminder(
+    insuff_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Send a reminder to candidate for an active insufficiency."""
+    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == insuff_id).options(joinedload(models.Insufficiency.case).joinedload(models.Case.candidate))
+    res = await db.execute(stmt)
+    insuff = res.scalar_one_or_none()
+    
+    if not insuff:
+        raise HTTPException(status_code=404, detail="Insufficiency not found")
+        
+    if insuff.is_resolved:
+        raise HTTPException(status_code=400, detail="Insufficiency is already resolved")
+
+    now = datetime.utcnow()
+    insuff.notification_count = (insuff.notification_count or 0) + 1
+    insuff.last_notified_at = now
+    insuff.status = "REMINDER_SENT"
+    
+    existing_tl = insuff.timeline or []
+    existing_tl.append({
+        "event": "REMINDER_SENT",
+        "title": "Reminder Sent",
+        "description": f"Reminder sent to candidate. Total reminders: {insuff.notification_count}",
+        "timestamp": now.isoformat(),
+        "actor": current_user.full_name or current_user.email
+    })
+    insuff.timeline = existing_tl
+    
+    # Audit Log
+    audit = models.AuditLog(
+        user_id=current_user.id,
+        action="SEND_INSUFFICIENCY_REMINDER",
+        resource_id=insuff.case_id,
+        details=f"User: {current_user.full_name or current_user.email} | Sent reminder for insufficiency {insuff.id}"
+    )
+    db.add(audit)
+    
+    await db.commit()
+    return {"message": "Reminder sent successfully", "notification_count": insuff.notification_count}
 
 @router.get("/invitations")
 async def get_candidate_invitations(
@@ -515,6 +584,11 @@ async def get_candidate_invitations(
     
     if current_user.role == enums.UserRole.CUSTOMER:
         base_conditions.append(models.Case.customer_id == current_user.customer_id)
+        
+    if getattr(current_user, "zone_id", None):
+        base_conditions.append(models.Case.zone_id == current_user.zone_id)
+    if getattr(current_user, "branch_id", None):
+        base_conditions.append(models.Case.branch_id == current_user.branch_id)
         
     if from_date:
         try:
@@ -677,7 +751,7 @@ async def send_bgv_link(
     current_user: models.User = Depends(get_current_user)
 ):
     """Update case status to LINK_SHARED and trigger BGV form email."""
-    stmt = select(models.Case).filter(models.Case.id == case_id).options(joinedload(models.Case.candidate))
+    stmt = select(models.Case).filter(models.Case.id == case_id).options(joinedload(models.Case.candidate), joinedload(models.Case.customer))
     res = await db.execute(stmt)
     case = res.scalar_one_or_none()
     
@@ -714,7 +788,12 @@ async def send_bgv_link(
             email_utils.send_bgv_invitation_email,
             to_email=case.candidate.email,
             candidate_name=case.candidate.name,
-            form_link=form_link
+            form_link=form_link,
+            checks=data.checks,
+            custom_subject=data.email_subject,
+            custom_body=data.email_message,
+            case_ref=case.case_ref_no,
+            client_name=case.customer.name if getattr(case, 'customer', None) else None
         )
     
     await notification_utils.create_notification(
@@ -2606,6 +2685,13 @@ async def read_cases(
         )
         stmt = stmt.filter(personal_filter)
         base_count_stmt = base_count_stmt.filter(personal_filter)
+        
+    if getattr(current_user, "zone_id", None):
+        stmt = stmt.filter(models.Case.zone_id == current_user.zone_id)
+        base_count_stmt = base_count_stmt.filter(models.Case.zone_id == current_user.zone_id)
+    if getattr(current_user, "branch_id", None):
+        stmt = stmt.filter(models.Case.branch_id == current_user.branch_id)
+        base_count_stmt = base_count_stmt.filter(models.Case.branch_id == current_user.branch_id)
     
     # 3. Dynamic Filtering
     ALL_FINAL_STATUSES = [

@@ -7,7 +7,8 @@ from . import (
     verification_routes, stats_routes, role_routes, media_routes,
     notification_routes, ai_routes, billing_routes, client_doc_routes,
     public_routes, bulk_invite_routes, search_routes, ocr_routes,
-    address_change_routes, address_verification_routes, template_routes
+    address_change_routes, address_verification_routes, template_routes,
+    zone_routes, branch_routes
 )
 
 from .database import engine, Base, get_async_db, async_engine
@@ -190,6 +191,8 @@ api_v1.include_router(ocr_routes.router)
 api_v1.include_router(address_change_routes.router)
 api_v1.include_router(address_verification_routes.router)
 api_v1.include_router(template_routes.router)
+api_v1.include_router(zone_routes.router)
+api_v1.include_router(branch_routes.router)
 
 # Alias routes for Customer MIS Export to ensure all path variations resolve perfectly
 from .stats_routes import export_customer_mis_data

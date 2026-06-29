@@ -13,11 +13,11 @@ BGV_INVITATION_TEMPLATE = """
 <head>
     <style>
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #1e293b; margin: 0; padding: 0; }}
-        .container { max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
-        .header { padding: 30px 40px 10px 40px; text-align: left; }
-        .header img { max-height: 45px; }
-        .content { padding: 10px 40px 40px 40px; line-height: 1.8; font-size: 16px; color: #374151; }
-        .content p { margin: 0 0 18px 0; line-height: 1.8; }
+        .container {{ max-width: 600px; margin: 40px auto; background-color: #ffffff; padding: 0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }}
+        .header {{ padding: 30px 40px 10px 40px; text-align: left; }}
+        .header img {{ max-height: 45px; }}
+        .content {{ padding: 10px 40px 40px 40px; line-height: 1.8; font-size: 16px; color: #374151; }}
+        .content p {{ margin: 0 0 18px 0; line-height: 1.8; }}
         .content ul {{ margin: 16px 0 16px 28px; list-style-type: disc; }}
         .content ol {{ margin: 16px 0 16px 28px; list-style-type: decimal; }}
         .content h1 {{ font-size: 24px; font-weight: 800; margin: 24px 0 16px 0; }}
@@ -27,10 +27,10 @@ BGV_INVITATION_TEMPLATE = """
         .content blockquote {{ border-left: 3px solid #e2e8f0; padding-left: 12px; color: #64748b; margin: 16px 0; }}
         .checks-box {{ background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin: 25px 0; }}
         .checks-box h4 {{ margin: 0 0 15px 0; font-size: 14px; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; }}
-        .checks-list { list-style-type: none; padding: 0; margin: 0; }
-        .checks-list li { display: flex; align-items: center; margin-bottom: 12px; color: #1e293b; font-weight: 500; }
-        .checks-list li:last-child { margin-bottom: 0; }
-        .checks-list li span.check-icon { background: #dcfce7; color: #166534; width: 22px; height: 22px; min-width: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; margin-right: 12px; font-weight: bold; line-height: 1; }
+        .checks-list {{ list-style-type: none; padding: 0; margin: 0; }}
+        .checks-list li {{ display: flex; align-items: center; margin-bottom: 12px; color: #1e293b; font-weight: 500; }}
+        .checks-list li:last-child {{ margin-bottom: 0; }}
+        .checks-list li span.check-icon {{ background: #dcfce7; color: #166534; width: 22px; height: 22px; min-width: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; margin-right: 12px; font-weight: bold; line-height: 1; }}
         .button-container {{ text-align: center; margin: 35px 0; }}
         .button {{ background-color: #2563eb; color: #ffffff !important; padding: 14px 30px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2); }}
         .fallback-text {{ font-size: 13px; color: #64748b; text-align: center; margin-bottom: 5px; }}
@@ -203,8 +203,10 @@ async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_lin
     body_rendered = body_rendered.replace('{{candidate_name}}', candidate_name)
     body_rendered = body_rendered.replace('{{case_reference}}', case_ref or '')
     body_rendered = body_rendered.replace('{{verification_link}}', form_link)
+    body_rendered = body_rendered.replace('{{portal_link}}', form_link)
     body_rendered = body_rendered.replace('{{company_name}}', site_name)
     body_rendered = body_rendered.replace('{{client_name}}', client_name or site_name)
+    body_rendered = body_rendered.replace('{{customer_name}}', client_name or site_name)
     body_rendered = body_rendered.replace('{{support_email}}', support_email)
     body_rendered = body_rendered.replace('{{support_phone}}', support_phone)
     body_rendered = body_rendered.replace('{{site_name}}', site_name)
