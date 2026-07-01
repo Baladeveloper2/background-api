@@ -1344,7 +1344,7 @@ async def get_dashboard_stats(
             # Use actual_insuff_count from Insufficiency table (unresolved)
             "insufficient_cases": int(actual_insuff_count),
             "interim_cases": int(wip_count),
-            "candidate_submissions_count": int(wip_count),
+            "candidate_submissions_count": int(status_counts.get("DOCUMENTS_SUBMITTED", 0)),
             "total_clients": int(total_customers),
             "top_client": "N/A",
             # WIP: all actively-in-verification cases

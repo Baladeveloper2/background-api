@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Response, Backgro
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_, text, update, delete
 from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm.attributes import flag_modified
 from typing import List, Optional, Dict, Any
 from . import models, schemas, enums, notification_utils, email_utils
 from .database import get_async_db, get_read_db, SessionLocal
@@ -780,7 +781,7 @@ async def send_bgv_link(
     # Generate the form link using frontend URL (you might want to configure this in .env later)
     # For now, assuming the frontend runs on localhost:5173 or the domain
     import os
-    frontend_url = os.getenv("FRONTEND_URL", "https://background-verification-91d11.web.app")
+    frontend_url = os.getenv("FRONTEND_URL", "https://background-verification-91d11.web.app").strip().rstrip('/')
     form_link = f"{frontend_url}/candidate/form/{case.id}"
     
     if case.candidate and case.candidate.email:
@@ -927,6 +928,18 @@ async def submit_candidate_documents(
                 case.candidate.dob = datetime.strptime(dob_str, "%Y-%m-%d").date()
             except:
                 pass
+                
+        # Update specialized fields from global database if present
+        if candidate_data.get('global') and len(candidate_data['global']) > 0:
+            global_data = candidate_data['global'][0]
+            if global_data.get('nationality'): case.candidate.nationality = global_data['nationality']
+            if global_data.get('pan_no'): case.candidate.pan_no = global_data['pan_no']
+            if global_data.get('passport_no'): case.candidate.passport_no = global_data['passport_no']
+        elif candidate_data.get('database') and len(candidate_data['database']) > 0:
+            db_data = candidate_data['database'][0]
+            if db_data.get('nationality'): case.candidate.nationality = db_data['nationality']
+            if db_data.get('pan_no'): case.candidate.pan_no = db_data['pan_no']
+            if db_data.get('passport_no'): case.candidate.passport_no = db_data['passport_no']
 
     # 2. Map sections to check types and store data
     section_mapping = {
@@ -1004,7 +1017,8 @@ async def submit_candidate_documents(
                                 if not any(existing.get('public_id') == f_copy.get('public_id') for existing in all_docs):
                                     all_docs.append(f_copy)
         
-        case.candidate.address_details = details
+        case.candidate.address_details = dict(details)
+        flag_modified(case.candidate, 'address_details')
         case.candidate.documents = all_docs
         # Force session refresh if needed
         db.add(case.candidate)
@@ -1241,7 +1255,7 @@ async def raise_check_insufficiency(
     # 7. Send Email to Candidate
     if case.candidate and case.candidate.email:
         import os
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173").strip().rstrip('/')
         upload_link = f"{frontend_url}/candidate/insufficiency/{token}"
         
         background_tasks.add_task(
@@ -4702,7 +4716,9 @@ async def get_case_check_details(
         'drug test': 'drug_tests',
         'cibil': 'cibil_checks',
         'global database': 'global_database_checks',
-        'database': 'global_database_checks'
+        'database': 'global_database_checks',
+        'social': 'social_media_details',
+        'social media': 'social_media_details'
     }
 
     candidate = case_obj.candidate

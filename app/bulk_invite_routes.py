@@ -197,7 +197,7 @@ async def bulk_create_candidates(
     results = []
     suffix_num = base_count + 1
 
-    frontend_url = __import__("os").getenv("FRONTEND_URL", "https://background-verification-91d11.web.app")
+    frontend_url = __import__("os").getenv("FRONTEND_URL", "https://background-verification-91d11.web.app").strip().rstrip('/')
 
     for item in payload.candidates:
         try:
@@ -339,7 +339,7 @@ async def bulk_send_links(
     if not payload.case_ids:
         raise HTTPException(status_code=400, detail="No case IDs provided.")
 
-    frontend_url = __import__("os").getenv("FRONTEND_URL", "https://background-verification-91d11.web.app")
+    frontend_url = __import__("os").getenv("FRONTEND_URL", "https://background-verification-91d11.web.app").strip().rstrip('/')
     results = []
 
     for case_id in payload.case_ids:

@@ -196,7 +196,7 @@ async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_lin
 
     # Parse body
     if not custom_body:
-        custom_body = f"<p>Dear <strong>{{candidate_name}}</strong>,</p><p>You have been invited to complete your background verification process for <strong>{{site_name}}</strong>.</p><p>Please click the button below to securely submit your details and required documents.</p>"
+        custom_body = "<p>Dear <strong>{{candidate_name}}</strong>,</p><p>You have been invited to complete your background verification process for <strong>{{site_name}}</strong>.</p><p>Please click the button below to securely submit your details and required documents.</p>"
 
     # Replace variables in body
     body_rendered = custom_body
