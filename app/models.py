@@ -591,7 +591,7 @@ class Insufficiency(Base):
     role = Column(String(50))
     message = Column(Text, nullable=False)
     documents = Column(JSONEncodedList) # Support for customer evidence uploads
-    status = Column(String(50), default="PENDING")
+    status = Column(String(50), default="PENDING_CLIENT_RESPONSE")
     is_resolved = Column(Boolean, default=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     updated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
@@ -609,6 +609,7 @@ class Insufficiency(Base):
     
     # New lifecycle and outreach columns
     due_date = Column(DateTime(timezone=True), nullable=True)
+    priority = Column(String(50), default="MEDIUM")
     notification_count = Column(Integer, default=0)
     last_notified_at = Column(DateTime(timezone=True), nullable=True)
     response_at = Column(DateTime(timezone=True), nullable=True)

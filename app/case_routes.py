@@ -213,6 +213,8 @@ async def get_insufficient_cases(
             "remarks": i.message or "No remarks found",
             "status": i.status,
             "documents": i.documents or [],
+            "created_at": i.created_at.isoformat() if i.created_at else None,
+            "due_date": i.due_date.isoformat() if i.due_date else None,
             "is_resolved": i.is_resolved,
             "resolved_at": i.resolved_at.strftime("%Y-%m-%d %H:%M") if (i.is_resolved and i.resolved_at) else None,
             "tat_days": i.case.tat_days if i.case else 0,
@@ -525,7 +527,44 @@ async def send_insufficiency_reminder(
     insuff = res.scalar_one_or_none()
     
     if not insuff:
-        raise HTTPException(status_code=404, detail="Insufficiency not found")
+        # Check if this is a legacy Case ID
+        case_stmt = select(models.Case).filter(
+            models.Case.id == insuff_id,
+            models.Case.status == enums.CaseStatus.INSUFFICIENT
+        ).options(
+            joinedload(models.Case.candidate),
+            selectinload(models.Case.checks),
+            selectinload(models.Case.insufficiency_logs)
+        )
+        c_res = await db.execute(case_stmt)
+        legacy_case = c_res.scalar_one_or_none()
+        
+        if not legacy_case:
+            raise HTTPException(status_code=404, detail="Insufficiency not found")
+            
+        # Migrate legacy case to Insufficiency model
+        last_log = legacy_case.insufficiency_logs[-1] if legacy_case.insufficiency_logs else None
+        check_id = last_log.check_id if last_log else (legacy_case.checks[0].id if legacy_case.checks else None)
+        
+        if not check_id:
+            raise HTTPException(status_code=400, detail="Legacy case has no verification checks to map to an insufficiency.")
+            
+        new_insuff = models.Insufficiency(
+            case_id=legacy_case.id,
+            check_id=check_id,
+            raised_by=last_log.user_id if last_log else legacy_case.assigned_to,
+            message=last_log.notes if last_log else "Legacy insufficiency",
+            status="PENDING",
+            is_resolved=False,
+            created_at=last_log.marked_at if last_log else legacy_case.received_date
+        )
+        db.add(new_insuff)
+        await db.flush()
+        
+        # Now refetch it to ensure relationships are loaded
+        stmt = select(models.Insufficiency).filter(models.Insufficiency.id == new_insuff.id).options(joinedload(models.Insufficiency.case).joinedload(models.Case.candidate))
+        res = await db.execute(stmt)
+        insuff = res.scalar_one_or_none()
         
     if insuff.is_resolved:
         raise HTTPException(status_code=400, detail="Insufficiency is already resolved")
@@ -533,7 +572,8 @@ async def send_insufficiency_reminder(
     now = datetime.utcnow()
     insuff.notification_count = (insuff.notification_count or 0) + 1
     insuff.last_notified_at = now
-    insuff.status = "REMINDER_SENT"
+    insuff.updated_at = now
+    insuff.updated_by = current_user.id
     
     existing_tl = insuff.timeline or []
     existing_tl.append({
@@ -1163,7 +1203,7 @@ async def raise_check_insufficiency(
         # Update existing record (Re-notification)
         new_insuff.message = data.message
         new_insuff.token = token
-        new_insuff.status = "NOTIFICATION_SENT"
+        new_insuff.status = "PENDING_CLIENT_RESPONSE"
         new_insuff.notification_count = (new_insuff.notification_count or 0) + 1
         new_insuff.last_notified_at = now
         new_insuff.updated_at = now
@@ -1202,7 +1242,7 @@ async def raise_check_insufficiency(
             raised_by=current_user.id,
             role=current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role),
             message=data.message,
-            status="NOTIFICATION_SENT",
+            status="PENDING_CLIENT_RESPONSE",
             notification_count=1,
             last_notified_at=now,
             token=token,
@@ -4386,6 +4426,244 @@ async def get_all_insufficiency_logs(
 
     return {"logs": all_logs, "user_summary": summary}
 
+
+@router.post("/insufficiencies/{id}/respond")
+async def client_respond_insufficiency(
+    id: str,
+    data: schemas.ClientRespondInsufficiencyRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Client submits their response and documents for an insufficiency."""
+    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id).options(joinedload(models.Insufficiency.case))
+    res = await db.execute(stmt)
+    insuff = res.scalar_one_or_none()
+    
+    if not insuff:
+        raise HTTPException(status_code=404, detail="Insufficiency not found")
+        
+    if insuff.status not in ["PENDING_CLIENT_RESPONSE", "PENDING", "NEED_MORE_INFO"]:
+        raise HTTPException(status_code=400, detail="Cannot respond to this insufficiency at the current status")
+        
+    now = datetime.utcnow()
+    insuff.status = "SUBMITTED_BY_CLIENT"
+    insuff.response_at = now
+    if data.documents:
+        insuff.documents = data.documents
+    insuff.updated_at = now
+    insuff.updated_by = current_user.id
+    
+    existing_tl = insuff.timeline or []
+    existing_tl.append({
+        "event": "SUBMITTED_BY_CLIENT",
+        "title": "Client Submitted Response",
+        "description": data.remarks,
+        "timestamp": now.isoformat(),
+        "actor": current_user.full_name or current_user.email
+    })
+    insuff.timeline = existing_tl
+    
+    # Add a case comment for audit
+    comment = models.CaseComment(
+        case_id=insuff.case_id,
+        user_id=current_user.id,
+        content=f"Client responded to insufficiency: {data.remarks}"
+    )
+    db.add(comment)
+    
+    await db.commit()
+    return {"message": "Response submitted successfully"}
+
+@router.get("/insufficiencies/review/queue")
+async def get_insufficiency_review_queue(
+    status: Optional[str] = None,
+    client_id: Optional[str] = None,
+    candidate_id: Optional[str] = None,
+    check_id: Optional[str] = None,
+    priority: Optional[str] = None,
+    verifier_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_read_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Get the queue of insufficiencies waiting for review."""
+    
+    filters = []
+    if status:
+        filters.append(models.Insufficiency.status == status)
+    else:
+        filters.append(models.Insufficiency.is_resolved == False)
+
+    stmt = select(models.Insufficiency).filter(*filters).options(
+        joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
+        joinedload(models.Insufficiency.check)
+    )
+    
+    if client_id:
+        stmt = stmt.join(models.Case).filter(models.Case.customer_id == client_id)
+    if candidate_id:
+        stmt = stmt.join(models.Case).filter(models.Case.candidate_id == candidate_id)
+    if check_id:
+        stmt = stmt.filter(models.Insufficiency.check_id == check_id)
+    if priority:
+        stmt = stmt.filter(models.Insufficiency.priority == priority)
+    
+    res = await db.execute(stmt)
+    items = res.unique().scalars().all()
+    
+    results = []
+    for i in items:
+        results.append({
+            "id": i.id,
+            "case_id": i.case_id,
+            "case_ref_no": i.case.case_ref_no if i.case else None,
+            "candidate_name": i.case.candidate.full_name if i.case and i.case.candidate else None,
+            "customer_id": i.case.customer_id if i.case else None,
+            "check_name": i.check.check_type if i.check else None,
+            "priority": i.priority,
+            "due_date": i.due_date,
+            "status": i.status,
+            "message": i.message,
+            "raised_by": i.raised_by,
+            "created_at": i.created_at,
+            "response_at": i.response_at
+        })
+        
+    return results
+
+
+@router.post("/insufficiencies/{id}/start-review")
+async def start_insufficiency_review(
+    id: str,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Transition insufficiency from SUBMITTED_BY_CLIENT to UNDER_REVIEW."""
+    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id)
+    res = await db.execute(stmt)
+    insuff = res.scalar_one_or_none()
+    
+    if not insuff:
+        raise HTTPException(status_code=404, detail="Insufficiency not found")
+        
+    if insuff.status != "SUBMITTED_BY_CLIENT":
+        raise HTTPException(status_code=400, detail="Can only start review for submitted cases.")
+        
+    now = datetime.utcnow()
+    insuff.status = "UNDER_REVIEW"
+    insuff.updated_at = now
+    
+    existing_tl = insuff.timeline or []
+    existing_tl.append({
+        "event": "UNDER_REVIEW",
+        "title": "Review Started",
+        "description": f"Review started by {current_user.full_name or current_user.email}",
+        "timestamp": now.isoformat(),
+        "actor": current_user.full_name or current_user.email
+    })
+    insuff.timeline = existing_tl
+    
+    await db.commit()
+    return {"message": "Review started"}
+
+@router.post("/insufficiencies/{id}/review")
+async def verifier_review_insufficiency(
+    id: str,
+    data: schemas.VerifierReviewInsufficiencyRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Verifier approves, rejects, or requests more info on a submitted insufficiency."""
+    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id).options(joinedload(models.Insufficiency.case))
+    res = await db.execute(stmt)
+    insuff = res.scalar_one_or_none()
+    
+    if not insuff:
+        raise HTTPException(status_code=404, detail="Insufficiency not found")
+        
+    if insuff.status not in ["SUBMITTED_BY_CLIENT", "UNDER_REVIEW", "SUBMITTED"]:
+        raise HTTPException(status_code=400, detail="Insufficiency is not in SUBMITTED state")
+        
+    action = data.action.upper()
+    now = datetime.utcnow()
+    existing_tl = insuff.timeline or []
+    
+    if action == "APPROVE":
+        insuff.status = "ACCEPTED"
+        insuff.is_resolved = True
+        insuff.resolved_at = now
+        insuff.resolved_by = current_user.id
+        insuff.resolved_remarks = data.remarks or "Documents Accepted"
+        
+        existing_tl.append({
+            "event": "ACCEPTED",
+            "title": "Documents Accepted",
+            "description": data.remarks or "Documents Accepted by Verifier",
+            "timestamp": now.isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+        
+        # Resolve the specific check
+        if insuff.check_id:
+            check_stmt = select(models.VerificationCheck).filter(models.VerificationCheck.id == insuff.check_id)
+            check_res = await db.execute(check_stmt)
+            check = check_res.scalar_one_or_none()
+            if check:
+                check.status = enums.CheckStatus.WIP
+        
+        # Check if there are any other unresolved insufficiencies for this case
+        rem_stmt = select(func.count(models.Insufficiency.id)).filter(
+            models.Insufficiency.case_id == insuff.case_id,
+            models.Insufficiency.is_resolved == False,
+            models.Insufficiency.id != id
+        )
+        rem_res = await db.execute(rem_stmt)
+        remaining = rem_res.scalar() or 0
+        if remaining == 0:
+            insuff.case.status = enums.CaseStatus.IN_VERIFICATION # Move case back to WIP
+            
+    elif action == "REJECT":
+        if not data.remarks:
+            raise HTTPException(status_code=400, detail="Remarks are mandatory for REJECT action")
+            
+        insuff.status = "REJECTED"
+        existing_tl.append({
+            "event": "REJECTED",
+            "title": "Documents Rejected",
+            "description": data.remarks,
+            "timestamp": now.isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+        
+    elif action == "NEED_MORE_INFO":
+        if not data.remarks:
+            raise HTTPException(status_code=400, detail="Remarks are mandatory for NEED_MORE_INFO action")
+            
+        insuff.status = "PENDING_CLIENT_RESPONSE"
+        existing_tl.append({
+            "event": "NEED_MORE_INFO",
+            "title": "Need More Information",
+            "description": data.remarks,
+            "timestamp": now.isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action")
+        
+    insuff.timeline = existing_tl
+    insuff.updated_at = now
+    insuff.updated_by = current_user.id
+    
+    comment = models.CaseComment(
+        case_id=insuff.case_id,
+        user_id=current_user.id,
+        content=f"Verifier {action} insufficiency: {data.remarks or ''}"
+    )
+    db.add(comment)
+    
+    await db.commit()
+    return {"message": f"Insufficiency {action.lower()}ed successfully"}
+
+
 @router.get("/insufficiencies/{id}")
 async def get_insufficiency_detail(id: str, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     """Fetch detailed insufficiency record with unified timeline."""
@@ -4402,9 +4680,56 @@ async def get_insufficiency_detail(id: str, db: AsyncSession = Depends(get_async
     )
     res = await db.execute(stmt)
     insuff = res.unique().scalar_one_or_none()
+    
     if not insuff:
-        raise HTTPException(404, detail="Insufficiency record not found")
+        # Check if this ID is actually a legacy Case ID
+        case_stmt = select(models.Case).filter(
+            models.Case.id == id,
+            models.Case.status == enums.CaseStatus.INSUFFICIENT
+        ).options(
+            joinedload(models.Case.candidate),
+            selectinload(models.Case.checks),
+            selectinload(models.Case.insufficiency_logs)
+        )
+        c_res = await db.execute(case_stmt)
+        legacy_case = c_res.unique().scalar_one_or_none()
         
+        if not legacy_case:
+            raise HTTPException(404, detail="Insufficiency record not found")
+            
+        # Migrate legacy case to Insufficiency model
+        last_log = legacy_case.insufficiency_logs[-1] if legacy_case.insufficiency_logs else None
+        check_id = last_log.check_id if last_log else (legacy_case.checks[0].id if legacy_case.checks else None)
+        
+        if not check_id:
+            raise HTTPException(400, detail="Legacy case has no verification checks to map to an insufficiency.")
+            
+        new_insuff = models.Insufficiency(
+            case_id=legacy_case.id,
+            check_id=check_id,
+            raised_by=last_log.user_id if last_log else legacy_case.assigned_to,
+            message=last_log.notes if last_log else "Legacy insufficiency",
+            status="PENDING",
+            is_resolved=False,
+            created_at=last_log.marked_at if last_log else legacy_case.received_date
+        )
+        db.add(new_insuff)
+        await db.flush()
+        
+        # Now refetch it with all relations loaded just like a normal request
+        stmt = (
+            select(models.Insufficiency)
+            .options(
+                joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
+                joinedload(models.Insufficiency.check),
+                joinedload(models.Insufficiency.user),
+                joinedload(models.Insufficiency.resolver),
+                joinedload(models.Insufficiency.updater)
+            )
+            .filter(models.Insufficiency.id == new_insuff.id)
+        )
+        res = await db.execute(stmt)
+        insuff = res.unique().scalar_one_or_none()
     # Tenancy Check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
     if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and insuff.case.customer_id != current_user.customer_id:

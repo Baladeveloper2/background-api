@@ -876,6 +876,14 @@ class ResolveInsufficiencyRequest(BaseModel):
     documents: Optional[List[Dict[str, Any]]] = None
     status: Optional[str] = None
 
+class ClientRespondInsufficiencyRequest(BaseModel):
+    remarks: str
+    documents: Optional[List[Dict[str, Any]]] = None
+
+class VerifierReviewInsufficiencyRequest(BaseModel):
+    action: str # APPROVE, REJECT, NEED_MORE_INFO
+    remarks: Optional[str] = None
+
 class SendBgvLinkRequest(BaseModel):
     checks: List[str]
     email_subject: Optional[str] = None
