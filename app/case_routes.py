@@ -164,7 +164,7 @@ async def get_insufficient_cases(
         stmt_new = stmt_new.filter(models.Insufficiency.is_resolved == False)
     # If "ALL", no filter on is_resolved is applied
 
-    if current_user.role == enums.UserRole.CUSTOMER:
+    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
         stmt_new = stmt_new.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
         
     if getattr(current_user, "zone_id", None):
@@ -250,7 +250,7 @@ async def get_insufficient_cases(
             )
         )
         
-        if current_user.role == enums.UserRole.CUSTOMER:
+        if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
             stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
             
         if getattr(current_user, "zone_id", None):
@@ -321,7 +321,7 @@ async def get_insufficient_summary(
     """Retrieve aggregate summary counts for insufficiency dashboard cards."""
     # Base query for new insufficiencies table
     stmt = select(models.Insufficiency)
-    if current_user.role == enums.UserRole.CUSTOMER:
+    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
         stmt = stmt.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
     if getattr(current_user, "zone_id", None):
         stmt = stmt.filter(models.Insufficiency.case.has(zone_id=current_user.zone_id))
@@ -363,7 +363,7 @@ async def get_insufficient_summary(
 
     # Include legacy cases count (if any) as Pending and check if overdue
     stmt_legacy = select(models.Case).filter(models.Case.status == enums.CaseStatus.INSUFFICIENT)
-    if current_user.role == enums.UserRole.CUSTOMER:
+    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
         stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
     if getattr(current_user, "zone_id", None):
         stmt_legacy = stmt_legacy.filter(models.Case.zone_id == current_user.zone_id)
@@ -623,7 +623,7 @@ async def get_candidate_invitations(
         # Default: show all invitation statuses
         base_conditions.append(models.Case.status.in_(allowed_statuses))
     
-    if current_user.role == enums.UserRole.CUSTOMER:
+    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
         base_conditions.append(models.Case.customer_id == current_user.customer_id)
         
     if getattr(current_user, "zone_id", None):
@@ -776,7 +776,9 @@ async def invite_candidate(
         customer_id=final_customer_id,
         candidate_id=candidate.id,
         batch_id=inv_batch.id,
-        status=enums.CaseStatus.PENDING
+        status=enums.CaseStatus.PENDING,
+        branch_id=getattr(current_user, 'branch_id', None),
+        zone_id=getattr(current_user, 'zone_id', None)
     )
     db.add(new_case)
     await db.commit()
@@ -866,7 +868,7 @@ async def delete_case_invitation(
         raise HTTPException(status_code=404, detail="Case not found")
 
     # Permission: customer can only delete their own cases
-    if current_user.role == enums.UserRole.CUSTOMER:
+    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
         if case.customer_id != current_user.customer_id:
             raise HTTPException(status_code=403, detail="Not authorized to delete this case")
 
@@ -1068,7 +1070,7 @@ async def submit_candidate_documents(
     if case.customer_id:
         cu_stmt = select(models.User).filter(
             models.User.customer_id == case.customer_id,
-            models.User.role == enums.UserRole.CUSTOMER,
+            models.User.role.in_([enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN]),
             models.User.status == enums.Status.ACTIVE
         )
         cu_res = await db.execute(cu_stmt)
@@ -1268,7 +1270,7 @@ async def raise_check_insufficiency(
     if case.customer_id:
         cu_stmt = select(models.User).filter(
             models.User.customer_id == case.customer_id,
-            models.User.role == enums.UserRole.CUSTOMER,
+            models.User.role.in_([enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN]),
             models.User.status == "ACTIVE"
         )
         cu_res = await db.execute(cu_stmt)
@@ -2376,17 +2378,31 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
 
 @router.post("/create-full", response_model=schemas.Case, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
 async def create_case_full(case_data: schemas.CaseCreateExtended, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
+    customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case_data.customer_id))
+    customer = customer_res.scalar_one_or_none()
+
     # 1. Create/Get Candidate
     candidate_dict = case_data.candidate.dict()
+    
+    # Enforce scope and cascade IDs
+    if current_user.role == models.UserRole.CUSTOMER and current_user.customer_id:
+        case_data.customer_id = current_user.customer_id
+    if current_user.role == models.UserRole.BRANCH_ADMIN and current_user.branch_id:
+        case_data.branch_id = current_user.branch_id
+        case_data.customer_id = current_user.customer_id
+        
+    candidate_dict["customer_id"] = case_data.customer_id
+    candidate_dict["branch_id"] = case_data.branch_id
+    if customer:
+        candidate_dict["zone_id"] = customer.zone_id
+        case_data.zone_id = customer.zone_id
+
     db_candidate = models.Candidate(**candidate_dict)
     db.add(db_candidate)
     await db.flush() # Get candidate ID
 
     # 2. Create Case with Collision-Aware Reference Generation
     if not case_data.case_ref_no:
-        customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == case_data.customer_id))
-        customer = customer_res.scalar_one_or_none()
-        
         # Standardized prefix: CL-{SHORTCODE}
         sc = customer.short_code if customer and customer.short_code else (customer.name[:3].upper() if customer else "BGV")
         prefix = f"CL-{sc}-"
@@ -2429,7 +2445,9 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
         batch_id=resolved_batch_id,
         status=models.CaseStatus.PENDING,
         received_date=datetime.utcnow(),
-        file_no=case_data.file_no
+        file_no=case_data.file_no,
+        branch_id=getattr(current_user, 'branch_id', None),
+        zone_id=getattr(current_user, 'zone_id', None)
     )
     db.add(db_case)
     await db.flush()

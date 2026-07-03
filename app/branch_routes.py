@@ -25,6 +25,12 @@ class BranchCreate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     status: Optional[str] = "ACTIVE"
+    # User Details
+    username: Optional[str] = None
+    user_email: Optional[str] = None
+    user_phone: Optional[str] = None
+    password: Optional[str] = None
+    confirm_password: Optional[str] = None
 
 class BranchUpdate(BaseModel):
     branch_name: Optional[str] = None
@@ -83,13 +89,15 @@ async def check_branch_auth(branch_id: str = None, customer_id: str = None, curr
         if not branch:
             raise HTTPException(status_code=404, detail="Branch not found")
         # For simplicity, we enforce tenant logic explicitly since we don't have a single query to apply the filter to
-        role_name = current_user.role_rel.name.upper() if current_user.role_rel else str(current_user.role).upper()
-        if role_name == "ZONE_ADMIN" or role_name == "ZONE ADMIN":
+        role_name = current_user.role_rel.name.upper() if current_user.role_rel else (current_user.role.name if hasattr(current_user.role, 'name') else str(current_user.role)).upper()
+        if role_name in ["SUPER_ADMIN", "USERROLE.SUPER_ADMIN"]:
+            pass # Super admins can access any branch
+        elif role_name == "ZONE_ADMIN" or role_name == "ZONE ADMIN":
             customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == branch.customer_id))
             customer = customer_res.scalars().first()
-            if customer.zone_id != current_user.zone_id:
+            if customer and customer.zone_id != current_user.zone_id:
                 raise HTTPException(status_code=403, detail="Not authorized for this branch.")
-        elif role_name == "CUSTOMER_HEAD" or role_name == "CUSTOMER HEAD" or role_name == "CUSTOMER":
+        elif role_name in ["CUSTOMER_HEAD", "CUSTOMER HEAD", "CUSTOMER", "CUSTOMER_ADMIN", "USERROLE.CUSTOMER_ADMIN"]:
             if branch.customer_id != current_user.customer_id:
                 raise HTTPException(status_code=403, detail="Not authorized for this branch.")
         else:
@@ -97,13 +105,15 @@ async def check_branch_auth(branch_id: str = None, customer_id: str = None, curr
                 raise HTTPException(status_code=403, detail="Not authorized for this branch.")
                 
     if customer_id:
-        role_name = current_user.role_rel.name.upper() if current_user.role_rel else str(current_user.role).upper()
-        if role_name == "ZONE_ADMIN" or role_name == "ZONE ADMIN":
+        role_name = current_user.role_rel.name.upper() if current_user.role_rel else (current_user.role.name if hasattr(current_user.role, 'name') else str(current_user.role)).upper()
+        if role_name in ["SUPER_ADMIN", "USERROLE.SUPER_ADMIN"]:
+            pass # Super admins can access any branch
+        elif role_name == "ZONE_ADMIN" or role_name == "ZONE ADMIN":
             customer_res = await db.execute(select(models.Customer).filter(models.Customer.id == customer_id))
             customer = customer_res.scalars().first()
-            if customer.zone_id != current_user.zone_id:
+            if customer and customer.zone_id != current_user.zone_id:
                 raise HTTPException(status_code=403, detail="Not authorized for this customer.")
-        elif role_name == "CUSTOMER_HEAD" or role_name == "CUSTOMER HEAD" or role_name == "CUSTOMER":
+        elif role_name in ["CUSTOMER_HEAD", "CUSTOMER HEAD", "CUSTOMER", "CUSTOMER_ADMIN", "USERROLE.CUSTOMER_ADMIN"]:
             if current_user.customer_id != customer_id:
                  raise HTTPException(status_code=403, detail="Not authorized.")
         else:
@@ -129,12 +139,55 @@ async def create_branch(
         )
         if result.scalars().first():
             raise HTTPException(status_code=400, detail="Branch with this code already exists")
+    
+    if branch.password and branch.password != branch.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
         
-    db_branch = models.Branch(**branch.model_dump())
+    customer_result = await db.execute(select(models.Customer).filter(models.Customer.id == branch.customer_id))
+    customer = customer_result.scalars().first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+        
+    if branch.user_email:
+        existing_user = await db.execute(select(models.User).filter(models.User.email == branch.user_email))
+        if existing_user.scalars().first():
+            raise HTTPException(status_code=400, detail="User with this email already exists")
+
+    branch_data = branch.model_dump(exclude={"username", "user_email", "user_phone", "password", "confirm_password"})
+    branch_data["zone_id"] = customer.zone_id
+    
+    db_branch = models.Branch(**branch_data)
     db.add(db_branch)
     await db.commit()
     await db.refresh(db_branch)
-    return db_branch
+    
+    # Create Branch Admin User
+    if branch.user_email and branch.password:
+        from .auth import get_password_hash
+        from .enums import UserRole
+        new_user = models.User(
+            email=branch.user_email,
+            hashed_password=get_password_hash(branch.password),
+            full_name=branch.username or branch.branch_name + " Admin",
+            phone=branch.user_phone,
+            role=UserRole.BRANCH_ADMIN,
+            customer_id=customer.id,
+            branch_id=db_branch.id,
+            zone_id=customer.zone_id,
+            status="ACTIVE"
+        )
+        db.add(new_user)
+        await db.commit()
+        
+    # Reload branch with relationships
+    await db.refresh(db_branch)
+    result = await db.execute(
+        select(models.Branch).options(
+            selectinload(models.Branch.customer).selectinload(models.Customer.zone),
+            selectinload(models.Branch.zone)
+        ).filter(models.Branch.id == db_branch.id)
+    )
+    return result.scalars().first()
 
 @router.get("/", response_model=List[BranchResponse])
 async def list_branches(
@@ -143,7 +196,8 @@ async def list_branches(
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
     query = select(models.Branch).options(
-        selectinload(models.Branch.customer).selectinload(models.Customer.zone)
+        selectinload(models.Branch.customer).selectinload(models.Customer.zone),
+        selectinload(models.Branch.zone)
     )
     
     # Filter based on Role scope
@@ -169,7 +223,7 @@ async def get_branch(
     await check_branch_auth(branch_id=branch_id, current_user=current_user, db=db)
     result = await db.execute(
         select(models.Branch)
-        .options(selectinload(models.Branch.customer).selectinload(models.Customer.zone))
+        .options(selectinload(models.Branch.customer).selectinload(models.Customer.zone), selectinload(models.Branch.zone))
         .filter(models.Branch.id == branch_id)
     )
     branch = result.scalars().first()
@@ -206,7 +260,8 @@ async def delete_branch(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
-    if current_user.role.name not in ["SUPER_ADMIN", "ZONE_ADMIN", "CUSTOMER_ADMIN"]:
+    role_name = current_user.role_rel.name.upper() if current_user.role_rel else (current_user.role.name if hasattr(current_user.role, 'name') else str(current_user.role)).upper()
+    if role_name not in ["SUPER_ADMIN", "ZONE_ADMIN", "CUSTOMER_ADMIN", "USERROLE.SUPER_ADMIN", "USERROLE.ZONE_ADMIN", "USERROLE.CUSTOMER_ADMIN"]:
         raise HTTPException(status_code=403, detail="Only Admins can delete branches")
         
     await check_branch_auth(branch_id=branch_id, current_user=current_user, db=db)

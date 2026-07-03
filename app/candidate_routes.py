@@ -11,8 +11,27 @@ router = APIRouter(
 )
 
 @router.post("", response_model=schemas.Candidate, dependencies=[Depends(auth_routes.check_module_permission("recruit", "management", action="write"))])
-def create_candidate(candidate: schemas.CandidateCreate, db: Session = Depends(get_db)):
-    db_candidate = models.Candidate(**candidate.dict())
+def create_candidate(
+    candidate: schemas.CandidateCreate, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    candidate_data = candidate.dict()
+    
+    # Enforce current user scope
+    if current_user.role == models.UserRole.CUSTOMER and current_user.customer_id:
+        candidate_data["customer_id"] = current_user.customer_id
+    if current_user.role == models.UserRole.BRANCH_ADMIN and current_user.branch_id:
+        candidate_data["branch_id"] = current_user.branch_id
+        candidate_data["customer_id"] = current_user.customer_id
+        
+    # Auto-fetch zone_id if missing but customer is present
+    if candidate_data.get("customer_id") and not candidate_data.get("zone_id"):
+        customer = db.query(models.Customer).filter(models.Customer.id == candidate_data["customer_id"]).first()
+        if customer:
+            candidate_data["zone_id"] = customer.zone_id
+            
+    db_candidate = models.Candidate(**candidate_data)
     db.add(db_candidate)
     db.commit()
     db.refresh(db_candidate)

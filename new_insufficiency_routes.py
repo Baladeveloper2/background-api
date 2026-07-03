@@ -1,3 +1,15 @@
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
+from sqlalchemy.orm import joinedload
+from datetime import datetime
+from typing import Optional
+
+from .database import get_async_db, get_read_db
+from . import models, schemas, enums, notification_utils
+from .auth_routes import get_current_user
+
+router = APIRouter()
 
 @router.post("/insufficiencies/{id}/respond")
 async def client_respond_insufficiency(
@@ -18,7 +30,8 @@ async def client_respond_insufficiency(
         raise HTTPException(status_code=400, detail="Cannot respond to this insufficiency at the current status")
         
     now = datetime.utcnow()
-    insuff.status = "SUBMITTED"
+    insuff.status = "SUBMITTED_BY_CLIENT"
+    insuff.case.status = enums.CaseStatus.SUBMITTED_BY_CLIENT
     insuff.response_at = now
     if data.documents:
         insuff.documents = data.documents
@@ -44,6 +57,11 @@ async def client_respond_insufficiency(
     db.add(comment)
     
     await db.commit()
+    
+    # Notify verifier, admin, allocator
+    import asyncio
+    asyncio.create_task(notification_utils.notify_insufficiency_resolved(db, insuff.id))
+
     return {"message": "Response submitted successfully"}
 
 @router.get("/insufficiencies/review/queue")
@@ -58,7 +76,7 @@ async def get_insufficiency_review_queue(
 ):
     """Get the queue of insufficiencies waiting for review."""
     stmt = select(models.Insufficiency).filter(
-        models.Insufficiency.status == "SUBMITTED",
+        models.Insufficiency.status == "SUBMITTED_BY_CLIENT",
         models.Insufficiency.is_resolved == False
     ).options(
         joinedload(models.Insufficiency.case).joinedload(models.Case.candidate),
@@ -105,20 +123,36 @@ async def verifier_review_insufficiency(
     current_user: models.User = Depends(get_current_user)
 ):
     """Verifier approves, rejects, or requests more info on a submitted insufficiency."""
-    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id).options(joinedload(models.Insufficiency.case))
+    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id).options(joinedload(models.Insufficiency.case), joinedload(models.Insufficiency.check))
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
     
     if not insuff:
         raise HTTPException(status_code=404, detail="Insufficiency not found")
         
-    if insuff.status != "SUBMITTED":
+    if insuff.status not in ["SUBMITTED_BY_CLIENT", "UNDER_REVIEW"]:
         raise HTTPException(status_code=400, detail="Insufficiency is not in SUBMITTED state")
         
     action = data.action.upper()
     now = datetime.utcnow()
     existing_tl = insuff.timeline or []
     
+    if action == "MARK_UNDER_REVIEW":
+        insuff.status = "UNDER_REVIEW"
+        insuff.case.status = enums.CaseStatus.UNDER_REVIEW
+        insuff.updated_at = now
+        insuff.updated_by = current_user.id
+        existing_tl.append({
+            "event": "UNDER_REVIEW",
+            "title": "Review Started",
+            "description": "Verifier has started reviewing the response",
+            "timestamp": now.isoformat(),
+            "actor": current_user.full_name or current_user.email
+        })
+        insuff.timeline = existing_tl
+        await db.commit()
+        return {"message": "Insufficiency marked as under review"}
+
     if action == "APPROVE":
         insuff.status = "ACCEPTED"
         insuff.is_resolved = True
@@ -151,13 +185,23 @@ async def verifier_review_insufficiency(
         rem_res = await db.execute(rem_stmt)
         remaining = rem_res.scalar() or 0
         if remaining == 0:
-            insuff.case.status = enums.CaseStatus.IN_VERIFICATION # Move case back to WIP
+            insuff.case.status = enums.CaseStatus.WIP # Move case back to WIP
+            # Notify Allocator (Super Admin / Admin)
+            allocators = await notification_utils.get_users_by_role(db, [enums.UserRole.SUPER_ADMIN, enums.UserRole.ADMIN])
+            for user in allocators:
+                await notification_utils.create_notification(
+                    db, user.id, "Verification Continued",
+                    f"Insufficiencies for case {insuff.case.case_ref_no} have been resolved. It is back in WIP.",
+                    enums.NotificationCategory.SYSTEM_ALERT,
+                    case_id=insuff.case_id
+                )
             
     elif action == "REJECT":
         if not data.remarks:
             raise HTTPException(status_code=400, detail="Remarks are mandatory for REJECT action")
             
-        insuff.status = "REJECTED"
+        insuff.status = "PENDING_CLIENT_RESPONSE"
+        insuff.case.status = enums.CaseStatus.PENDING_CLIENT_RESPONSE
         existing_tl.append({
             "event": "REJECTED",
             "title": "Documents Rejected",
@@ -165,12 +209,22 @@ async def verifier_review_insufficiency(
             "timestamp": now.isoformat(),
             "actor": current_user.full_name or current_user.email
         })
+        # Notify Customer Users
+        customer_users = await db.execute(select(models.User).filter(models.User.customer_id == insuff.case.customer_id))
+        for user in customer_users.scalars().all():
+            await notification_utils.create_notification(
+                db, user.id, "Documents Rejected",
+                f"Your submitted documents for check {insuff.check.check_type if insuff.check else 'General'} were rejected. Reason: {data.remarks}",
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=insuff.case_id
+            )
         
     elif action == "NEED_MORE_INFO":
         if not data.remarks:
             raise HTTPException(status_code=400, detail="Remarks are mandatory for NEED_MORE_INFO action")
             
-        insuff.status = "NEED_MORE_INFO"
+        insuff.status = "PENDING_CLIENT_RESPONSE"
+        insuff.case.status = enums.CaseStatus.PENDING_CLIENT_RESPONSE
         existing_tl.append({
             "event": "NEED_MORE_INFO",
             "title": "Need More Information",
@@ -178,6 +232,15 @@ async def verifier_review_insufficiency(
             "timestamp": now.isoformat(),
             "actor": current_user.full_name or current_user.email
         })
+        # Notify Customer Users
+        customer_users = await db.execute(select(models.User).filter(models.User.customer_id == insuff.case.customer_id))
+        for user in customer_users.scalars().all():
+            await notification_utils.create_notification(
+                db, user.id, "More Information Needed",
+                f"Additional information requested for check {insuff.check.check_type if insuff.check else 'General'}: {data.remarks}",
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=insuff.case_id
+            )
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
         

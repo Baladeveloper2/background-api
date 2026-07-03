@@ -166,6 +166,7 @@ class Branch(Base):
     __tablename__ = "branches"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     customer_id = Column(String(36), ForeignKey("customers.id"), nullable=False, index=True)
+    zone_id = Column(String(36), ForeignKey("zones.id"), nullable=True, index=True)
     branch_name = Column(String(255), nullable=False)
     branch_code = Column(String(50), unique=True, index=True, nullable=True)
     city = Column(String(100), nullable=True)
@@ -179,10 +180,7 @@ class Branch(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
-    @property
-    def zone(self):
-        return self.customer.zone if self.customer else None
-
+    zone = relationship("Zone")
     customer = relationship("Customer", backref="branches")
 
 class ClientDocument(Base):

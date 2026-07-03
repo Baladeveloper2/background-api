@@ -49,14 +49,21 @@ async def create_user(
         logger.error(f"Error creating user: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+from typing import List, Optional
+
 @router.get("", response_model=List[schemas.User])
 async def read_users(
     skip: int = 0, 
     limit: int = 100, 
+    customer_id: Optional[str] = None,
     db: AsyncSession = Depends(database.get_async_db),
     current_user: models.User = Depends(get_current_user)
 ):
     query = select(models.User).order_by(models.User.created_at.desc())
+    
+    if customer_id:
+        query = query.filter(models.User.customer_id == customer_id)
+
     
     # Enforce Hierarchy Scoping
     tenant_filter = get_tenant_filters(current_user, models.User)

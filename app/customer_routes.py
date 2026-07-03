@@ -87,6 +87,10 @@ def get_customer_dashboard_summary(
     
     query = db.query(models.Case).filter(models.Case.customer_id == client_id)
     
+    # Branch-level scoping: Branch Users see only their assigned branch
+    if current_user.branch_id:
+        query = query.filter(models.Case.branch_id == current_user.branch_id)
+    
     if search:
         query = query.join(models.Candidate, models.Case.candidate_id == models.Candidate.id, isouter=True).filter(
             or_(
@@ -171,6 +175,10 @@ def get_customer_candidates(
         .options(joinedload(models.Case.candidate), joinedload(models.Case.customer))
         .filter(models.Case.customer_id == current_user.customer_id)
     )
+    
+    # Branch-level scoping: Branch Users see only their assigned branch
+    if current_user.branch_id:
+        query = query.filter(models.Case.branch_id == current_user.branch_id)
 
     if search:
         query = query.join(models.Candidate, models.Case.candidate_id == models.Candidate.id, isouter=True).filter(
