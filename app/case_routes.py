@@ -2532,7 +2532,7 @@ async def get_allocation_stats(db: AsyncSession = Depends(get_read_db)):
         'UNABLE TO VERIFY', 'UNABLE_TO_VERIFY', 'HOLD', 'INSUFFICIENT', 'QC_VERIFIED',
         'AMBER', 'STOP', 'NOT_AP', 'CLEAR_VERIFIED', 'GREEN', 'RED'
     ]
-    excluded_statuses = FINAL_STATUSES + ['LINK_SHARED', 'DOCUMENTS_SUBMITTED']
+    excluded_statuses = FINAL_STATUSES + ['LINK_SHARED']
 
     # Cases not yet assigned to anyone — covers all pre-assignment statuses
     unallocated_stmt = select(func.count(models.Case.id)).filter(
@@ -2810,7 +2810,7 @@ async def read_cases(
         # but allow them in general candidate lists so all candidates list properly.
         if assigned is not None:
             exclude_filter = ~models.Case.status.in_([
-                'LINK_SHARED', 'DOCUMENTS_SUBMITTED'
+                'LINK_SHARED'
             ])
             stmt = stmt.filter(exclude_filter)
             base_count_stmt = base_count_stmt.filter(exclude_filter)
