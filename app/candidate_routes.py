@@ -19,9 +19,9 @@ def create_candidate(
     candidate_data = candidate.dict()
     
     # Enforce current user scope
-    if current_user.role == models.UserRole.CUSTOMER and current_user.customer_id:
+    if current_user.customer_id:
         candidate_data["customer_id"] = current_user.customer_id
-    if current_user.role == models.UserRole.BRANCH_ADMIN and current_user.branch_id:
+    if current_user.branch_id:
         candidate_data["branch_id"] = current_user.branch_id
         candidate_data["customer_id"] = current_user.customer_id
         
@@ -46,7 +46,7 @@ def read_candidates(
 ):
     query = db.query(models.Candidate)
     
-    if current_user.role == models.UserRole.CUSTOMER:
+    if current_user.customer_id:
         query = query.filter(models.Candidate.customer_id == current_user.customer_id)
         
     if getattr(current_user, "zone_id", None):
@@ -162,10 +162,19 @@ def get_case_by_id_or_candidate_id(db: Session, candidate_id: str):
 
 @router.get("/{candidate_id}/insufficiency")
 @singular_router.get("/{candidate_id}/insufficiency")
-def get_candidate_insufficiency(candidate_id: str, db: Session = Depends(get_db)):
+def get_candidate_insufficiency(
+    candidate_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
     case = get_case_by_id_or_candidate_id(db, candidate_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
+        
+    if current_user.customer_id and case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+    if current_user.branch_id and case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     insuff = db.query(models.Insufficiency).filter(
         models.Insufficiency.case_id == case.id,
@@ -211,6 +220,25 @@ async def notify_candidate_insufficiency(
     case = get_case_by_id_or_candidate_id(db, candidate_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
+        
+    ops_roles = [
+        models.UserRole.SUPER_ADMIN,
+        models.UserRole.SUPER_ADMIN_SPACED,
+        models.UserRole.SYSTEM_ADMIN,
+        models.UserRole.ADMIN,
+        models.UserRole.VERIFIER,
+        models.UserRole.DATA_ENTRY,
+        models.UserRole.MANAGER,
+        models.UserRole.QC,
+        models.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Forbidden: Only operations team can notify candidate")
+
+    if current_user.customer_id and case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+    if current_user.branch_id and case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     insuff = db.query(models.Insufficiency).filter(
         models.Insufficiency.case_id == case.id,
@@ -299,6 +327,25 @@ def clear_candidate_insufficiency(
     if not case:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
         
+    ops_roles = [
+        models.UserRole.SUPER_ADMIN,
+        models.UserRole.SUPER_ADMIN_SPACED,
+        models.UserRole.SYSTEM_ADMIN,
+        models.UserRole.ADMIN,
+        models.UserRole.VERIFIER,
+        models.UserRole.DATA_ENTRY,
+        models.UserRole.MANAGER,
+        models.UserRole.QC,
+        models.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Forbidden: Only operations team can clear insufficiency")
+
+    if current_user.customer_id and case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+    if current_user.branch_id and case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+        
     insuff = db.query(models.Insufficiency).filter(
         models.Insufficiency.case_id == case.id,
         models.Insufficiency.is_resolved == False
@@ -367,11 +414,39 @@ def clear_candidate_insufficiency(
 def submit_candidate_response(
     candidate_id: str,
     req: CandidateResponseRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
 ):
     case = get_case_by_id_or_candidate_id(db, candidate_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
+        
+    if current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Forbidden: Customer-side users cannot submit responses directly through this endpoint.")
+
+    # Tenancy / Owner check
+    user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if user_role_str == "CANDIDATE":
+        if case.candidate_id != current_user.id and current_user.email != case.candidate.email:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+    else:
+        ops_roles = [
+            models.UserRole.SUPER_ADMIN,
+            models.UserRole.SUPER_ADMIN_SPACED,
+            models.UserRole.SYSTEM_ADMIN,
+            models.UserRole.ADMIN,
+            models.UserRole.VERIFIER,
+            models.UserRole.DATA_ENTRY,
+            models.UserRole.MANAGER,
+            models.UserRole.QC,
+            models.UserRole.QA
+        ]
+        if current_user.role not in ops_roles:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+        if current_user.customer_id and case.customer_id != current_user.customer_id:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+        if current_user.branch_id and case.branch_id != current_user.branch_id:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     insuff = db.query(models.Insufficiency).filter(
         models.Insufficiency.case_id == case.id,
@@ -416,6 +491,20 @@ def review_candidate_response(
     if not case:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
         
+    ops_roles = [
+        models.UserRole.SUPER_ADMIN,
+        models.UserRole.SUPER_ADMIN_SPACED,
+        models.UserRole.SYSTEM_ADMIN,
+        models.UserRole.ADMIN,
+        models.UserRole.VERIFIER,
+        models.UserRole.DATA_ENTRY,
+        models.UserRole.MANAGER,
+        models.UserRole.QC,
+        models.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Only operations team can start review")
+        
     insuff = db.query(models.Insufficiency).filter(
         models.Insufficiency.case_id == case.id,
         models.Insufficiency.is_resolved == False
@@ -454,10 +543,19 @@ def review_candidate_response(
 
 @router.get("/{candidate_id}/timeline")
 @singular_router.get("/{candidate_id}/timeline")
-def get_candidate_insufficiency_timeline(candidate_id: str, db: Session = Depends(get_db)):
+def get_candidate_insufficiency_timeline(
+    candidate_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
     case = get_case_by_id_or_candidate_id(db, candidate_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case/Candidate not found")
+        
+    if current_user.customer_id and case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
+    if current_user.branch_id and case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     insuff = db.query(models.Insufficiency).filter(
         models.Insufficiency.case_id == case.id

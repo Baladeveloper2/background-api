@@ -178,21 +178,55 @@ async def send_insufficiency_email(to_email: str, candidate_name: str, case_ref:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)
 
+def _get_logo_html(site_name: str) -> str:
+    """
+    Returns an <img> tag with the logo embedded as base64 so it always renders
+    in email clients without relying on any external URL.
+    Falls back to a logo URL from env, then to a styled text badge.
+    """
+    import base64
+
+    # 1) Try to embed local logo file as base64
+    possible_paths = [
+        os.path.join(os.path.dirname(__file__), '..', '..', 'frontend', 'src', 'assets', 'checkline.png'),
+        os.path.join(os.path.dirname(__file__), '..', 'frontend', 'src', 'assets', 'checkline.png'),
+        r'd:\project\frontend\src\assets\checkline.png',
+    ]
+    for path in possible_paths:
+        path = os.path.normpath(path)
+        if os.path.isfile(path):
+            try:
+                with open(path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                return f'<img src="data:image/png;base64,{b64}" alt="{site_name} Logo" style="max-height:45px; height:auto;">'
+            except Exception:
+                pass
+
+    # 2) Try LOGO_URL env var
+    logo_url = os.getenv("LOGO_URL", "").strip()
+    if logo_url:
+        return f'<img src="{logo_url}" alt="{site_name} Logo" style="max-height:45px; height:auto;">'
+
+    # 3) Styled text fallback – always renders
+    return (
+        f'<span style="display:inline-block;background:#2563eb;color:#fff;'
+        f'font-family:Arial,sans-serif;font-size:18px;font-weight:800;'
+        f'padding:8px 18px;border-radius:8px;letter-spacing:0.03em;">'
+        f'{site_name}</span>'
+    )
+
+
 async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_link: str, checks: list = None, custom_subject: str = None, custom_body: str = None, case_ref: str = None, client_name: str = None):
     """
     Sends the BGV form link to the candidate using the premium template, supporting dynamic rich text and selected checks.
     """
     import datetime
     site_name = os.getenv("SITE_NAME", "BGVMS")
-    logo_url = os.getenv("LOGO_URL", "https://checklinetech.com/wp-content/uploads/2023/12/logo-checkline.png") # Fallback to Checkline logo
     support_email = os.getenv("SUPPORT_EMAIL", f"support@{site_name.lower().replace(' ', '')}.com")
     support_phone = os.getenv("SUPPORT_PHONE", "+91 99999 99999")
-    
-    logo_html = f'<img src="{logo_url}" alt="{site_name} Logo">' if logo_url else ''
+
+    logo_html = _get_logo_html(site_name)
     current_year = datetime.datetime.now().year
-    
-    # Generate Checks HTML dynamically (Removed as per requirements)
-    checks_html = ""
 
     # Parse body
     if not custom_body:
@@ -219,9 +253,9 @@ async def send_bgv_invitation_email(to_email: str, candidate_name: str, form_lin
         support_email=support_email,
         current_year=current_year
     )
-    
+
     subject = custom_subject if custom_subject else f"Background Verification Invitation - {site_name}"
-    
+
     import asyncio
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_sync, to_email, subject, html_content)

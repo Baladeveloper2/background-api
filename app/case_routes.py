@@ -148,23 +148,38 @@ async def get_insufficient_cases(
     )
 
     # Apply Tab Filter
-    if tab_upper == "PENDING":
+    if tab_upper in ["PENDING", "PENDING_CLIENT_RESPONSE"]:
         stmt_new = stmt_new.filter(
-            models.Insufficiency.status.in_(["PENDING", "INSUFFICIENT", "NOTIFICATION_SENT", "REMINDER_SENT", "AWAITING_RESPONSE"]),
+            models.Insufficiency.status.in_(["PENDING", "INSUFFICIENT", "NOTIFICATION_SENT", "REMINDER_SENT", "AWAITING_RESPONSE", "PENDING_CLIENT_RESPONSE"]),
             models.Insufficiency.is_resolved == False
         )
-    elif tab_upper == "IN_PROGRESS":
+    elif tab_upper == "SUBMITTED_BY_CLIENT":
+        stmt_new = stmt_new.filter(
+            models.Insufficiency.status.in_(["SUBMITTED_BY_CLIENT", "SUBMITTED_FOR_REVIEW", "CUSTOMER_UPLOADED"]),
+            models.Insufficiency.is_resolved == False
+        )
+    elif tab_upper in ["IN_PROGRESS", "UNDER_REVIEW"]:
         stmt_new = stmt_new.filter(
             models.Insufficiency.status.in_(["CANDIDATE_RESPONDED", "UNDER_REVIEW", "VERIFIER_REVIEWING"]),
             models.Insufficiency.is_resolved == False
         )
-    elif tab_upper == "RESOLVED":
-        stmt_new = stmt_new.filter(models.Insufficiency.is_resolved == True)
+    elif tab_upper in ["RESOLVED", "ACCEPTED"]:
+        stmt_new = stmt_new.filter(
+            or_(
+                models.Insufficiency.is_resolved == True,
+                models.Insufficiency.status.in_(["ACCEPTED", "RESOLVED"])
+            )
+        )
+    elif tab_upper == "REJECTED":
+        stmt_new = stmt_new.filter(
+            models.Insufficiency.status.in_(["REJECTED"]),
+            models.Insufficiency.is_resolved == False
+        )
     elif tab_upper == "UNRESOLVED":
         stmt_new = stmt_new.filter(models.Insufficiency.is_resolved == False)
     # If "ALL", no filter on is_resolved is applied
 
-    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
+    if current_user.customer_id:
         stmt_new = stmt_new.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
         
     if getattr(current_user, "zone_id", None):
@@ -250,7 +265,7 @@ async def get_insufficient_cases(
             )
         )
         
-        if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
+        if current_user.customer_id:
             stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
             
         if getattr(current_user, "zone_id", None):
@@ -321,7 +336,7 @@ async def get_insufficient_summary(
     """Retrieve aggregate summary counts for insufficiency dashboard cards."""
     # Base query for new insufficiencies table
     stmt = select(models.Insufficiency)
-    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
+    if current_user.customer_id:
         stmt = stmt.filter(models.Insufficiency.case.has(customer_id=current_user.customer_id))
     if getattr(current_user, "zone_id", None):
         stmt = stmt.filter(models.Insufficiency.case.has(zone_id=current_user.zone_id))
@@ -340,16 +355,16 @@ async def get_insufficient_summary(
     overdue = 0
     
     for i in insufficiencies:
-        if i.is_resolved:
+        if i.is_resolved or (i.status or "").upper() in ["ACCEPTED", "RESOLVED"]:
             resolved += 1
         else:
             # Check status
             status_upper = (i.status or "").upper()
-            if status_upper == "PENDING":
+            if status_upper in ["PENDING", "INSUFFICIENT", "NOTIFICATION_SENT", "REMINDER_SENT", "AWAITING_RESPONSE", "PENDING_CLIENT_RESPONSE"]:
                 pending += 1
-            elif status_upper in ["NOTIFICATION_SENT", "REMINDER_SENT"]:
+            elif status_upper in ["SUBMITTED_BY_CLIENT", "SUBMITTED_FOR_REVIEW", "CUSTOMER_UPLOADED"]:
                 awaiting_response += 1
-            elif status_upper in ["CANDIDATE_RESPONDED", "UNDER_REVIEW"]:
+            elif status_upper in ["CANDIDATE_RESPONDED", "UNDER_REVIEW", "VERIFIER_REVIEWING"]:
                 under_review += 1
             else:
                 # Default fallback
@@ -363,7 +378,7 @@ async def get_insufficient_summary(
 
     # Include legacy cases count (if any) as Pending and check if overdue
     stmt_legacy = select(models.Case).filter(models.Case.status == enums.CaseStatus.INSUFFICIENT)
-    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
+    if current_user.customer_id:
         stmt_legacy = stmt_legacy.filter(models.Case.customer_id == current_user.customer_id)
     if getattr(current_user, "zone_id", None):
         stmt_legacy = stmt_legacy.filter(models.Case.zone_id == current_user.zone_id)
@@ -565,7 +580,12 @@ async def send_insufficiency_reminder(
         stmt = select(models.Insufficiency).filter(models.Insufficiency.id == new_insuff.id).options(joinedload(models.Insufficiency.case).joinedload(models.Case.candidate))
         res = await db.execute(stmt)
         insuff = res.scalar_one_or_none()
-        
+
+    if current_user.customer_id and insuff.case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+    if current_user.branch_id and insuff.case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+
     if insuff.is_resolved:
         raise HTTPException(status_code=400, detail="Insufficiency is already resolved")
 
@@ -623,7 +643,7 @@ async def get_candidate_invitations(
         # Default: show all invitation statuses
         base_conditions.append(models.Case.status.in_(allowed_statuses))
     
-    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
+    if current_user.customer_id:
         base_conditions.append(models.Case.customer_id == current_user.customer_id)
         
     if getattr(current_user, "zone_id", None):
@@ -868,7 +888,7 @@ async def delete_case_invitation(
         raise HTTPException(status_code=404, detail="Case not found")
 
     # Permission: customer can only delete their own cases
-    if current_user.role in (enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN):
+    if current_user.customer_id:
         if case.customer_id != current_user.customer_id:
             raise HTTPException(status_code=403, detail="Not authorized to delete this case")
 
@@ -1354,9 +1374,7 @@ async def export_mis_data(
             stmt = stmt.join(models.Customer, models.Case.customer_id == models.Customer.id)
 
         # RBAC for Customers
-        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-        role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+        if current_user.customer_id:
             stmt = stmt.filter(
                 models.Case.customer_id == current_user.customer_id,
                 ~models.Case.status.in_([enums.CaseStatus.PENDING, enums.CaseStatus.LINK_SHARED, enums.CaseStatus.DOCUMENTS_SUBMITTED])
@@ -2002,8 +2020,7 @@ async def get_strategic_mis(
         )
 
         # RBAC Isolation — match the same scope as /candidates-list (no status exclusions)
-        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-        if "CUSTOMER" in user_role or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+        if current_user.customer_id:
             stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
         elif customer_id:
             stmt = stmt.filter(models.Case.customer_id == customer_id)
@@ -2154,8 +2171,7 @@ async def get_case_strategic_details(
 
 
         # RBAC Isolation
-        user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-        if "CUSTOMER" in user_role or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+        if current_user.customer_id:
             stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
 
         res = await db.execute(stmt)
@@ -2516,17 +2532,18 @@ async def get_allocation_stats(db: AsyncSession = Depends(get_read_db)):
         'UNABLE TO VERIFY', 'UNABLE_TO_VERIFY', 'HOLD', 'INSUFFICIENT', 'QC_VERIFIED',
         'AMBER', 'STOP', 'NOT_AP', 'CLEAR_VERIFIED', 'GREEN', 'RED'
     ]
+    excluded_statuses = FINAL_STATUSES + ['LINK_SHARED', 'DOCUMENTS_SUBMITTED']
 
     # Cases not yet assigned to anyone — covers all pre-assignment statuses
     unallocated_stmt = select(func.count(models.Case.id)).filter(
         models.Case.assigned_to == None,
-        models.Case.status.notin_(FINAL_STATUSES)
+        models.Case.status.notin_(excluded_statuses)
     )
 
     # Cases actively being worked on by a verifier
     allocated_stmt = select(func.count(models.Case.id)).filter(
         models.Case.assigned_to != None,
-        models.Case.status.notin_(FINAL_STATUSES)
+        models.Case.status.notin_(excluded_statuses)
     )
 
     # All terminally finalized cases
@@ -2789,14 +2806,14 @@ async def read_cases(
         stmt = stmt.filter(s_filter)
         base_count_stmt = base_count_stmt.filter(s_filter)
     else:
-        # Exclude old self-onboarding-only statuses (literal strings, not enum aliases,
-        # because the enum aliases now resolve to ASSIGNED/IN_PROGRESS which would
-        # incorrectly exclude active cases from all queries).
-        exclude_filter = ~models.Case.status.in_([
-            'LINK_SHARED', 'DOCUMENTS_SUBMITTED'
-        ])
-        stmt = stmt.filter(exclude_filter)
-        base_count_stmt = base_count_stmt.filter(exclude_filter)
+        # Exclude self-onboarding-only statuses for allocation flows (where assigned is not None)
+        # but allow them in general candidate lists so all candidates list properly.
+        if assigned is not None:
+            exclude_filter = ~models.Case.status.in_([
+                'LINK_SHARED', 'DOCUMENTS_SUBMITTED'
+            ])
+            stmt = stmt.filter(exclude_filter)
+            base_count_stmt = base_count_stmt.filter(exclude_filter)
     if batch_id:
         stmt = stmt.filter(models.Case.batch_id == batch_id)
         base_count_stmt = base_count_stmt.filter(models.Case.batch_id == batch_id)
@@ -4351,14 +4368,17 @@ async def get_case_insufficiency_logs(case_id: str, db: AsyncSession = Depends(g
         for r, full_name, ref_no, role, custom_role_name in rows
     ]
 
-@router.get("/insufficiency-logs/all", dependencies=[Depends(get_current_user)])
+@router.get("/insufficiency-logs/all")
 async def get_all_insufficiency_logs(
     user_id: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
-    db: AsyncSession = Depends(get_async_db)
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
 ):
     """Global insufficiency tracking: list all records from insufficiencies table."""
+    if current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Only operations team can view global logs")
     stmt = (
         select(
             models.Insufficiency, 
@@ -4460,6 +4480,11 @@ async def client_respond_insufficiency(
     if not insuff:
         raise HTTPException(status_code=404, detail="Insufficiency not found")
         
+    if current_user.customer_id and insuff.case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+    if current_user.branch_id and insuff.case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+        
     if insuff.status not in ["PENDING_CLIENT_RESPONSE", "PENDING", "NEED_MORE_INFO"]:
         raise HTTPException(status_code=400, detail="Cannot respond to this insufficiency at the current status")
         
@@ -4504,6 +4529,19 @@ async def get_insufficiency_review_queue(
     current_user: models.User = Depends(get_current_user)
 ):
     """Get the queue of insufficiencies waiting for review."""
+    ops_roles = [
+        enums.UserRole.SUPER_ADMIN,
+        enums.UserRole.SUPER_ADMIN_SPACED,
+        enums.UserRole.SYSTEM_ADMIN,
+        enums.UserRole.ADMIN,
+        enums.UserRole.VERIFIER,
+        enums.UserRole.DATA_ENTRY,
+        enums.UserRole.MANAGER,
+        enums.UserRole.QC,
+        enums.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Only operations team can view review queue")
     
     filters = []
     if status:
@@ -4556,6 +4594,19 @@ async def start_insufficiency_review(
     current_user: models.User = Depends(get_current_user)
 ):
     """Transition insufficiency from SUBMITTED_BY_CLIENT to UNDER_REVIEW."""
+    ops_roles = [
+        enums.UserRole.SUPER_ADMIN,
+        enums.UserRole.SUPER_ADMIN_SPACED,
+        enums.UserRole.SYSTEM_ADMIN,
+        enums.UserRole.ADMIN,
+        enums.UserRole.VERIFIER,
+        enums.UserRole.DATA_ENTRY,
+        enums.UserRole.MANAGER,
+        enums.UserRole.QC,
+        enums.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Only operations team can start review")
     stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id)
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
@@ -4591,6 +4642,19 @@ async def verifier_review_insufficiency(
     current_user: models.User = Depends(get_current_user)
 ):
     """Verifier approves, rejects, or requests more info on a submitted insufficiency."""
+    ops_roles = [
+        enums.UserRole.SUPER_ADMIN,
+        enums.UserRole.SUPER_ADMIN_SPACED,
+        enums.UserRole.SYSTEM_ADMIN,
+        enums.UserRole.ADMIN,
+        enums.UserRole.VERIFIER,
+        enums.UserRole.DATA_ENTRY,
+        enums.UserRole.MANAGER,
+        enums.UserRole.QC,
+        enums.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Only operations team can review insufficiencies")
     stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id).options(joinedload(models.Insufficiency.case))
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
@@ -4749,12 +4813,14 @@ async def get_insufficiency_detail(id: str, db: AsyncSession = Depends(get_async
         res = await db.execute(stmt)
         insuff = res.unique().scalar_one_or_none()
     # Tenancy Check
-    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and insuff.case.customer_id != current_user.customer_id:
+    if current_user.customer_id and insuff.case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+    if current_user.branch_id and insuff.case.branch_id != current_user.branch_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this record")
 
     # If status is CANDIDATE_RESPONDED and user is not a customer, transition to UNDER_REVIEW
-    if insuff.status == "CANDIDATE_RESPONDED" and user_role != "CUSTOMER":
+    user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if insuff.status == "CANDIDATE_RESPONDED" and not current_user.customer_id:
         insuff.status = "UNDER_REVIEW"
         insuff.updated_at = datetime.utcnow()
         insuff.updated_by = current_user.id
@@ -4834,11 +4900,16 @@ async def get_insufficiency_detail(id: str, db: AsyncSession = Depends(get_async
 @router.post("/insufficiencies/{id}/evidence")
 async def update_insufficiency_evidence(id: str, data: Dict[str, Any], db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     """Customer uploads evidence to resolve insufficiency."""
-    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id)
+    stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id).options(joinedload(models.Insufficiency.case))
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
     if not insuff:
         raise HTTPException(404, detail="Insufficiency not found")
+        
+    if current_user.customer_id and insuff.case.customer_id != current_user.customer_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
+    if current_user.branch_id and insuff.case.branch_id != current_user.branch_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access to this record")
         
     insuff.documents = data.get("documents", [])
     insuff.status = "CUSTOMER_UPLOADED"
@@ -4863,6 +4934,19 @@ async def update_insufficiency_evidence(id: str, data: Dict[str, Any], db: Async
 @router.post("/insufficiencies/{id}/resolve")
 async def resolve_insufficiency(id: str, data: Dict[str, str], request: Request, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     """Mark an insufficiency as resolved."""
+    ops_roles = [
+        enums.UserRole.SUPER_ADMIN,
+        enums.UserRole.SUPER_ADMIN_SPACED,
+        enums.UserRole.SYSTEM_ADMIN,
+        enums.UserRole.ADMIN,
+        enums.UserRole.VERIFIER,
+        enums.UserRole.DATA_ENTRY,
+        enums.UserRole.MANAGER,
+        enums.UserRole.QC,
+        enums.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Only operations team can resolve insufficiencies")
     stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id)
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
@@ -4919,6 +5003,19 @@ async def resolve_insufficiency(id: str, data: Dict[str, str], request: Request,
 @router.post("/insufficiencies/{id}/reject")
 async def reject_insufficiency(id: str, data: Dict[str, str], db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(get_current_user)):
     """Reject customer evidence and revert to INSUFFICIENT."""
+    ops_roles = [
+        enums.UserRole.SUPER_ADMIN,
+        enums.UserRole.SUPER_ADMIN_SPACED,
+        enums.UserRole.SYSTEM_ADMIN,
+        enums.UserRole.ADMIN,
+        enums.UserRole.VERIFIER,
+        enums.UserRole.DATA_ENTRY,
+        enums.UserRole.MANAGER,
+        enums.UserRole.QC,
+        enums.UserRole.QA
+    ]
+    if current_user.customer_id or current_user.role not in ops_roles:
+        raise HTTPException(status_code=403, detail="Only operations team can reject evidence")
     stmt = select(models.Insufficiency).filter(models.Insufficiency.id == id)
     res = await db.execute(stmt)
     insuff = res.scalar_one_or_none()
