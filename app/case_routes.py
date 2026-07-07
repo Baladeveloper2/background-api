@@ -3634,9 +3634,12 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
             res_cand = await db.execute(select(models.Candidate).filter(models.Candidate.id == db_case.candidate_id))
             db_candidate = res_cand.scalar_one_or_none()
             if db_candidate:
+                from sqlalchemy.orm.attributes import flag_modified
                 for key, value in candidate_update_data.items():
                     if value is not None:
                         setattr(db_candidate, key, value)
+                        if isinstance(value, (dict, list)):
+                            flag_modified(db_candidate, key)
         else:
             # Create new candidate if missing
             db_candidate = models.Candidate(**candidate_update_data)
@@ -3665,6 +3668,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
                     updated_data = dict(chk_data) if isinstance(chk_data, dict) else {}
                     updated_data["scope_of_work"] = svc_scope
                     existing_checks[svc].data = updated_data
+                    flag_modified(existing_checks[svc], "data")
             else:
                 # Create new
                 new_check = models.VerificationCheck(
@@ -3688,6 +3692,7 @@ async def update_case(case_id: str, case_update: schemas.CaseUpdate, background_
             if svc_scope is not None:
                 if chk.data is None: chk.data = {}
                 chk.data["scope_of_work"] = svc_scope
+                flag_modified(chk, "data")
     
     # 4. Trigger Notifications (Enhanced Stakeholder Flow)
     candidate_name = db_case.candidate.name if db_case.candidate else "Candidate"
@@ -4662,8 +4667,8 @@ async def verifier_review_insufficiency(
     if not insuff:
         raise HTTPException(status_code=404, detail="Insufficiency not found")
         
-    if insuff.status not in ["SUBMITTED_BY_CLIENT", "UNDER_REVIEW", "SUBMITTED"]:
-        raise HTTPException(status_code=400, detail="Insufficiency is not in SUBMITTED state")
+    if insuff.is_resolved:
+        raise HTTPException(status_code=400, detail="Insufficiency is already resolved")
         
     action = data.action.upper()
     now = datetime.utcnow()
@@ -4690,7 +4695,7 @@ async def verifier_review_insufficiency(
             check_res = await db.execute(check_stmt)
             check = check_res.scalar_one_or_none()
             if check:
-                check.status = enums.CheckStatus.WIP
+                check.status = enums.CheckStatus.IN_PROGRESS
         
         # Check if there are any other unresolved insufficiencies for this case
         rem_stmt = select(func.count(models.Insufficiency.id)).filter(
@@ -4702,6 +4707,17 @@ async def verifier_review_insufficiency(
         remaining = rem_res.scalar() or 0
         if remaining == 0:
             insuff.case.status = enums.CaseStatus.IN_VERIFICATION # Move case back to WIP
+
+        # Notify assigned verifier if the action was taken by someone else (e.g. Admin)
+        if insuff.case.assigned_to and insuff.case.assigned_to != current_user.id:
+            await notification_utils.create_notification(
+                db, 
+                insuff.case.assigned_to, 
+                "Insufficiency Accepted",
+                f"Insufficiency for case {insuff.case.case_ref_no or 'Unknown'} has been accepted. Case is back in your queue.",
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=insuff.case_id
+            )
             
     elif action == "REJECT":
         if not data.remarks:
@@ -4742,7 +4758,24 @@ async def verifier_review_insufficiency(
     )
     db.add(comment)
     
+    audit_action_map = {
+        "APPROVE": "INSUFFICIENCY_ACCEPTED",
+        "REJECT": "INSUFFICIENCY_REJECTED",
+        "NEED_MORE_INFO": "INSUFFICIENCY_MORE_INFO"
+    }
+    audit = models.AuditLog(
+        user_id=current_user.id,
+        action=audit_action_map.get(action, "INSUFFICIENCY_REVIEWED"),
+        resource_id=insuff.case_id,
+        details=f"Insufficiency {action.lower()}ed for check {insuff.check.check_type if insuff.check else 'General'}. Remarks: {data.remarks or ''}"
+    )
+    db.add(audit)
+    
     await db.commit()
+    
+    # Invalidate caches to ensure dashboards reflect the new case status
+    await invalidate_dashboard_cache()
+    
     return {"message": f"Insufficiency {action.lower()}ed successfully"}
 
 

@@ -769,7 +769,7 @@ async def get_verifier_dashboard(
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     now = datetime.utcnow()
 
-    ACTIVE_STATUSES = ["ASSIGNED", "IN_PROGRESS", "INSUFFICIENCY", "VERIFICATION"]
+    ACTIVE_STATUSES = ["ASSIGNED", "IN_PROGRESS", "INSUFFICIENCY", "VERIFICATION", "IN_VERIFICATION", "WIP", "QC_PENDING", "QA_PENDING"]
     FINAL_STATUSES = [
         "FINALIZED", "COMPLETED", "POSITIVE", "NEGATIVE",
         "DISCREPANCY", "UNABLE TO VERIFY", "HOLD", "INSUFFICIENT",
@@ -791,7 +791,7 @@ async def get_verifier_dashboard(
             sc[s_val] = sc.get(s_val, 0) + int(row[1] or 0)
 
         assigned_total   = sum(sc.get(s, 0) for s in ACTIVE_STATUSES)
-        wip_count        = sc.get("IN_PROGRESS", 0) + sc.get("VERIFICATION", 0)
+        wip_count        = sc.get("IN_PROGRESS", 0) + sc.get("VERIFICATION", 0) + sc.get("IN_VERIFICATION", 0) + sc.get("WIP", 0) + sc.get("QC_PENDING", 0) + sc.get("QA_PENDING", 0)
         insuff_count     = sc.get("INSUFFICIENCY", 0) + sc.get("INSUFFICIENT", 0)
         total_finalized  = sum(sc.get(s, 0) for s in FINAL_STATUSES)
 

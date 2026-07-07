@@ -8,6 +8,7 @@ from typing import Optional
 from .database import get_async_db, get_read_db
 from . import models, schemas, enums, notification_utils
 from .auth_routes import get_current_user
+from .cache import invalidate_dashboard_cache
 
 router = APIRouter()
 
@@ -130,8 +131,8 @@ async def verifier_review_insufficiency(
     if not insuff:
         raise HTTPException(status_code=404, detail="Insufficiency not found")
         
-    if insuff.status not in ["SUBMITTED_BY_CLIENT", "UNDER_REVIEW"]:
-        raise HTTPException(status_code=400, detail="Insufficiency is not in SUBMITTED state")
+    if insuff.is_resolved:
+        raise HTTPException(status_code=400, detail="Insufficiency is already resolved")
         
     action = data.action.upper()
     now = datetime.utcnow()
@@ -174,7 +175,7 @@ async def verifier_review_insufficiency(
             check_res = await db.execute(check_stmt)
             check = check_res.scalar_one_or_none()
             if check:
-                check.status = enums.CheckStatus.WIP
+                check.status = enums.CheckStatus.IN_PROGRESS
         
         # Check if there are any other unresolved insufficiencies for this case
         rem_stmt = select(func.count(models.Insufficiency.id)).filter(
@@ -185,7 +186,18 @@ async def verifier_review_insufficiency(
         rem_res = await db.execute(rem_stmt)
         remaining = rem_res.scalar() or 0
         if remaining == 0:
-            insuff.case.status = enums.CaseStatus.WIP # Move case back to WIP
+            insuff.case.status = enums.CaseStatus.IN_VERIFICATION # Move case back to WIP
+
+        # Notify assigned verifier if the action was taken by someone else (e.g. Admin)
+        if insuff.case.assigned_to and insuff.case.assigned_to != current_user.id:
+            await notification_utils.create_notification(
+                db, 
+                insuff.case.assigned_to, 
+                "Insufficiency Accepted",
+                f"Insufficiency for case {insuff.case.case_ref_no or 'Unknown'} has been accepted. Case is back in your queue.",
+                enums.NotificationCategory.INSUFFICIENT_DOCS,
+                case_id=insuff.case_id
+            )
             # Notify Allocator (Super Admin / Admin)
             allocators = await notification_utils.get_users_by_role(db, [enums.UserRole.SUPER_ADMIN, enums.UserRole.ADMIN])
             for user in allocators:
@@ -255,5 +267,22 @@ async def verifier_review_insufficiency(
     )
     db.add(comment)
     
+    audit_action_map = {
+        "APPROVE": "INSUFFICIENCY_ACCEPTED",
+        "REJECT": "INSUFFICIENCY_REJECTED",
+        "NEED_MORE_INFO": "INSUFFICIENCY_MORE_INFO"
+    }
+    audit = models.AuditLog(
+        user_id=current_user.id,
+        action=audit_action_map.get(action, "INSUFFICIENCY_REVIEWED"),
+        resource_id=insuff.case_id,
+        details=f"Insufficiency {action.lower()}ed for check {insuff.check.check_type if insuff.check else 'General'}. Remarks: {data.remarks or ''}"
+    )
+    db.add(audit)
+    
     await db.commit()
+    
+    # Invalidate caches to ensure dashboards reflect the new case status
+    await invalidate_dashboard_cache()
+    
     return {"message": f"Insufficiency {action.lower()}ed successfully"}
