@@ -981,7 +981,7 @@ async def submit_candidate_documents(
         case.candidate.email = candidate_data.get('email', case.candidate.email)
         case.candidate.phone = candidate_data.get('contact_no', case.candidate.phone)
         case.candidate.gender = candidate_data.get('gender', case.candidate.gender)
-        case.candidate.father_name = candidate_data.get('father_name', case.candidate.father_name)
+        case.candidate.father_name = candidate_data.get('father_name', getattr(case.candidate, 'father_name', None))
         case.candidate.address = candidate_data.get('address', case.candidate.address)
 
         dob_str = candidate_data.get('dob')
@@ -1090,7 +1090,7 @@ async def submit_candidate_documents(
     if case.customer_id:
         cu_stmt = select(models.User).filter(
             models.User.customer_id == case.customer_id,
-            models.User.role.in_([enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN]),
+            models.User.role.in_([enums.UserRole.CUSTOMER, enums.UserRole.CUSTOMER_HEAD, enums.UserRole.BRANCH_ADMIN, enums.UserRole.HR, enums.UserRole.RECRUITER]),
             models.User.status == enums.Status.ACTIVE
         )
         cu_res = await db.execute(cu_stmt)
@@ -1290,7 +1290,7 @@ async def raise_check_insufficiency(
     if case.customer_id:
         cu_stmt = select(models.User).filter(
             models.User.customer_id == case.customer_id,
-            models.User.role.in_([enums.UserRole.CUSTOMER, enums.UserRole.BRANCH_ADMIN]),
+            models.User.role.in_([enums.UserRole.CUSTOMER, enums.UserRole.CUSTOMER_HEAD, enums.UserRole.BRANCH_ADMIN, enums.UserRole.HR, enums.UserRole.RECRUITER]),
             models.User.status == "ACTIVE"
         )
         cu_res = await db.execute(cu_stmt)
