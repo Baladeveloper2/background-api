@@ -229,6 +229,7 @@ class Candidate(Base):
     client_emp_code = Column(String(50), nullable=True, index=True)
     address_details = Column(JSONEncodedDict)
     gender = Column(String(20), nullable=True)
+    father_name = Column(String(255), nullable=True)
     address = Column(Text, nullable=True)
     documents = Column(JSONEncodedList)
     
