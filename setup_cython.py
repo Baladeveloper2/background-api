@@ -67,6 +67,7 @@ if __name__ == "__main__":
             compiler_directives={
                 "language_level": "3",      # Python 3
                 "always_allow_keywords": True,
+                "annotation_typing": False, # Prevent Cython from enforcing type hints at runtime which breaks FastAPI Depends()
             },
             nthreads=4,                     # Parallel compilation
             quiet=False,
