@@ -38,3 +38,9 @@ uploads/
 
 # IDE
 .vscode/
+
+# Cython build artifacts (generated on VPS, never commit)
+*.so
+*.c
+build/
+dist/

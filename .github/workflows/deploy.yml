@@ -9,7 +9,7 @@ jobs:
   deploy:
     runs-on: self-hosted
     concurrency: production_deploy
-    
+
     steps:
       - name: 🛡️ Configure Git Safe Directory
         run: |
@@ -22,7 +22,7 @@ jobs:
           set -e
           git fetch origin main
           git reset --hard origin/main
-          
+
       - name: 📦 Install Python Dependencies
         working-directory: /var/www/myproject/background-api
         run: |
@@ -30,12 +30,38 @@ jobs:
           source /var/www/myproject/venv/bin/activate
           pip install --upgrade pip
           pip install -r requirements.txt
-          
+          pip install cython setuptools
+
+      - name: 🔒 Compile with Cython (Hide Source Code)
+        working-directory: /var/www/myproject/background-api
+        run: |
+          set -e
+          source /var/www/myproject/venv/bin/activate
+          echo "Compiling Python files to .so binaries..."
+          python setup_cython.py build_ext --inplace
+          echo "Compilation complete."
+
+      - name: 🧹 Remove Python Source Files
+        working-directory: /var/www/myproject/background-api
+        run: |
+          set -e
+          echo "Removing .py source files..."
+          # Remove .py files but keep __init__.py and database.py
+          find app/ -name "*.py" \
+            ! -name "__init__.py" \
+            ! -name "database.py" \
+            -delete
+          # Clean up Cython build artifacts
+          rm -rf build/
+          find app/ -name "*.c" -delete
+          echo "Source files removed. Binary count:"
+          find app/ -name "*.so" | wc -l
+
       - name: 🚀 Restart Systemd Service
         run: |
           set -e
           sudo systemctl restart background-api.service
-          
+
       - name: ✅ Verify Service Status
         run: |
           set -e
