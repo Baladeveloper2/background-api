@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, case, extract, desc, distinct
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
+from .logging_config import logger
 import asyncio
 from datetime import datetime, timedelta
 from .logging_config import logger

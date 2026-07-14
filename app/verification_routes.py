@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, File, UploadFile, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from typing import List, Optional, Dict, Any
 from . import models, schemas, aws_utils
 from .database import get_async_db
 from .auth_routes import check_module_permission, get_current_user
 from . import notification_utils
+from .logging_config import logger
 import uuid
 from datetime import datetime
 

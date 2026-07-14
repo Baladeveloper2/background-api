@@ -1,5 +1,6 @@
 import os
 import firebase_admin
+import logging
 from firebase_admin import credentials, storage
 from dotenv import load_dotenv
 
