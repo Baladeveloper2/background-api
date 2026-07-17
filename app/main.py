@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     
     logger.info("=" * 50)
     logger.info("STARTUP DIAGNOSTICS")
+    logger.info("Server Deployment: Triggered on 2026-07-17")
     logger.info(f"Python Executable: {sys.executable}")
     logger.info(f"Python Version: {sys.version}")
     logger.info(f"Site Packages: {site.getsitepackages() if hasattr(site, 'getsitepackages') else 'N/A'}")
