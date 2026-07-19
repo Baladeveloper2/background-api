@@ -26,9 +26,6 @@ async def public_upload_file(
     db: AsyncSession = Depends(get_async_db)
 ):
     """Exclusively S3 public upload for candidates."""
-    if not aws_utils.s3_client:
-        raise HTTPException(status_code=503, detail="S3 Storage service unavailable")
-    
     try:
         ext = os.path.splitext(file.filename)[1].lower()
         allowed_exts = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp', '.gif']
@@ -47,15 +44,26 @@ async def public_upload_file(
         
         unique_filename = f"public_documents/{uuid.uuid4()}_{file.filename}"
         
-        await to_thread.run_sync(
-            partial(
-                aws_utils.s3_client.put_object,
-                Bucket=aws_utils.aws_bucket,
-                Key=unique_filename,
-                Body=file_data,
-                ContentType=file.content_type
+        is_local = False
+        try:
+            if not aws_utils.s3_client:
+                raise Exception("S3 client not initialized")
+            await to_thread.run_sync(
+                partial(
+                    aws_utils.s3_client.put_object,
+                    Bucket=aws_utils.aws_bucket,
+                    Key=unique_filename,
+                    Body=file_data,
+                    ContentType=file.content_type
+                )
             )
-        )
+        except Exception as e:
+            logging.error(f"S3 Public Upload failed: {e}. Falling back to local storage.")
+            is_local = True
+            local_path = f"uploads/{unique_filename}"
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(file_data)
 
         # Store Metadata
         new_meta = DocumentMetadata(
@@ -67,32 +75,34 @@ async def public_upload_file(
         db.add(new_meta)
         await db.commit()
         
+        url = (
+            f"/api/v1/media/local/{unique_filename}"
+            if is_local
+            else f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}"
+        )
         return {
-            "url": f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}",
+            "url": url,
             "public_id": unique_filename,
             "path": unique_filename,
             "original_filename": file.filename,
             "mimetype": file.content_type,
             "size": len(file_data),
-            "storage_provider": "s3",
+            "storage_provider": "local" if is_local else "s3",
             "is_duplicate": duplicate is not None,
             "duplicate_info": f"Previously uploaded on {duplicate.created_at.date()}" if duplicate else None
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"S3 Public Upload error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"S3 Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.post("/upload")
-@limiter.limit("100/minute")
 async def upload_file(
-    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
     """Exclusively S3 upload for authenticated users."""
-    if not aws_utils.s3_client:
-        raise HTTPException(status_code=503, detail="S3 Storage service unavailable")
-
     try:
         ext = os.path.splitext(file.filename)[1].lower()
         allowed_exts = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp', '.gif']
@@ -102,25 +112,43 @@ async def upload_file(
         file_data = await file.read()
         unique_filename = f"bgv_documents/{uuid.uuid4()}_{file.filename}"
         
-        await to_thread.run_sync(
-            partial(
-                aws_utils.s3_client.put_object,
-                Bucket=aws_utils.aws_bucket,
-                Key=unique_filename,
-                Body=file_data,
-                ContentType=file.content_type
+        is_local = False
+        try:
+            if not aws_utils.s3_client:
+                raise Exception("S3 client not initialized")
+            await to_thread.run_sync(
+                partial(
+                    aws_utils.s3_client.put_object,
+                    Bucket=aws_utils.aws_bucket,
+                    Key=unique_filename,
+                    Body=file_data,
+                    ContentType=file.content_type
+                )
             )
-        )
+        except Exception as e:
+            logging.error(f"S3 Upload failed: {e}. Falling back to local storage.")
+            is_local = True
+            local_path = f"uploads/{unique_filename}"
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(file_data)
         
+        url = (
+            f"/api/v1/media/local/{unique_filename}"
+            if is_local
+            else f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}"
+        )
         return {
-            "url": f"https://{aws_utils.aws_bucket}.s3.{aws_utils.aws_region}.amazonaws.com/{unique_filename}",
+            "url": url,
             "public_id": unique_filename,
             "path": unique_filename,
             "original_filename": file.filename,
             "mimetype": file.content_type,
             "size": len(file_data),
-            "storage_provider": "s3"
+            "storage_provider": "local" if is_local else "s3"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"S3 Upload error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"S3 Upload failed: {str(e)}")

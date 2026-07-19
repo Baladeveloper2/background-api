@@ -3865,10 +3865,21 @@ async def _do_merge(case_id: str, docs: list, candidate_name: str, case_ref: str
         out.seek(0)
         filename = f"{candidate_name}_{case_ref}_merged.pdf"
         
-        if s3_client and aws_bucket:
+        if aws_bucket:
             s3_key = f"merged/{case_id}/{filename}"
-            # Put object in thread pool
-            await run_in_threadpool(s3_client.put_object, Bucket=aws_bucket, Key=s3_key, Body=out.getvalue(), ContentType='application/pdf')
+            is_local = False
+            try:
+                if not s3_client:
+                    raise Exception("S3 client not initialized")
+                # Put object in thread pool
+                await run_in_threadpool(s3_client.put_object, Bucket=aws_bucket, Key=s3_key, Body=out.getvalue(), ContentType='application/pdf')
+            except Exception as e:
+                logging.error(f"S3 merge put_object failed: {e}. Saving to local storage.")
+                is_local = True
+                local_path = f"uploads/{s3_key}"
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, "wb") as f:
+                    f.write(out.getvalue())
             
             # Non-blocking SQLAlchemy session for DB update
             def update_db():
