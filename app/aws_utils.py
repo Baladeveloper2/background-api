@@ -29,25 +29,34 @@ def get_s3_client():
 s3_client = get_s3_client()
 
 async def upload_to_s3(file, path):
+    content = await file.read()
     if not s3_client:
-        # Fallback to local storage if needed, but here we assume S3 is required
+        # Fallback to local storage
         os.makedirs(os.path.dirname(f"uploads/{path}"), exist_ok=True)
         with open(f"uploads/{path}", "wb") as f:
-            content = await file.read()
             f.write(content)
         return f"uploads/{path}"
         
-    content = await file.read()
-    s3_client.put_object(
-        Bucket=aws_bucket,
-        Key=path,
-        Body=content,
-        ContentType=file.content_type
-    )
-    return path
+    try:
+        s3_client.put_object(
+            Bucket=aws_bucket,
+            Key=path,
+            Body=content,
+            ContentType=file.content_type
+        )
+        return path
+    except Exception as e:
+        import logging
+        logging.error(f"S3 put_object failed: {e}. Falling back to local storage.")
+        os.makedirs(os.path.dirname(f"uploads/{path}"), exist_ok=True)
+        with open(f"uploads/{path}", "wb") as f:
+            f.write(content)
+        return f"uploads/{path}"
 
 async def generate_presigned_url(path, as_attachment=False, filename=None):
-    if not s3_client:
+    # Check if the file exists in local storage
+    local_path = os.path.join("uploads", path)
+    if not s3_client or os.path.exists(local_path):
         return f"/api/v1/media/local/{path}" # Fallback
         
     params = {'Bucket': aws_bucket, 'Key': path}
