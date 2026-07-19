@@ -8,6 +8,8 @@ __pycache__/
 venv/
 .venv/
 env/
+# .gitignore
+.env
 
 # Local SQLite databases (dev only, never deploy)
 *.db
