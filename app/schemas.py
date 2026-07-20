@@ -446,10 +446,10 @@ class CaseBase(BaseModel):
         if isinstance(v, str):
             val = v.upper()
             mapping = {
-                "PENDING": "ASSIGNED",
-                "NEW": "ASSIGNED",
-                "LINK_SHARED": "ASSIGNED",
-                "INVITED": "ASSIGNED",
+                "PENDING": "PENDING",
+                "NEW": "PENDING",
+                "LINK_SHARED": "LINK_SHARED",
+                "INVITED": "INVITED",
                 
                 "IN_VERIFICATION": "WIP",
                 "VERIFICATION": "WIP",
@@ -558,6 +558,8 @@ class CaseUpdate(BaseModel):
 class CaseCreateExtended(BaseModel):
     batch_id: str
     customer_id: str
+    branch_id: Optional[str] = None
+    zone_id: Optional[str] = None
     candidate: CandidateCreateFull
     services: List[str]
     case_ref_no: Optional[str] = None

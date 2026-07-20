@@ -400,7 +400,9 @@ def list_customers(
     query = db.query(
         models.Customer, 
         batch_counts_subq.c.total_batches
-    ).outerjoin(batch_counts_subq, models.Customer.id == batch_counts_subq.c.customer_id).order_by(models.Customer.created_at.desc())
+    ).outerjoin(batch_counts_subq, models.Customer.id == batch_counts_subq.c.customer_id).filter(
+        models.Customer.status != "DELETED"
+    ).order_by(models.Customer.created_at.desc())
     
     tenant_filter = get_tenant_filters(current_user, models.Customer)
     if tenant_filter is not None:
@@ -585,7 +587,14 @@ def delete_customer(
     if not db_customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
-    db.delete(db_customer)
+    # Soft delete the customer
+    db_customer.status = "DELETED"
+    db_customer.active_status = 0
+    
+    # Also clean up/deactivate branches and users associated with this customer
+    db.query(models.Branch).filter(models.Branch.customer_id == customer_id).update({"status": "DELETED"})
+    db.query(models.User).filter(models.User.customer_id == customer_id).update({"status": "INACTIVE"})
+    
     db.commit()
     return {"message": "Customer deleted successfully"}
 

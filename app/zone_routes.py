@@ -69,7 +69,7 @@ async def list_zones(
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
     # Apply tenant visibility filter
-    query = select(models.Zone)
+    query = select(models.Zone).filter(models.Zone.status != "DELETED")
     tenant_filter = get_tenant_filters(current_user, models.Zone)
     
     if tenant_filter is not None:
@@ -132,10 +132,11 @@ async def delete_zone(
         raise HTTPException(status_code=404, detail="Zone not found")
         
     # Check if there are customers in this zone
-    customers = await db.execute(select(models.Customer).filter(models.Customer.zone_id == zone_id))
+    customers = await db.execute(select(models.Customer).filter(models.Customer.zone_id == zone_id, models.Customer.status != "DELETED"))
     if customers.scalars().first():
         raise HTTPException(status_code=400, detail="Cannot delete zone with associated customers. Reassign them first.")
         
-    await db.delete(db_zone)
+    # Soft delete the zone
+    db_zone.status = "DELETED"
     await db.commit()
     return {"message": "Zone deleted successfully"}
