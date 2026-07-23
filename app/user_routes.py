@@ -4,7 +4,7 @@ from sqlalchemy import select
 from typing import List
 from .logging_config import logger
 from . import models, schemas, auth, database
-from .auth_routes import get_current_user, check_module_permission
+from .auth_routes import get_current_user, check_module_permission, invalidate_user_cache_by_user_id
 from .visibility import get_tenant_filters
 
 router = APIRouter(
@@ -102,6 +102,7 @@ async def update_my_theme(
     current_user.theme_preference = theme_update["theme_preference"]
     await db.commit()
     await db.refresh(current_user)
+    invalidate_user_cache_by_user_id(current_user.id)
     return current_user
 
 @router.patch("/{user_id}", response_model=schemas.User)
@@ -125,6 +126,7 @@ async def update_user(
     
     await db.commit()
     await db.refresh(db_user)
+    invalidate_user_cache_by_user_id(db_user.id)
     return db_user
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -51,6 +51,13 @@ def invalidate_user_cache(token: str):
     with _USER_CACHE_LOCK:
         _USER_CACHE.pop(token, None)
 
+def invalidate_user_cache_by_user_id(user_id: str):
+    """Evict cached user instances by user ID when user details or permissions change."""
+    with _USER_CACHE_LOCK:
+        keys_to_del = [k for k, v in _USER_CACHE.items() if getattr(v.get("user"), "id", None) == user_id]
+        for k in keys_to_del:
+            _USER_CACHE.pop(k, None)
+
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(database.get_async_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -65,10 +72,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     except JWTError: raise credentials_exception
     except Exception: raise credentials_exception
 
-    # Fast path: return cached user if available (avoids DB hit on every request)
+    # Fast path: return cached user merged into active DB session (avoids DB hit on every request & detached session errors)
     cached = _cache_get(token)
     if cached is not None:
-        return cached
+        return await db.merge(cached)
 
     # Cache miss — fetch from DB and populate cache
     stmt = select(models.User).options(selectinload(models.User.role_rel)).filter(models.User.email == token_data.email)
