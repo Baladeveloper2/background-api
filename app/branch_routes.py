@@ -137,8 +137,15 @@ async def create_branch(
                 models.Branch.branch_code == branch.branch_code
             )
         )
-        if result.scalars().first():
-            raise HTTPException(status_code=400, detail="Branch with this code already exists")
+        existing_branch = result.scalars().first()
+        if existing_branch:
+            if getattr(existing_branch, "status", None) == "DELETED":
+                import time
+                existing_branch.branch_code = f"{existing_branch.branch_code[:20]}_del_{int(time.time())}"
+                db.add(existing_branch)
+                await db.flush()
+            else:
+                raise HTTPException(status_code=400, detail="Branch with this code already exists")
     
     if branch.password and branch.password != branch.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
@@ -150,8 +157,15 @@ async def create_branch(
         
     if branch.user_email:
         existing_user = await db.execute(select(models.User).filter(models.User.email == branch.user_email))
-        if existing_user.scalars().first():
-            raise HTTPException(status_code=400, detail="User with this email already exists")
+        existing_user = existing_user.scalars().first()
+        if existing_user:
+            if getattr(existing_user, "status", None) in ["INACTIVE", "DELETED"]:
+                import time
+                existing_user.email = f"{int(time.time())}_del_{existing_user.email[:200]}"
+                db.add(existing_user)
+                await db.flush()
+            else:
+                raise HTTPException(status_code=400, detail="User with this email already exists")
 
     branch_data = branch.model_dump(exclude={"username", "user_email", "user_phone", "password", "confirm_password"})
     branch_data["zone_id"] = customer.zone_id

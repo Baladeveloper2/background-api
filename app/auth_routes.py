@@ -363,7 +363,15 @@ async def register_user(user: schemas.UserCreate, db: AsyncSession = Depends(dat
     if len(user.password) < 8: raise HTTPException(400, "Password too short")
     
     res = await db.execute(select(models.User).filter(models.User.email == user.email))
-    if res.scalar_one_or_none(): raise HTTPException(400, "Email already exists")
+    existing_user = res.scalar_one_or_none()
+    if existing_user:
+        if getattr(existing_user, "status", None) in ["INACTIVE", "DELETED"]:
+            import time
+            existing_user.email = f"{int(time.time())}_del_{existing_user.email[:200]}"
+            db.add(existing_user)
+            await db.flush()
+        else:
+            raise HTTPException(400, "Email already exists")
     
     new_user = models.User(
         email=user.email,

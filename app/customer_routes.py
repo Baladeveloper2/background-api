@@ -356,7 +356,13 @@ async def create_customer(
     if short_code:
         existing = db.query(models.Customer).filter(models.Customer.short_code == short_code).first()
         if existing:
-            raise HTTPException(status_code=400, detail=f"Shortcode '{short_code}' is already assigned to another client.")
+            if existing.status == "DELETED":
+                import time
+                existing.short_code = f"{existing.short_code[:20]}_del_{int(time.time())}"
+                db.add(existing)
+                db.flush()
+            else:
+                raise HTTPException(status_code=400, detail=f"Shortcode '{short_code}' is already assigned to another client.")
 
     db_customer = models.Customer(
         name=name,
@@ -480,7 +486,13 @@ async def update_customer(
         if short_code != db_customer.short_code:
             existing = db.query(models.Customer).filter(models.Customer.short_code == short_code).first()
             if existing:
-                raise HTTPException(status_code=400, detail=f"Shortcode '{short_code}' is already assigned to another client.")
+                if existing.status == "DELETED":
+                    import time
+                    existing.short_code = f"{existing.short_code[:20]}_del_{int(time.time())}"
+                    db.add(existing)
+                    db.flush()
+                else:
+                    raise HTTPException(status_code=400, detail=f"Shortcode '{short_code}' is already assigned to another client.")
         db_customer.short_code = short_code
 
     if agreement_file and s3_client and aws_bucket:
@@ -587,13 +599,26 @@ def delete_customer(
     if not db_customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     
+    import time
+    ts = int(time.time())
+    
     # Soft delete the customer
     db_customer.status = "DELETED"
     db_customer.active_status = 0
+    if db_customer.short_code:
+        db_customer.short_code = f"{db_customer.short_code[:20]}_del_{ts}"
     
     # Also clean up/deactivate branches and users associated with this customer
-    db.query(models.Branch).filter(models.Branch.customer_id == customer_id).update({"status": "DELETED"})
-    db.query(models.User).filter(models.User.customer_id == customer_id).update({"status": "INACTIVE"})
+    branches = db.query(models.Branch).filter(models.Branch.customer_id == customer_id).all()
+    for b in branches:
+        b.status = "DELETED"
+        if b.branch_code:
+            b.branch_code = f"{b.branch_code[:20]}_del_{ts}"
+            
+    users = db.query(models.User).filter(models.User.customer_id == customer_id).all()
+    for u in users:
+        u.status = "INACTIVE"
+        u.email = f"{ts}_del_{u.email[:200]}"
     
     db.commit()
     return {"message": "Customer deleted successfully"}
