@@ -20,7 +20,7 @@ class TemplateResponseSchema(TemplateCreateSchema):
     id: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 @router.post("", response_model=TemplateResponseSchema)
 async def create_template(
