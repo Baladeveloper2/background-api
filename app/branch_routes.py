@@ -297,3 +297,53 @@ async def delete_branch(
     await db.delete(db_branch)
     await db.commit()
     return {"message": "Branch deleted successfully"}
+
+@router.get("/workload/summary")
+async def get_branch_workload(
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(auth_routes.get_current_user)
+):
+    if not current_user.branch_id:
+        raise HTTPException(status_code=403, detail="User is not associated with any branch")
+        
+    branch_id = current_user.branch_id
+    
+    # Get all users in this branch
+    users_result = await db.execute(select(models.User).filter(models.User.branch_id == branch_id))
+    users = users_result.scalars().all()
+    
+    # Get all cases for this branch
+    from sqlalchemy.orm import selectinload
+    cases_result = await db.execute(
+        select(models.Case)
+        .options(selectinload(models.Case.candidate))
+        .filter(models.Case.branch_id == branch_id)
+    )
+    cases = cases_result.scalars().all()
+    
+    # Compute stats per user
+    user_stats = {}
+    for u in users:
+        user_stats[u.id] = {
+            "id": u.id,
+            "name": u.full_name or u.email,
+            "email": u.email,
+            "role": u.role.name if hasattr(u.role, 'name') else str(u.role).replace('UserRole.', ''),
+            "total_cases": 0,
+            "completed": 0,
+            "in_progress": 0
+        }
+        
+    for c in cases:
+        creator_id = c.candidate.created_by if c.candidate else None
+        if creator_id in user_stats:
+            user_stats[creator_id]["total_cases"] += 1
+            if c.status == "COMPLETED":
+                user_stats[creator_id]["completed"] += 1
+            else:
+                user_stats[creator_id]["in_progress"] += 1
+                
+    # Sort users by total cases descending
+    sorted_users = sorted(user_stats.values(), key=lambda x: x["total_cases"], reverse=True)
+    return {"users": sorted_users}
+
