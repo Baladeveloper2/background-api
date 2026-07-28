@@ -110,30 +110,45 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
         if current_user.role == models.UserRole.SUPER_ADMIN: return current_user
         if current_user.role_rel and current_user.role_rel.name == "Super Admin": return current_user
         # Simplified permission check for async (can be expanded later)
-        # Assuming permissions are in current_user.bvs_permissions or role_rel
         has_access = False
         perms = current_user.bvs_permissions or {}
-        
-        # Logic matches previous sync version but async compatible
+        role_perms = current_user.role_rel.permissions or {} if current_user.role_rel else {}
+
+        def _check_action(rp):
+            if not rp: return False
+            if isinstance(rp, dict) and rp.get(action): return True
+            if isinstance(rp, str):
+                m = {"read": "R", "write": "W", "delete": "D"}[action]
+                if m in rp: return True
+            if rp is True and action == "read": return True
+            return False
+
         if sub_module:
-            if perms.get(module, {}).get(sub_module): has_access = True
-            if current_user.role_rel and current_user.role_rel.permissions:
-                rk = f"{module}.{sub_module}"
-                rp = current_user.role_rel.permissions.get(rk)
-                if isinstance(rp, dict) and rp.get(action): has_access = True
-                elif isinstance(rp, str):
-                    m = {"read": "R", "write": "W", "delete": "D"}[action]
-                    if m in rp: has_access = True
-                elif rp is True and action == "read": has_access = True
+            rk = f"{module}.{sub_module}"
+            # Check nested bvs_permissions
+            rp_bvs = perms.get(module, {}).get(sub_module) if isinstance(perms.get(module), dict) else None
+            # Fallback to flattened
+            if not rp_bvs: rp_bvs = perms.get(rk)
+            
+            has_access = _check_action(rp_bvs)
+            if not has_access:
+                has_access = _check_action(role_perms.get(rk))
         else:
-            if any((perms.get(module, {})).values()): has_access = True
-            if current_user.role_rel and current_user.role_rel.permissions:
-                rp = current_user.role_rel.permissions.get(module)
-                if isinstance(rp, dict) and rp.get(action): has_access = True
-                elif isinstance(rp, str):
-                    m = {"read": "R", "write": "W", "delete": "D"}[action]
-                    if m in rp: has_access = True
-                elif rp is True and action == "read": has_access = True
+            mod_perms = perms.get(module)
+            if isinstance(mod_perms, dict):
+                has_access = any(_check_action(v) for v in mod_perms.values())
+            elif mod_perms:
+                has_access = _check_action(mod_perms)
+                
+            if not has_access:
+                has_access = _check_action(role_perms.get(module))
+                
+            if not has_access:
+                prefix = f"{module}."
+                has_access = any(_check_action(v) for k, v in perms.items() if str(k).startswith(prefix))
+            if not has_access:
+                prefix = f"{module}."
+                has_access = any(_check_action(v) for k, v in role_perms.items() if str(k).startswith(prefix))
 
         if not has_access:
             # Check if it's a customer user accessing their permitted modules

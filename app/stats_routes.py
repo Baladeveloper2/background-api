@@ -109,10 +109,10 @@ async def get_sidebar_counts(
     """Lightweight endpoint polled every 30s by the sidebar for badge counts."""
     result = {}
     try:
-        # Unread / new docs in client vault
+        # Unread / new docs in client vault (count of workspaces with unread docs)
         unread_q = await db.execute(
-            select(func.count(models.CustomerDocument.id))
-            .where(models.CustomerDocument.is_read == False)
+            select(func.count(func.distinct(models.ClientDocument.customer_id)))
+            .where(models.ClientDocument.is_read == False)
         )
         result["client_vault"] = unread_q.scalar() or 0
 
