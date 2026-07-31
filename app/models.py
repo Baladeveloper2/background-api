@@ -77,7 +77,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255))
-    role = Column(Enum(UserRole), default=UserRole.USER)
+    role = Column(Enum(UserRole, values_callable=lambda x: [e.value for e in x]), default=UserRole.USER)
     role_id = Column(String(36), ForeignKey("roles.id"), nullable=True) # New RBAC Role
     status = Column(String(50), default=Status.ACTIVE)
     territory = Column(String(255), nullable=True)

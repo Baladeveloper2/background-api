@@ -21,7 +21,7 @@ def create_role(role: schemas.RoleCreate, db: Session = Depends(get_db)):
     db.refresh(db_role)
     return db_role
 
-@router.get("/roles", response_model=List[schemas.Role], dependencies=[Depends(check_permissions(models.UserRole.ADMIN))])
+@router.get("/roles", response_model=List[schemas.Role], dependencies=[Depends(get_current_user)])
 def read_roles(db: Session = Depends(get_db)):
     return db.query(models.Role).all()
 

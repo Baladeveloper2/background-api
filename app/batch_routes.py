@@ -154,7 +154,7 @@ async def read_batches_summary(
     
     # Tenancy check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+    if user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER")):
         stmt = stmt.filter(models.Batch.customer_id == current_user.customer_id)
 
     # Count total
@@ -224,7 +224,7 @@ async def read_batch_clients(db: AsyncSession = Depends(get_async_db)):
 async def read_batches(response: Response, skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_db), current_user: models.User = Depends(check_module_permission("bvs", "batch", action="read"))):
     stmt = select(models.Batch)
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+    if user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER")):
         stmt = stmt.filter(models.Batch.customer_id == current_user.customer_id)
         
     count_res = await db.execute(select(func.count()).select_from(stmt.subquery()))
@@ -240,7 +240,7 @@ async def read_batch(batch_id: str, db: AsyncSession = Depends(get_async_db), cu
     
     # Tenancy check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_batch.customer_id != current_user.customer_id:
+    if (user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER"))) and db_batch.customer_id != current_user.customer_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this batch")
         
     return db_batch

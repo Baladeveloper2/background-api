@@ -272,7 +272,7 @@ async def get_all_verifications(
         conditions = []
         
         # If the user is a CUSTOMER, restrict to their customer_id
-        if current_user.role == models.UserRole.CUSTOMER:
+        if current_user.role in (models.UserRole.CUSTOMER, models.UserRole.CUSTOMER_HEAD):
             conditions.append(models.Case.customer_id == current_user.customer_id)
             
         if status and status != "ALL":

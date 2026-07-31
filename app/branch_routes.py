@@ -43,6 +43,12 @@ class BranchUpdate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     status: Optional[str] = None
+    # User Details
+    username: Optional[str] = None
+    user_email: Optional[str] = None
+    user_phone: Optional[str] = None
+    password: Optional[str] = None
+    confirm_password: Optional[str] = None
 
 class ZoneMinimal(BaseModel):
     id: str
@@ -70,10 +76,55 @@ class BranchResponse(BaseModel):
     status: str
     customer: Optional[CustomerMinimal] = None
     zone: Optional[ZoneMinimal] = None
+    username: Optional[str] = None
+    user_email: Optional[str] = None
+    user_phone: Optional[str] = None
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     model_config = ConfigDict(from_attributes=True)
 
+
+async def populate_branch_user(db_branch: models.Branch, db: AsyncSession):
+    if not db_branch:
+        return
+    user_res = await db.execute(
+        select(models.User).filter(
+            models.User.branch_id == db_branch.id,
+            models.User.role.in_([models.UserRole.BRANCH_ADMIN, models.UserRole.BRANCH_ADMIN_SPACED])
+        )
+    )
+    branch_user = user_res.scalars().first()
+    if branch_user:
+        db_branch.username = branch_user.full_name
+        db_branch.user_email = branch_user.email
+        db_branch.user_phone = branch_user.phone
+    else:
+        db_branch.username = None
+        db_branch.user_email = None
+        db_branch.user_phone = None
+
+async def populate_branches_users(db_branches: list, db: AsyncSession):
+    if not db_branches:
+        return
+    branch_ids = [b.id for b in db_branches]
+    user_res = await db.execute(
+        select(models.User).filter(
+            models.User.branch_id.in_(branch_ids),
+            models.User.role.in_([models.UserRole.BRANCH_ADMIN, models.UserRole.BRANCH_ADMIN_SPACED])
+        )
+    )
+    users = user_res.scalars().all()
+    user_map = {u.branch_id: u for u in users}
+    for b in db_branches:
+        u = user_map.get(b.id)
+        if u:
+            b.username = u.full_name
+            b.user_email = u.email
+            b.user_phone = u.phone
+        else:
+            b.username = None
+            b.user_email = None
+            b.user_phone = None
 
 async def check_branch_auth(branch_id: str = None, customer_id: str = None, current_user: models.User = None, db: AsyncSession = None):
     # Use visibility helper
@@ -201,7 +252,9 @@ async def create_branch(
             selectinload(models.Branch.zone)
         ).filter(models.Branch.id == db_branch.id)
     )
-    return result.scalars().first()
+    db_br = result.scalars().first()
+    await populate_branch_user(db_br, db)
+    return db_br
 
 @router.get("/", response_model=List[BranchResponse])
 async def list_branches(
@@ -226,7 +279,9 @@ async def list_branches(
         query = query.filter(models.Branch.customer_id == customer_id)
         
     result = await db.execute(query)
-    return result.scalars().all()
+    branches = result.scalars().all()
+    await populate_branches_users(branches, db)
+    return branches
 
 @router.get("/{branch_id}", response_model=BranchResponse)
 async def get_branch(
@@ -243,9 +298,11 @@ async def get_branch(
     branch = result.scalars().first()
     if not branch:
         raise HTTPException(status_code=404, detail="Branch not found")
+    await populate_branch_user(branch, db)
     return branch
 
 @router.put("/{branch_id}", response_model=BranchResponse)
+@router.patch("/{branch_id}", response_model=BranchResponse)
 async def update_branch(
     branch_id: str, 
     branch_update: BranchUpdate, 
@@ -259,14 +316,76 @@ async def update_branch(
     db_branch = result.scalars().first()
     if not db_branch:
         raise HTTPException(status_code=404, detail="Branch not found")
+
+    user_res = await db.execute(
+        select(models.User).filter(
+            models.User.branch_id == branch_id,
+            models.User.role.in_([models.UserRole.BRANCH_ADMIN, models.UserRole.BRANCH_ADMIN_SPACED])
+        )
+    )
+    branch_user = user_res.scalars().first()
+
+    if branch_update.user_email:
+        # Check if email is already taken by ANOTHER user
+        if branch_user and branch_user.email != branch_update.user_email:
+            existing_user = await db.execute(select(models.User).filter(models.User.email == branch_update.user_email))
+            if existing_user.scalars().first():
+                raise HTTPException(status_code=400, detail="User with this email already exists")
+        elif not branch_user:
+            existing_user = await db.execute(select(models.User).filter(models.User.email == branch_update.user_email))
+            if existing_user.scalars().first():
+                raise HTTPException(status_code=400, detail="User with this email already exists")
+
+    # Update or create Branch Admin User
+    if branch_update.user_email:
+        from .auth import get_password_hash
+        from .enums import UserRole
+        if branch_user:
+            if branch_update.username is not None:
+                branch_user.full_name = branch_update.username
+            branch_user.email = branch_update.user_email
+            if branch_update.user_phone is not None:
+                branch_user.phone = branch_update.user_phone
+            if branch_update.password:
+                if branch_update.password != branch_update.confirm_password:
+                    raise HTTPException(status_code=400, detail="Passwords do not match")
+                branch_user.hashed_password = get_password_hash(branch_update.password)
+            db.add(branch_user)
+        else:
+            if branch_update.password:
+                if branch_update.password != branch_update.confirm_password:
+                    raise HTTPException(status_code=400, detail="Passwords do not match")
+                new_user = models.User(
+                    email=branch_update.user_email,
+                    hashed_password=get_password_hash(branch_update.password),
+                    full_name=branch_update.username or db_branch.branch_name + " Admin",
+                    phone=branch_update.user_phone,
+                    role=UserRole.BRANCH_ADMIN,
+                    customer_id=db_branch.customer_id,
+                    branch_id=db_branch.id,
+                    zone_id=db_branch.zone_id,
+                    status="ACTIVE"
+                )
+                db.add(new_user)
         
-    update_data = branch_update.model_dump(exclude_unset=True)
+    exclude_keys = {"username", "user_email", "user_phone", "password", "confirm_password"}
+    update_data = branch_update.model_dump(exclude=exclude_keys, exclude_unset=True)
     for key, value in update_data.items():
         setattr(db_branch, key, value)
         
     await db.commit()
+    
+    # Reload branch with relationships
     await db.refresh(db_branch)
-    return db_branch
+    result = await db.execute(
+        select(models.Branch).options(
+            selectinload(models.Branch.customer).selectinload(models.Customer.zone),
+            selectinload(models.Branch.zone)
+        ).filter(models.Branch.id == db_branch.id)
+    )
+    db_br = result.scalars().first()
+    await populate_branch_user(db_br, db)
+    return db_br
 
 @router.delete("/{branch_id}")
 async def delete_branch(
@@ -308,8 +427,13 @@ async def get_branch_workload(
         
     branch_id = current_user.branch_id
     
-    # Get all users in this branch
-    users_result = await db.execute(select(models.User).filter(models.User.branch_id == branch_id))
+    # Get all users in this branch, excluding the currently logged-in user
+    users_result = await db.execute(
+        select(models.User).filter(
+            models.User.branch_id == branch_id,
+            models.User.id != current_user.id
+        )
+    )
     users = users_result.scalars().all()
     
     # Get all cases for this branch
@@ -324,24 +448,45 @@ async def get_branch_workload(
     # Compute stats per user
     user_stats = {}
     for u in users:
+        role_val = u.role.value if hasattr(u.role, 'value') else str(u.role)
+        role_cleaned = role_val.replace('UserRole.', '').replace('_', ' ').title()
         user_stats[u.id] = {
             "id": u.id,
             "name": u.full_name or u.email,
             "email": u.email,
-            "role": u.role.name if hasattr(u.role, 'name') else str(u.role).replace('UserRole.', ''),
+            "role": role_cleaned,
             "total_cases": 0,
             "completed": 0,
-            "in_progress": 0
+            "in_progress": 0,
+            "cases": []
         }
         
     for c in cases:
-        creator_id = c.candidate.created_by if c.candidate else None
-        if creator_id in user_stats:
-            user_stats[creator_id]["total_cases"] += 1
-            if c.status == "COMPLETED":
-                user_stats[creator_id]["completed"] += 1
-            else:
-                user_stats[creator_id]["in_progress"] += 1
+        user_ids = set()
+        if c.candidate and c.candidate.created_by:
+            user_ids.add(c.candidate.created_by)
+        if c.assigned_to:
+            user_ids.add(c.assigned_to)
+            
+        for uid in user_ids:
+            if uid in user_stats:
+                user_stats[uid]["total_cases"] += 1
+                status_str = (c.status or "").upper()
+                
+                # Append case details
+                case_info = {
+                    "id": c.id,
+                    "case_ref_no": c.case_ref_no,
+                    "candidate_name": c.candidate.name if c.candidate else "Unknown",
+                    "status": c.status,
+                    "received_date": c.received_date.strftime("%Y-%m-%d") if c.received_date else None
+                }
+                user_stats[uid]["cases"].append(case_info)
+                
+                if status_str in ['FINALIZED', 'COMPLETED', 'POSITIVE', 'NEGATIVE', 'DISCREPANCY', 'UNABLE TO VERIFY', 'HOLD', 'INSUFFICIENT', 'QC_VERIFIED', 'CLOSED']:
+                    user_stats[uid]["completed"] += 1
+                else:
+                    user_stats[uid]["in_progress"] += 1
                 
     # Sort users by total cases descending
     sorted_users = sorted(user_stats.values(), key=lambda x: x["total_cases"], reverse=True)

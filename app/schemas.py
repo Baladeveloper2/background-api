@@ -23,7 +23,7 @@ class UserBase(BaseModel):
     @classmethod
     def uppercase_enums(cls, v: Any) -> Any:
         if isinstance(v, str):
-            return v.upper()
+            return v.upper().strip().replace(" ", "_").replace("-", "_")
         return v
 
 class RoleBase(BaseModel):
@@ -76,6 +76,13 @@ class UserUpdate(BaseModel):
     is_2fa_enabled: Optional[bool] = None
     theme_preference: Optional[str] = None
 
+    @field_validator('status', 'role', mode='before')
+    @classmethod
+    def uppercase_enums(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.upper().strip().replace(" ", "_").replace("-", "_")
+        return v
+
 class User(UserBase):
     id: str
     created_at: datetime
@@ -127,6 +134,30 @@ class CandidateBase(BaseModel):
         if isinstance(v, dict):
             # This should not happen for a 'documents' field but just in case
             return []
+        return v
+
+    @field_validator('dob', 'db_dob', mode='before')
+    @classmethod
+    def parse_date_fields(cls, v: Any) -> Any:
+        if not v:
+            return v
+        if isinstance(v, (date, datetime)):
+            if isinstance(v, datetime):
+                return v.date()
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return None
+            if 'T' in v:
+                v = v.split('T')[0]
+            elif ' ' in v:
+                v = v.split(' ')[0]
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+                try:
+                    return datetime.strptime(v, fmt).date()
+                except ValueError:
+                    pass
         return v
 
 class CandidateCreate(CandidateBase):

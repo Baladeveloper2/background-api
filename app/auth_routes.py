@@ -236,6 +236,7 @@ async def login_for_access_token(request: Request, db: AsyncSession = Depends(da
             "role": user.role_rel.name if user.role_id and user.role_rel else ("Super Admin" if user.role == models.UserRole.SUPER_ADMIN else user.role), 
             "full_name": user.full_name, 
             "customer_id": user.customer_id,
+            "company_name": user.customer.company_name if user.customer else None,
             "permissions": perms
         },
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -299,6 +300,7 @@ async def verify_2fa(payload: Verify2FARequest, db: AsyncSession = Depends(datab
             "role": user.role_rel.name if user.role_id and user.role_rel else ("Super Admin" if user.role == models.UserRole.SUPER_ADMIN else user.role), 
             "full_name": user.full_name, 
             "customer_id": user.customer_id,
+            "company_name": user.customer.company_name if user.customer else None,
             "permissions": perms
         },
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)

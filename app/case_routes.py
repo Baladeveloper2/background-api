@@ -2357,7 +2357,7 @@ async def create_case(case: schemas.CaseCreate, background_tasks: BackgroundTask
         
     # For Customer role, force their own customer_id
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER"):
+    if user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER")):
         case.customer_id = current_user.customer_id
 
     # Resolve batch_id (it might be batch_no from frontend)
@@ -2401,7 +2401,7 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
     candidate_dict = case_data.candidate.dict()
     
     # Enforce scope and cascade IDs
-    if current_user.role == models.UserRole.CUSTOMER and current_user.customer_id:
+    if current_user.role in (models.UserRole.CUSTOMER, models.UserRole.CUSTOMER_HEAD) and current_user.customer_id:
         case_data.customer_id = current_user.customer_id
     if current_user.role == models.UserRole.BRANCH_ADMIN and current_user.branch_id:
         case_data.branch_id = current_user.branch_id
@@ -2440,7 +2440,7 @@ async def create_case_full(case_data: schemas.CaseCreateExtended, background_tas
 
     # For Customer role, force their own customer_id
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    target_customer_id = current_user.customer_id if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) else case_data.customer_id
+    target_customer_id = current_user.customer_id if (user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER"))) else case_data.customer_id
 
     # Resolve batch_id (it might be batch_no from frontend)
     print(f"DEBUG: create_case_full incoming batch_id: {case_data.batch_id}")
@@ -3086,7 +3086,7 @@ async def read_case(case_id: str, db: AsyncSession = Depends(get_async_db), curr
     
     # Tenancy/Isolation check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+    if (user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER"))) and db_case.customer_id != current_user.customer_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this case")
     if current_user.role == models.UserRole.VERIFIER and db_case.assigned_to != current_user.id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this case")
@@ -3905,7 +3905,7 @@ async def merge_pdfs(case_id: str, request: Request, background_tasks: Backgroun
     
     # Tenancy check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+    if (user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER"))) and db_case.customer_id != current_user.customer_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this case")
     
     docs = db_case.candidate.documents or []
@@ -3965,7 +3965,7 @@ async def finalize_case(
         
     # Tenancy check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+    if (user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER"))) and db_case.customer_id != current_user.customer_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     # 1. Validate all checks are complete
@@ -4139,7 +4139,7 @@ async def generate_ai_summary(case_id: str, db: AsyncSession = Depends(get_async
         
     # Tenancy Check
     user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
-    if (user_role == "CUSTOMER" or (current_user.role_rel and current_user.role_rel.name.upper() == "CUSTOMER")) and db_case.customer_id != current_user.customer_id:
+    if (user_role.startswith("CUSTOMER") or (current_user.role_rel and current_user.role_rel.name.upper().startswith("CUSTOMER"))) and db_case.customer_id != current_user.customer_id:
         raise HTTPException(status_code=403, detail="Unauthorized access to this case")
         
     checks = db_case.checks

@@ -972,7 +972,7 @@ async def get_dashboard_stats(
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
         
-        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        is_customer = user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER")
         is_admin = user_role in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"] or role_name in ["SUPER ADMIN", "QC VERIFIER"]
         
         filter_verifier = not (is_admin or is_customer)
@@ -1558,7 +1558,7 @@ async def get_dashboard_full(
         # Apply filters
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+        if user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER"):
             recent_stmt = recent_stmt.filter(models.Case.customer_id == current_user.customer_id)
         
         if from_date:
@@ -2018,7 +2018,7 @@ async def get_today_records(
         
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+        if user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER"):
             stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
 
         stmt = stmt.group_by(models.Customer.id, models.Customer.name).order_by(models.Customer.name)
@@ -2094,7 +2094,7 @@ async def get_throughput_heatmap(
         
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+        if user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER"):
             load_stmt = load_stmt.filter(models.Case.customer_id == current_user.customer_id)
             
         load_stmt = apply_case_filters(load_stmt, client, executive, status, tat, search)
@@ -2154,7 +2154,7 @@ async def export_dashboard_data(
         # Determine filters
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        is_customer = user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER")
         is_admin = user_role in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"] or role_name in ["SUPER ADMIN", "QC VERIFIER"]
         
         stmt = select(
@@ -2260,7 +2260,7 @@ async def get_cumulative_stats(
         
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        if user_role == "CUSTOMER" or role_name == "CUSTOMER":
+        if user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER"):
             stmt = stmt.filter(models.Case.customer_id == current_user.customer_id)
 
         stmt = apply_case_filters(stmt, client, executive, status, tat, search)
@@ -2551,7 +2551,7 @@ async def export_dashboard_report(
         # 2. Identify Role
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        is_customer = user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER")
         
         # 3. Monthly Iteration
         data = []
@@ -2726,7 +2726,7 @@ async def get_daily_operations(
         # Apply filters based on role scoping
         user_role = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
         role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
-        is_customer = user_role == "CUSTOMER" or role_name == "CUSTOMER"
+        is_customer = user_role.startswith("CUSTOMER") or role_name.startswith("CUSTOMER")
         is_admin = user_role in ["SUPER_ADMIN", "ADMIN", "MANAGER", "QA", "QC"] or role_name in ["SUPER ADMIN", "QC VERIFIER"]
         
         if is_customer:
