@@ -68,6 +68,8 @@ if __name__ == "__main__":
                 "language_level": "3",      # Python 3
                 "always_allow_keywords": True,
                 "annotation_typing": False, # Prevent Cython from enforcing type hints at runtime which breaks FastAPI Depends()
+                "binding": True,            # Make functions inspectable by inspect.signature
+                "embedsignature": True,     # Embed function signature in docstring
             },
             nthreads=4,                     # Parallel compilation
             quiet=False,

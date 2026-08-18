@@ -46,7 +46,7 @@ def resolve_db_url(url: str) -> str:
                 
         if not resolved_ip:
             if hostname == "dataentry-dataentry.j.aivencloud.com":
-                resolved_ip = "139.59.122.93"
+                resolved_ip = "104.248.149.121"
                 logger.info(f"Using fallback hardcoded IP for {hostname}: {resolved_ip}")
             else:
                 return url
@@ -99,13 +99,19 @@ READ_ASYNC_URL = get_url_with_driver(READ_RAW_URL, "aiomysql")
 # Primary Async Engine
 async_engine = create_async_engine(
     ASYNC_URL,
-    poolclass=NullPool,
+    pool_size=5,
+    max_overflow=5,
+    pool_recycle=300,
+    pool_pre_ping=True,
     connect_args={"connect_timeout": 10},
 )
 # Read-Only Async Engine
 read_engine = create_async_engine(
     READ_ASYNC_URL,
-    poolclass=NullPool,
+    pool_size=5,
+    max_overflow=5,
+    pool_recycle=300,
+    pool_pre_ping=True,
     connect_args={"connect_timeout": 10},
 ) if READ_ASYNC_URL != ASYNC_URL else async_engine
 

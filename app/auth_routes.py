@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from datetime import timedelta, datetime
+import asyncio
 from typing import Optional
 from jose import JWTError, jwt
 from . import models, schemas, auth, database
@@ -27,6 +28,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 _USER_CACHE: dict = {}          # token -> {"user": User, "ts": float}
 _USER_CACHE_LOCK = threading.Lock()
 USER_CACHE_TTL_SECONDS = 120    # 2 minutes
+_USER_LOOKUP_LOCK = asyncio.Lock()
 
 def _cache_get(token: str):
     with _USER_CACHE_LOCK:
@@ -75,16 +77,32 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     # Fast path: return cached user merged into active DB session (avoids DB hit on every request & detached session errors)
     cached = _cache_get(token)
     if cached is not None:
-        return await db.merge(cached)
+        if cached not in db:
+            try:
+                db.add(cached)
+            except Exception:
+                return await db.merge(cached)
+        return cached
 
-    # Cache miss — fetch from DB and populate cache
-    stmt = select(models.User).options(selectinload(models.User.role_rel)).filter(models.User.email == token_data.email)
-    res = await db.execute(stmt)
-    user = res.unique().scalar_one_or_none()
-    if user is None: raise credentials_exception
+    # Prevent cache stampede on startup using an async lock and double-checked locking
+    async with _USER_LOOKUP_LOCK:
+        cached = _cache_get(token)
+        if cached is not None:
+            if cached not in db:
+                try:
+                    db.add(cached)
+                except Exception:
+                    return await db.merge(cached)
+            return cached
 
-    _cache_set(token, user)
-    return user
+        # Cache miss — fetch from DB (joinedload avoids a second query round-trip)
+        stmt = select(models.User).options(joinedload(models.User.role_rel)).filter(models.User.email == token_data.email)
+        res = await db.execute(stmt)
+        user = res.unique().scalar_one_or_none()
+        if user is None: raise credentials_exception
+
+        _cache_set(token, user)
+        return user
 
 async def create_audit_log(db: AsyncSession, user_id: str, action: str, details: str, resource_id: Optional[str] = None):
     log = models.AuditLog(user_id=user_id, action=action, details=details, resource_id=resource_id)

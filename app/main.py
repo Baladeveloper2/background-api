@@ -148,6 +148,34 @@ app.add_middleware(
     expose_headers=["X-Total-Count"]
 )
 
+# Debug/Error Logging Middleware
+@app.middleware("http")
+async def log_errors(request, call_next):
+    from fastapi.responses import Response
+    body = await request.body()
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+    request._receive = receive
+
+    response = await call_next(request)
+    if response.status_code >= 400:
+        response_body = b""
+        async for chunk in response.body_iterator:
+            response_body += chunk
+        response = Response(
+            content=response_body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type
+        )
+        try:
+            body_str = body.decode(errors="ignore")
+            resp_str = response_body.decode(errors="ignore")
+            logger.error(f"[HTTP ERROR] Path: {request.url.path} | Status: {response.status_code} | Request Body: {body_str} | Response Body: {resp_str}")
+        except Exception as log_err:
+            logger.error(f"Error logging request/response: {str(log_err)}")
+    return response
+
 # Custom Security Headers Middleware
 @app.middleware("http")
 async def add_security_headers(request, call_next):
