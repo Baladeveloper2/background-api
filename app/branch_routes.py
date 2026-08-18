@@ -427,12 +427,18 @@ async def get_branch_workload(
         
     branch_id = current_user.branch_id
     
-    # Get all users in this branch, excluding the currently logged-in user
-    users_result = await db.execute(
-        select(models.User).filter(
+    from sqlalchemy import or_
+    # Get users in this branch OR at the customer level (Customer Head), excluding the currently logged-in user
+    filter_conditions = [
+        models.User.id != current_user.id,
+        or_(
             models.User.branch_id == branch_id,
-            models.User.id != current_user.id
+            (models.User.customer_id == current_user.customer_id) & (models.User.branch_id.is_(None)) if current_user.customer_id else False
         )
+    ]
+    
+    users_result = await db.execute(
+        select(models.User).filter(*filter_conditions)
     )
     users = users_result.scalars().all()
     
