@@ -81,8 +81,13 @@ async def read_verification_checks(case_id: Optional[str] = None, type: Optional
     
     return [enrich_check(c) for c in results]
 
-@router.patch("/checks/{check_id}", response_model=schemas.VerificationCheck, dependencies=[Depends(check_module_permission("bvs", "verification", action="write"))])
-async def update_verification_check(check_id: str, check_update: schemas.VerificationCheckUpdate, db: AsyncSession = Depends(get_async_db)):
+@router.patch("/checks/{check_id}", response_model=schemas.VerificationCheck)
+async def update_verification_check(
+    check_id: str, 
+    check_update: schemas.VerificationCheckUpdate, 
+    db: AsyncSession = Depends(get_async_db),
+    current_user: models.User = Depends(get_current_user)
+):
     stmt = select(models.VerificationCheck).options(
         selectinload(models.VerificationCheck.case).selectinload(models.Case.candidate),
         selectinload(models.VerificationCheck.case).selectinload(models.Case.customer),
@@ -96,6 +101,25 @@ async def update_verification_check(check_id: str, check_update: schemas.Verific
     
     if db_check is None:
         raise HTTPException(status_code=404, detail="Check not found")
+        
+    # Authorization logic
+    is_oversight = current_user.role in [models.UserRole.SUPER_ADMIN, models.UserRole.ADMIN, models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER]
+    if current_user.role_rel and current_user.role_rel.name in ["Super Admin", "QC Verifier"]:
+        is_oversight = True
+        
+    is_assigned = str(db_check.assigned_verifier_id) == str(current_user.id)
+    
+    if not is_oversight and not is_assigned:
+        perms = current_user.bvs_permissions or {}
+        has_write = False
+        try:
+            verif_perms = perms.get("bvs", {}).get("verification", {})
+            if isinstance(verif_perms, dict) and verif_perms.get("write"): has_write = True
+            elif isinstance(verif_perms, str) and "W" in verif_perms: has_write = True
+        except: pass
+        
+        if not has_write:
+            raise HTTPException(status_code=403, detail="Insufficient permissions to update this check")
     
     update_data = check_update.dict(exclude_unset=True)
     if update_data.get("status") == "QC_PENDING":
