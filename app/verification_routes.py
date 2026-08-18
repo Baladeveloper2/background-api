@@ -103,13 +103,22 @@ async def update_verification_check(
         raise HTTPException(status_code=404, detail="Check not found")
         
     # Authorization logic
+    user_role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    role_name = (current_user.role_rel.name.upper() if current_user.role_rel else "").upper()
+    
     is_oversight = current_user.role in [models.UserRole.SUPER_ADMIN, models.UserRole.ADMIN, models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER]
-    if current_user.role_rel and current_user.role_rel.name in ["Super Admin", "QC Verifier"]:
+    if role_name in ["SUPER ADMIN", "QC VERIFIER"]:
         is_oversight = True
         
+    is_customer = "CUSTOMER" in user_role_str or "CUSTOMER" in role_name
     is_assigned = str(db_check.assigned_verifier_id) == str(current_user.id)
     
-    if not is_oversight and not is_assigned:
+    # Allow if oversight, customer, assigned verifier, or if they are a VERIFIER and the check is currently unassigned
+    is_allowed = is_oversight or is_customer or is_assigned
+    if not is_allowed and "VERIFIER" in user_role_str and not db_check.assigned_verifier_id:
+        is_allowed = True
+        
+    if not is_allowed:
         perms = current_user.bvs_permissions or {}
         has_write = False
         try:
