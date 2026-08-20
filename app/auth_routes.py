@@ -178,8 +178,8 @@ def check_module_permission(module: str, sub_module: Optional[str] = None, actio
                 return current_user
 
             # Grant systemic write access to specific oversight roles for the verification module
-            oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN]
-            oversight_names = ["Super Admin", "QC Verifier"]
+            oversight_roles = [models.UserRole.QA, models.UserRole.QC, models.UserRole.MANAGER, models.UserRole.ADMIN, models.UserRole.VERIFIER]
+            oversight_names = ["Super Admin", "QC Verifier", "Verifier"]
             
             is_oversight = current_user.role in oversight_roles
             if current_user.role_rel and current_user.role_rel.name in oversight_names:
