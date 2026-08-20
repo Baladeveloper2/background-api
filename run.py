@@ -3,7 +3,7 @@ import os
 import sys
 from dotenv import load_dotenv
 
-# Enforce virtual environment usage
+# Enforce virtualss environment usage
 venv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "venv", "Scripts", "python.exe"))
 if os.path.exists(venv_path) and os.path.normcase(sys.executable) != os.path.normcase(venv_path):
     import subprocess
