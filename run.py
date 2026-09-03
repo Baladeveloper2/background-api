@@ -10,7 +10,7 @@ if os.path.exists(venv_path) and os.path.normcase(sys.executable) != os.path.nor
     print(f"Warning: Not running in venv. Respawning with {venv_path}...")
     sys.exit(subprocess.run([venv_path] + sys.argv).returncode)
 
-# Load environment variables from .env
+# Load environment variables frosssm .env
 load_dotenv()
 
 if __name__ == "__main__":
