@@ -17,6 +17,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 30m
           script: |
             echo "🛡️ Configure Git Safe Directory"
             git config --global --add safe.directory /var/www/myproject/background-api
