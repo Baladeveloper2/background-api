@@ -73,12 +73,12 @@ class EncryptedString(TypeDecorator):
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(191), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255))
     role = Column(Enum(UserRole, values_callable=lambda x: [e.value for e in x]), default=UserRole.USER)
-    role_id = Column(String(36), ForeignKey("roles.id"), nullable=True) # New RBAC Role
+    role_id = Column(String(191), ForeignKey("roles.id"), nullable=True) # New RBAC Role
     status = Column(String(50), default=Status.ACTIVE)
     territory = Column(String(255), nullable=True)
     business_unit = Column(String(255), nullable=True)
@@ -107,7 +107,7 @@ class User(Base):
 
 class Role(Base):
     __tablename__ = "roles"
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(String(191), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), unique=True, nullable=False)
     description = Column(String(500), nullable=True)
     permissions = Column(JSONEncodedDict, default=lambda: {}) # e.g. {"bvs.verification": true}
@@ -192,10 +192,10 @@ class ClientDocument(Base):
     parent_id = Column(String(36), ForeignKey("client_documents.id"), nullable=True)
     file_path = Column(String(500), nullable=True)
     file_type = Column(String(100), nullable=True)
-    uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    uploaded_by = Column(String(191), ForeignKey("users.id"), nullable=False)
     is_read = Column(Boolean, default=False)
     read_at = Column(DateTime, nullable=True)
-    read_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    read_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -220,8 +220,8 @@ class Candidate(Base):
     zone_id = Column(String(36), ForeignKey("zones.id"), nullable=True, index=True)
     customer_id = Column(String(36), ForeignKey("customers.id"), nullable=True, index=True)
     branch_id = Column(String(36), ForeignKey("branches.id"), nullable=True, index=True)
-    created_by = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
-    assigned_executive_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    created_by = Column(String(191), ForeignKey("users.id"), nullable=True, index=True)
+    assigned_executive_id = Column(String(191), ForeignKey("users.id"), nullable=True, index=True)
     name = Column(String(255), nullable=False, index=True)
     email = Column(String(255), index=True)
     phone = Column(String(20), index=True)
@@ -234,8 +234,8 @@ class Candidate(Base):
     documents = Column(JSONEncodedList)
     
     # Global Database / Identity specialized fields (Encrypted)
-    pan_no = Column(EncryptedString, nullable=True, index=True)
-    passport_no = Column(EncryptedString, nullable=True, index=True)
+    pan_no = Column(EncryptedString, nullable=True)
+    passport_no = Column(EncryptedString, nullable=True)
     nationality = Column(String(100), nullable=True)
     identity_type = Column(String(100), nullable=True)
     db_candidate_name = Column(String(255), nullable=True)
@@ -269,7 +269,7 @@ class CandidateDraft(Base):
     batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), index=True, unique=True)
     form_data = Column(JSONEncodedDict, default=lambda: {})
     last_saved_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    created_by = Column(String(36), ForeignKey("users.id"))
+    created_by = Column(String(191), ForeignKey("users.id"))
     
     batch = relationship("Batch", backref="draft")
     user = relationship("User")
@@ -284,8 +284,8 @@ class Case(Base):
     candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), index=True)
     batch_id = Column(String(36), ForeignKey("batches.id", ondelete="CASCADE"), nullable=True, index=True)
     status = Column(String(50), default=CaseStatus.PENDING, index=True)
-    assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
-    finalized_by = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    assigned_to = Column(String(191), ForeignKey("users.id"), nullable=True, index=True)
+    finalized_by = Column(String(191), ForeignKey("users.id"), nullable=True, index=True)
     received_date = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     assigned_at = Column(DateTime(timezone=True), nullable=True)
     link_shared_at = Column(DateTime(timezone=True), nullable=True)
@@ -388,9 +388,9 @@ class VerificationCheck(Base):
     # New Operational Fields for Dynamic Workflow
     confidence_score = Column(Float, default=0.0) # 0-100
     api_sync_status = Column(String(100), default="NOT_SYNCED") # e.g. "SYNCED", "FAILED", "PENDING"
-    assigned_verifier_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    assigned_verifier_id = Column(String(191), ForeignKey("users.id"), nullable=True)
     
-    finalized_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    finalized_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     finalized_at = Column(DateTime(timezone=True), nullable=True)
     final_remarks = Column(Text, nullable=True)
     final_result = Column(String(50), nullable=True) # Maps to FinalResult Enum string values
@@ -474,7 +474,7 @@ class VerificationDocument(Base):
     file_type = Column(String(100))
     s3_key = Column(String(255), nullable=True)
     is_primary = Column(Boolean, default=False)
-    uploaded_by_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    uploaded_by_id = Column(String(191), ForeignKey("users.id"), nullable=False)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
@@ -491,7 +491,7 @@ class VerificationLog(Base):
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
     check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), nullable=True, index=True)
     action = Column(String(255), nullable=False) # e.g. "STATUS_UPDATED", "DOCUMENT_UPLOADED"
-    performed_by_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    performed_by_id = Column(String(191), ForeignKey("users.id"), nullable=False)
     remarks = Column(Text, nullable=True)
     old_status = Column(String(50), nullable=True)
     new_status = Column(String(50), nullable=True)
@@ -510,7 +510,7 @@ class VerificationLog(Base):
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(36), ForeignKey("users.id"), index=True)
+    user_id = Column(String(191), ForeignKey("users.id"), index=True)
     action = Column(String(255), index=True)
     resource_id = Column(String(100), index=True, nullable=True)
     details = Column(Text)
@@ -525,7 +525,7 @@ class CaseComment(Base):
     __tablename__ = "case_comments"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True)
-    user_id = Column(String(36), ForeignKey("users.id"), index=True)
+    user_id = Column(String(191), ForeignKey("users.id"), index=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     user = relationship("User")
@@ -534,7 +534,7 @@ class CaseComment(Base):
 class Notification(Base):
     __tablename__ = "notifications"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(36), ForeignKey("users.id"), index=True)
+    user_id = Column(String(191), ForeignKey("users.id"), index=True)
     title = Column(String(255))
     message = Column(Text)
     category = Column(Enum(NotificationCategory), default=NotificationCategory.SYSTEM_ALERT)
@@ -557,7 +557,7 @@ class RevokeLog(Base):
     __tablename__ = "revoke_logs"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
-    user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    user_id = Column(String(191), ForeignKey("users.id"), index=True, nullable=False)
     revoke_type = Column(String(50), nullable=False)
     from_status = Column(String(50), nullable=False)
     to_status = Column(String(50), nullable=False)
@@ -571,7 +571,7 @@ class InsufficiencyLog(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
     check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), index=True, nullable=True)
-    user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    user_id = Column(String(191), ForeignKey("users.id"), index=True, nullable=False)
     from_status = Column(String(50), nullable=False)
     notes = Column(Text, nullable=True)
     marked_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
@@ -586,16 +586,16 @@ class Insufficiency(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), index=True, nullable=False)
     check_id = Column(String(36), ForeignKey("verification_checks.id", ondelete="CASCADE"), index=True, nullable=False)
-    raised_by = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    raised_by = Column(String(191), ForeignKey("users.id"), index=True, nullable=False)
     role = Column(String(50))
     message = Column(Text, nullable=False)
     documents = Column(JSONEncodedList) # Support for customer evidence uploads
     status = Column(String(50), default="PENDING_CLIENT_RESPONSE")
     is_resolved = Column(Boolean, default=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    updated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    updated_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
-    resolved_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    resolved_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     resolved_remarks = Column(Text, nullable=True)
     token = Column(String(100), unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -642,7 +642,7 @@ class DocumentMetadata(Base):
     file_name = Column(String(255))
     mime_type = Column(String(100))
     size = Column(Integer)
-    uploader_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    uploader_id = Column(String(191), ForeignKey("users.id"), nullable=True)
     candidate_id = Column(String(36), ForeignKey("candidates.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -657,8 +657,8 @@ class QCFieldIssue(Base):
     field_name = Column(String(255), nullable=False)
     issue_type = Column(Enum(QCIssueType), nullable=False)
     comment = Column(Text, nullable=True)
-    raised_by = Column(String(36), ForeignKey("users.id"), nullable=False)
-    assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True) # Usually the original verifier
+    raised_by = Column(String(191), ForeignKey("users.id"), nullable=False)
+    assigned_to = Column(String(191), ForeignKey("users.id"), nullable=True) # Usually the original verifier
     status = Column(Enum(QCIssueStatus), default=QCIssueStatus.OPEN, index=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -823,7 +823,7 @@ class AddressVerification(Base):
     distance_meters = Column(Float, nullable=True)
     verification_status = Column(String(50), default="PENDING", index=True) # PENDING, VERIFIED, PARTIALLY_VERIFIED, INSUFFICIENT, ADDRESS_MISMATCH, UNABLE_TO_LOCATE, REJECTED
     verified_at = Column(DateTime, nullable=True)
-    verified_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    verified_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     
     # Questionnaire details
     residence_type = Column(String(50), nullable=True) # Owned, Rented, Company Accommodation
@@ -885,7 +885,7 @@ class AddressChangeRequest(Base):
     
     requested_at = Column(DateTime, default=datetime.utcnow)
     reviewed_at = Column(DateTime, nullable=True)
-    reviewed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    reviewed_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     remarks = Column(Text, nullable=True)
     
     # Relationships
@@ -902,7 +902,7 @@ class CandidateAddressHistory(Base):
     new_address = Column(Text, nullable=False)
     reason = Column(Text, nullable=True)
     changed_at = Column(DateTime, default=datetime.utcnow)
-    changed_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    changed_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     
     candidate = relationship("Candidate")
     changer = relationship("User", foreign_keys=[changed_by])
@@ -915,7 +915,7 @@ class VerificationLinkHistory(Base):
     action = Column(String(50), nullable=False) # GENERATED, RESENT
     generated_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
-    generated_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    generated_by = Column(String(191), ForeignKey("users.id"), nullable=True)
     
     check = relationship("VerificationCheck")
     generator = relationship("User", foreign_keys=[generated_by])

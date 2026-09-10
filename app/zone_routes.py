@@ -33,11 +33,12 @@ class ZoneResponse(BaseModel):
 
 # Require Super Admin for Zone Management
 async def require_super_admin(current_user: models.User = Depends(auth_routes.get_current_user)):
-    if current_user.role.name != "SUPER_ADMIN": # or role.value if Enum
+    role_val = getattr(current_user.role, 'value', getattr(current_user.role, 'name', str(current_user.role)))
+    if role_val != "SUPER_ADMIN":
         raise HTTPException(status_code=403, detail="Only Super Admins can manage zones.")
     return current_user
 
-@router.post("/", response_model=ZoneResponse)
+@router.post("", response_model=ZoneResponse)
 async def create_zone(
     zone: ZoneCreate, 
     db: AsyncSession = Depends(get_async_db),
@@ -63,7 +64,7 @@ async def create_zone(
     await db.refresh(db_zone)
     return db_zone
 
-@router.get("/", response_model=List[ZoneResponse])
+@router.get("", response_model=List[ZoneResponse])
 async def list_zones(
     db: AsyncSession = Depends(get_async_db),
     current_user: models.User = Depends(auth_routes.get_current_user)
@@ -88,7 +89,8 @@ async def get_zone(
     current_user: models.User = Depends(auth_routes.get_current_user)
 ):
     # Authorization
-    if current_user.role.name != "SUPER_ADMIN" and current_user.zone_id != zone_id:
+    role_val = getattr(current_user.role, 'value', getattr(current_user.role, 'name', str(current_user.role)))
+    if role_val != "SUPER_ADMIN" and current_user.zone_id != zone_id:
         raise HTTPException(status_code=403, detail="Not authorized to view this zone")
         
     result = await db.execute(select(models.Zone).filter(models.Zone.id == zone_id))
