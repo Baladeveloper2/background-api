@@ -74,25 +74,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     except JWTError: raise credentials_exception
     except Exception: raise credentials_exception
 
-    # Fast path: return cached user merged into active DB session (avoids DB hit on every request & detached session errors)
+    # Fast path: return cached user (avoids DB hit on every request & detached session errors)
     cached = _cache_get(token)
     if cached is not None:
-        if cached not in db:
-            try:
-                db.add(cached)
-            except Exception:
-                return await db.merge(cached)
         return cached
 
     # Prevent cache stampede on startup using an async lock and double-checked locking
     async with _USER_LOOKUP_LOCK:
         cached = _cache_get(token)
         if cached is not None:
-            if cached not in db:
-                try:
-                    db.add(cached)
-                except Exception:
-                    return await db.merge(cached)
             return cached
 
         # Cache miss — fetch from DB (joinedload avoids a second query round-trip)
@@ -101,6 +91,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         user = res.unique().scalar_one_or_none()
         if user is None: raise credentials_exception
 
+        # Detach user so it doesn't expire when this session closes
+        db.expunge(user)
         _cache_set(token, user)
         return user
 

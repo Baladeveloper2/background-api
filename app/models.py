@@ -510,14 +510,15 @@ class VerificationLog(Base):
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(191), ForeignKey("users.id"), index=True)
+    user_id = Column("userId", String(191), ForeignKey("users.id"), index=True)
     action = Column(String(255), index=True)
-    resource_id = Column(String(100), index=True, nullable=True)
-    details = Column(Text)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    module = Column(String(191), default="SYSTEM", nullable=False)
+    resource_id = Column("recordId", String(100), index=True, nullable=True)
+    details = Column("newValue", Text)
+    timestamp = Column("createdAt", DateTime(timezone=True), server_default=func.now(), index=True)
 
     __table_args__ = (
-        Index("index_audit_resource_time", "resource_id", "timestamp"),
+        Index("index_audit_resource_time", "recordId", "createdAt"),
         {'extend_existing': True}
     )
 
@@ -534,19 +535,25 @@ class CaseComment(Base):
 class Notification(Base):
     __tablename__ = "notifications"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(191), ForeignKey("users.id"), index=True)
+    user_id = Column("recipientId", String(191), ForeignKey("users.id"), index=True)
     title = Column(String(255))
     message = Column(Text)
     category = Column(Enum(NotificationCategory), default=NotificationCategory.SYSTEM_ALERT)
     channel = Column(Enum(NotificationChannel), default=NotificationChannel.SYSTEM)
-    is_read = Column(Integer, default=0, index=True)
-    case_id = Column(String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
+    is_read = Column("isRead", Integer, default=0, index=True)
+    case_id = Column("referenceId", String(36), ForeignKey("cases.id", ondelete="CASCADE"), nullable=True)
     extra_data = Column(JSONEncodedDict, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    created_at = Column("createdAt", DateTime(timezone=True), server_default=func.now(), index=True)
+    
+    # Legacy Prisma columns to prevent insert errors
+    recipient_type = Column("recipientType", String(191), default="USER", nullable=False)
+    type_ = Column("type", String(191), default="INFO", nullable=False)
+    severity = Column("severity", String(191), default="INFO", nullable=False)
+    reference_type = Column("referenceType", String(191), default="CASE", nullable=False)
 
     __table_args__ = (
-        Index("index_user_unread", "user_id", "is_read"),
-        Index("index_notification_user_created", "user_id", "created_at"),
+        Index("index_user_unread", "recipientId", "isRead"),
+        Index("index_notification_user_created", "recipientId", "createdAt"),
         {'extend_existing': True}
     )
 

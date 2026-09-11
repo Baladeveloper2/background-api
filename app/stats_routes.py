@@ -138,16 +138,16 @@ async def get_sidebar_counts(
         fin_q = await db.execute(
             select(func.count(models.Case.id))
             .where(models.Case.status.in_(["Finalized", "finalized"]))
-            .where(func.date(models.Case.updated_at) == today)
+            .where(func.date(models.Case.completed_date) == today)
         )
         result["finalized"] = fin_q.scalar() or 0
 
         # Candidate invitations pending (link not yet shared)
-        inv_q = await db.execute(
-            select(func.count(models.CandidateInvitation.id))
-            .where(models.CandidateInvitation.status == "PENDING")
-        )
-        result["invitations"] = inv_q.scalar() or 0
+        # inv_q = await db.execute(
+        #     select(func.count(models.CandidateInvitation.id))
+        #     .where(models.CandidateInvitation.status == "PENDING")
+        # )
+        result["invitations"] = 0
 
     except Exception as e:
         logger.warning(f"sidebar-counts partial error: {e}")

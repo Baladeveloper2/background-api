@@ -2775,12 +2775,15 @@ async def read_cases(
         stmt = stmt.filter(personal_filter)
         base_count_stmt = base_count_stmt.filter(personal_filter)
         
-    if getattr(current_user, "zone_id", None):
-        stmt = stmt.filter(models.Case.zone_id == current_user.zone_id)
-        base_count_stmt = base_count_stmt.filter(models.Case.zone_id == current_user.zone_id)
-    if getattr(current_user, "branch_id", None):
-        stmt = stmt.filter(models.Case.branch_id == current_user.branch_id)
-        base_count_stmt = base_count_stmt.filter(models.Case.branch_id == current_user.branch_id)
+    # Apply zone and branch restrictions to oversight or customer roles.
+    # Verifiers are strictly limited by explicitly assigned cases, so applying branch filters here would incorrectly hide cross-branch assignments.
+    if is_oversight or is_customer:
+        if getattr(current_user, "zone_id", None):
+            stmt = stmt.filter(models.Case.zone_id == current_user.zone_id)
+            base_count_stmt = base_count_stmt.filter(models.Case.zone_id == current_user.zone_id)
+        if getattr(current_user, "branch_id", None):
+            stmt = stmt.filter(models.Case.branch_id == current_user.branch_id)
+            base_count_stmt = base_count_stmt.filter(models.Case.branch_id == current_user.branch_id)
     
     # 3. Dynamic Filtering
     ALL_FINAL_STATUSES = [

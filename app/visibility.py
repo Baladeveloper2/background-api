@@ -9,7 +9,7 @@ def get_tenant_filters(current_user: models.User, model_class):
     # 1. Super Admin sees everything
     role_name = current_user.role_rel.name.upper() if current_user.role_rel else str(current_user.role).upper()
     
-    if role_name in ["SUPER ADMIN", "SUPER_ADMIN", "SYSTEM ADMIN"]:
+    if role_name in ["SUPER ADMIN", "SUPER_ADMIN", "SYSTEM ADMIN", "ADMIN", "MANAGER"]:
         return True # No filter, all records visible
 
     # 2. Zone Admin sees their Zone, and all Customers/Branches/Users in that Zone

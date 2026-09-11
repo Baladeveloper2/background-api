@@ -147,7 +147,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Total-Count"]
 )
-
 # Debug/Error Logging Middleware
 @app.middleware("http")
 async def log_errors(request, call_next):
